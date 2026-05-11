@@ -22,7 +22,7 @@ if not os.path.exists("produccion.db"):
 conn = sqlite3.connect("produccion.db")
 
 df = pd.read_sql_query(
-    'SELECT * FROM "produccion"',
+    'SELECT * FROM "TMPL-CONST"',
     conn
 )
 
