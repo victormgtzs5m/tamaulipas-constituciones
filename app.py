@@ -5,6 +5,26 @@ import plotly.graph_objects as go
 import plotly.express as px
 from pathlib import Path
 from plotly.subplots import make_subplots
+import pandas as pd
+import sqlite3
+import requests
+import os
+
+sharepoint_url = "https://c5mdelgolfo.sharepoint.com/:u:/s/TamaulipasConstituciones/IQBUYd6tezWuSYlWmqcveGcZAbrlV3uCJRbSdCrMn7uz2lM?e=5oTqMr"
+
+if not os.path.exists("produccion.db"):
+
+    response = requests.get(sharepoint_url)
+
+    with open("produccion.db", "wb") as f:
+        f.write(response.content)
+
+conn = sqlite3.connect("produccion.db")
+
+df = pd.read_sql(
+    "SELECT * FROM produccion",
+    conn
+)
 
 st.set_page_config(
     page_title="Visualizador de Producción",
