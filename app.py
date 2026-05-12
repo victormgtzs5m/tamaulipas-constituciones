@@ -209,6 +209,7 @@ except Exception as e:
 # COMPLETAR FECHAS MENSUALES
 # =============================
 def completar_fechas_mensuales(data):
+
     data = data.copy()
     data[COL_FECHA] = pd.to_datetime(data[COL_FECHA])
 
@@ -228,28 +229,64 @@ def completar_fechas_mensuales(data):
     )
 
     data = data.set_index(COL_FECHA)
+
+    # REINDEX
     data = data.reindex(fechas_completas)
+
     data.index.name = COL_FECHA
     data = data.reset_index()
 
+    # =========================
+    # RELLENAR IDENTIFICADORES
+    # =========================
     data[COL_POZO] = data[COL_POZO].fillna(pozo)
 
     if COL_YAC in data.columns:
         data[COL_YAC] = data[COL_YAC].fillna(yacimiento)
 
-    columnas_gastos = [COL_QO, COL_QW, COL_QG, COL_DIAS, COL_WC, COL_RGA]
-    columnas_acumuladas = [COL_NP, COL_WP, COL_GP]
+    # =========================
+    # COLUMNAS ORIGINALES
+    # =========================
+    columnas_originales = [
+        COL_DIAS,
+        COL_ACEITE,
+        COL_AGUA,
+        COL_GAS
+    ]
+
+    for col in columnas_originales:
+        if col in data.columns:
+            data[col] = data[col].fillna(0)
+
+    # =========================
+    # GASTOS
+    # =========================
+    columnas_gastos = [
+        COL_QO,
+        COL_QW,
+        COL_QG,
+        COL_WC,
+        COL_RGA
+    ]
 
     for col in columnas_gastos:
         if col in data.columns:
             data[col] = data[col].fillna(0)
+
+    # =========================
+    # ACUMULADAS
+    # =========================
+    columnas_acumuladas = [
+        COL_NP,
+        COL_WP,
+        COL_GP
+    ]
 
     for col in columnas_acumuladas:
         if col in data.columns:
             data[col] = data[col].ffill().fillna(0)
 
     return data
-
 # =============================
 # ENCABEZADO
 # =============================
