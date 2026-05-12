@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sqlite3
 
+
 # =============================
 # CONFIGURACIÓN DE PÁGINA
 # =============================
@@ -18,7 +19,7 @@ st.set_page_config(
 # =============================
 # BASE DE DATOS LOCAL
 # =============================
-ruta_db = r"C:\Users\VMGS\OneDrive - CONSORCIO PETROLERO 5M DEL GOLFO\Escritorio\Resplado C5M\Web\prod2.db"
+ruta_db = r"C:\Users\VMGS\OneDrive - CONSORCIO PETROLERO 5M DEL GOLFO\Escritorio\Resplado C5M\Web\producion.db"
 
 # =============================
 # COLUMNAS
