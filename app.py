@@ -477,7 +477,7 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
         family="Arial Black",
         size=16,
         color="black"
-    )
+    ),
     )
 
     fig.update_xaxes(
