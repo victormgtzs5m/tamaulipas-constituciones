@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed"
 )
-#st.cache_data.clear()
+st.cache_data.clear()
 
 # =========================================================
 # RUTA DE LA BASE DE DATOS
