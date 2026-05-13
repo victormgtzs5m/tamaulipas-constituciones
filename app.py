@@ -199,14 +199,16 @@ def completar_fechas_pozo(df_pozo: pd.DataFrame) -> pd.DataFrame:
     )
 
     base = pd.DataFrame({COL_FECHA: fechas_completas})
-
     df_out = base.merge(df_pozo, on=COL_FECHA, how="left")
 
     df_out[COL_POZO] = df_out[COL_POZO].fillna(pozo)
     df_out[COL_YAC] = df_out[COL_YAC].fillna(yac)
     df_out[COL_CONTA] = df_out[COL_CONTA].fillna(conta)
 
-    df_out[COL_DIAS] = df_out[COL_FECHA].dt.days_in_month
+    # IMPORTANTE:
+    # Respeta los DIAS reales de la base.
+    # Solo pone 0 días en meses inventados sin producción.
+    df_out[COL_DIAS] = df_out[COL_DIAS].fillna(0)
 
     for col in [COL_ACEITE, COL_GAS, COL_AGUA]:
         df_out[col] = df_out[col].fillna(0)
@@ -490,21 +492,13 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
 
     fig.update_yaxes(
         title_text=y_title,
-        title_font=dict(
-        family="Arial Black",
-        size=22
-        ),
-         tickvals=[0.1, 1, 10, 100],
-
-        ticktext=["0.1", "1", "10", "100"],
-        
         type="log" if semilog else "linear",
         showgrid=True,
         gridcolor="#EAECEE",
         zeroline=False,
         separatethousands=True,
         tickfont=dict(size=16)
-        )
+    )
 
     return fig
 
