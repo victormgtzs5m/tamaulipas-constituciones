@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed"
 )
-st.cache_data.clear()
+#st.cache_data.clear()
 
 # =========================================================
 # RUTA DE LA BASE DE DATOS
@@ -281,7 +281,7 @@ st.markdown(
 )
 
 st.markdown(
-    "<div class='subtitle'>Producción diaria promedio mensual calculada desde volúmenes mensuales en m³</div>",
+    "<div class='subtitle'>Producción diaria promedio mensual</div>",
     unsafe_allow_html=True
 )
 
@@ -329,7 +329,7 @@ with f3:
 with f4:
     vista = st.radio(
         "Tipo de análisis",
-        ["Pozo individual", "Comparativo multipozo"],
+        ["Producción por pozo", "Comparativa por pozo"],
         horizontal=True
     )
 
@@ -392,7 +392,7 @@ if vista == "Pozo individual":
     k5.metric("Último Qw", f"{last_row[COL_QW]:,.1f} bpd")
     k6.metric("Último Qg", f"{last_row[COL_QG]:,.1f} mpcd")
     k7.metric("Np total", f"{dfp[COL_NP].iloc[-1]:,.2f} mbl")
-    k8.metric("Wp / Gp", f"{dfp[COL_WP].iloc[-1]:,.2f} / {dfp[COL_GP].iloc[-1]:,.2f}")
+    k8.metric("Wp / Gp", f"{dfp[COL_WP].iloc[-1]:,.2f} mbl/ {dfp[COL_GP].iloc[-1]:,.2f} mmpc")
 
 # =========================================================
 # FUNCIÓN PARA GRÁFICAS COMPARATIVAS
@@ -419,7 +419,7 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
                 mode="lines+markers",
                 name=str(pozo),
                 line=dict(width=2.5),
-                marker=dict(size=5),
+                marker=dict(size=3),
                 connectgaps=False,
                 hovertemplate=
                     "<b>Pozo: %{fullData.name}</b><br>" +
@@ -472,7 +472,7 @@ if vista == "Pozo individual":
             mode="lines+markers",
             name="Qo (bpd)",
             line=dict(width=3, color="#27AE60"),
-            marker=dict(size=5),
+            marker=dict(size=3),
             fill="tozeroy",
             fillcolor="rgba(39,174,96,0.25)",
             connectgaps=False
@@ -487,7 +487,7 @@ if vista == "Pozo individual":
             mode="lines+markers",
             name="% Agua",
             line=dict(width=2, color="#0000FF"),
-            marker=dict(size=5),
+            marker=dict(size=3),
             connectgaps=False
         ),
         secondary_y=False
@@ -499,8 +499,8 @@ if vista == "Pozo individual":
             y=dfp[COL_NP],
             mode="lines+markers",
             name="Np (mbl)",
-            line=dict(width=3, color="#1B4F72"),
-            marker=dict(size=5),
+            line=dict(width=3, color="#008000"),
+            marker=dict(size=3),
             connectgaps=False
         ),
         secondary_y=True
@@ -513,14 +513,14 @@ if vista == "Pozo individual":
             mode="lines+markers",
             name="Qg (mpcd)",
             line=dict(width=3, color="#FF0000"),
-            marker=dict(size=5),
+            marker=dict(size=3),
             connectgaps=False
         ),
         secondary_y=True
     )
 
     fig1.update_layout(
-        title="Gasto de aceite, % Agua, acumulada de aceite y gasto de gas",
+        title="Gasto de aceite, % Agua, Acumulada de aceite y Gasto de gas",
         template="plotly_white",
         hovermode="x unified",
         height=520,
