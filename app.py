@@ -69,6 +69,7 @@ COL_FECHA_FILTRO = "FECHA_FILTRO"
 
 COL_TIEMPO_NORM = "Tiempo normalizado"
 
+
 REQUIRED_COLS = [
     COL_POZO, COL_FECHA, COL_YAC, COL_CONTA,
     COL_DIAS, COL_ACEITE, COL_GAS, COL_AGUA
@@ -441,6 +442,8 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
 
     fig = go.Figure()
 
+    df_promedio = pd.DataFrame()
+
     for pozo in pozos_sel_comp:
         dfi = data[data[COL_POZO].astype(str) == str(pozo)].copy()
         dfi = dfi.sort_values(COL_FECHA).reset_index(drop=True)
@@ -450,6 +453,19 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
 
         # Tiempo normalizado a cero
         dfi[COL_TIEMPO_NORM] = range(len(dfi))
+
+        tmp = dfi[[COL_TIEMPO_NORM, y_col]].copy()
+
+        tmp.columns = [COL_TIEMPO_NORM, pozo]
+
+        if df_promedio.empty:
+            df_promedio = tmp
+        else:
+            df_promedio = df_promedio.merge(
+                tmp,
+                on=COL_TIEMPO_NORM,
+                how="outer"
+            )
 
         if normalizar_tiempo:
             x_values = dfi[COL_TIEMPO_NORM]
@@ -480,7 +496,39 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
                     f"{y_title}: " + "%{y:,.2f}<extra></extra>"
             )
         )
+        
+    if normalizar_tiempo and not df_promedio.empty:
 
+    cols_prom = [
+        c for c in df_promedio.columns
+        if c != COL_TIEMPO_NORM
+    ]
+
+    if semilog:
+        df_promedio[cols_prom] = (
+            df_promedio[cols_prom]
+            .replace(0, np.nan)
+        )
+
+    df_promedio["PROMEDIO"] = (
+        df_promedio[cols_prom]
+        .mean(axis=1, skipna=True)
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=df_promedio[COL_TIEMPO_NORM],
+            y=df_promedio["PROMEDIO"],
+            mode="lines",
+            name="PROMEDIO",
+            line=dict(
+                width=5,
+                color="black",
+                dash="dash"
+            )
+        )
+    )
+    
     fig.update_layout(
         title=dict(text=title, font=dict(size=18, family="Arial", color="#17202A")),
         template="plotly_white",
