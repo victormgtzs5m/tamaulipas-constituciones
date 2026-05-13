@@ -67,6 +67,8 @@ COL_WC = "%Agua"
 COL_RGA = "RGA (pc/bl)"
 COL_FECHA_FILTRO = "FECHA_FILTRO"
 
+COL_TIEMPO_NORM = "Tiempo normalizado"
+
 REQUIRED_COLS = [
     COL_POZO, COL_FECHA, COL_YAC, COL_CONTA,
     COL_DIAS, COL_ACEITE, COL_GAS, COL_AGUA
@@ -435,7 +437,7 @@ if vista == "Producción por pozo":
 # =========================================================
 # FUNCIÓN PARA GRÁFICAS COMPARATIVAS
 # =========================================================
-def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False):
+def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False, normalizar_tiempo=False):
 
     fig = go.Figure()
 
@@ -446,22 +448,35 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
         if dfi.empty:
             continue
 
+        # Tiempo normalizado a cero
+        dfi[COL_TIEMPO_NORM] = range(len(dfi))
+
+        if normalizar_tiempo:
+            x_values = dfi[COL_TIEMPO_NORM]
+            x_label = "Tiempo normalizado"
+            hover_x = "Mes normalizado: %{x}"
+        else:
+            x_values = dfi[COL_FECHA]
+            x_label = "Fecha"
+            hover_x = "Fecha: %{x|%d/%m/%Y}"
+
         y_values = dfi[y_col].copy()
+
         if semilog:
             y_values = y_values.replace(0, np.nan)
 
         fig.add_trace(
             go.Scatter(
-                x=dfi[COL_FECHA],
+                x=x_values,
                 y=y_values,
                 mode="lines+markers",
                 name=str(pozo),
                 line=dict(width=2.5),
-                marker=dict(size=3),
+                marker=dict(size=4),
                 connectgaps=False,
                 hovertemplate=
                     "<b>Pozo: %{fullData.name}</b><br>" +
-                    "Fecha: %{x|%d/%m/%Y}<br>" +
+                    hover_x + "<br>" +
                     f"{y_title}: " + "%{y:,.2f}<extra></extra>"
             )
         )
@@ -476,41 +491,37 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
         plot_bgcolor="white",
         paper_bgcolor="white",
         font=dict(
-        family="Tahoma",
-        size=16,
-        color="black"
-    ),
+            family="Tahoma",
+            size=16,
+            color="black"
+        )
     )
 
     fig.update_xaxes(
-        title_text="<b>Fecha</b>",
-        tickformat="%d/%m/%Y",
-        showgrid=True,tickfont=dict(size=18, color="black"),showline=True,
-        linewidth=0.5,
-        linecolor='black',
+        title_text=f"<b>{x_label}</b>",
+        tickformat="%d/%m/%Y" if not normalizar_tiempo else None,
+        showgrid=True,
         gridcolor="#EAECEE",
-        zeroline=False
+        zeroline=False,
+        tickfont=dict(size=18, color="black"),
+        showline=True,
+        linewidth=0.5,
+        linecolor="black"
     )
 
     fig.update_yaxes(
-    title_text=y_title,
-
-    type="log" if semilog else "linear",
-
-    tickvals=[0.1, 1, 10, 100, 1000] if semilog else None,
-    ticktext=["0.1", "1", "10", "100", "1000"] if semilog else None,
-
-    showgrid=True,
-    gridcolor="#EAECEE",
-    zeroline=False,
-
-    tickfont=dict(size=19, color="black"),
-
-    showline=True,
-    linewidth=0.5,
-    linecolor='black',
-
-    separatethousands=True
+        title_text=f"<b>{y_title}</b>",
+        type="log" if semilog else "linear",
+        tickvals=[0.1, 1, 10, 100, 1000] if semilog else None,
+        ticktext=["0.1", "1", "10", "100", "1000"] if semilog else None,
+        showgrid=True,
+        gridcolor="#EAECEE",
+        zeroline=False,
+        separatethousands=True,
+        tickfont=dict(size=18, color="black"),
+        showline=True,
+        linewidth=0.5,
+        linecolor="black"
     )
 
     return fig
@@ -587,9 +598,9 @@ if vista == "Producción por pozo":
 
     fig1.update_xaxes(title_text="<b>Fecha</b>", title_font=dict(size=22), 
     tickformat="%d/%m/%Y", tickfont=dict(size=18, color="black"),showline=True,
-    linewidth=0.5,
+    linewidth=1,
     linecolor='black')
-    
+
     fig1.update_yaxes(title_text="<b>Qo (bpd) / % Agua</b>",title_font=dict(size=22),
      secondary_y=False, tickfont=dict(size=18, color="black"),showline=True,
     linewidth=1,
@@ -638,12 +649,8 @@ if vista == "Producción por pozo":
         margin=dict(l=35, r=35, t=60, b=35)
     )
 
-    fig2.update_xaxes(title_text="<b>Fecha</b>", tickformat="%d/%m/%Y", tickfont=dict(size=18, color="black"),showline=True,
-    linewidth=0.5,
-    linecolor='black')
-    fig2.update_yaxes(title_text="Qw (bpd)", secondary_y=False, tickfont=dict(size=18, color="black"),showline=True,
-    linewidth=0.5,
-    linecolor='black')
+    fig2.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y")
+    fig2.update_yaxes(title_text="Qw (bpd)", secondary_y=False)
     fig2.update_yaxes(title_text="Wp (mbl)", secondary_y=True)
 
     st.plotly_chart(fig2, use_container_width=True)
@@ -688,12 +695,8 @@ if vista == "Producción por pozo":
         margin=dict(l=35, r=35, t=60, b=35)
     )
 
-    fig3.update_xaxes(title_text="<b>Fecha</b>", tickformat="%d/%m/%Y", tickfont=dict(size=18, color="black"),showline=True,
-    linewidth=0.5,
-    linecolor='black')
-    fig3.update_yaxes(title_text="RGA (pc/bl)", secondary_y=False, tickfont=dict(size=18, color="black"),showline=True,
-    linewidth=0.5,
-    linecolor='black')
+    fig3.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y")
+    fig3.update_yaxes(title_text="RGA (pc/bl)", secondary_y=False)
     fig3.update_yaxes(title_text="Gp (mmpc)", secondary_y=True)
 
     st.plotly_chart(fig3, use_container_width=True)
@@ -737,9 +740,19 @@ elif vista == "Comparativa por pozo":
     pozos_comp = sorted(df_base_filtro[COL_POZO].dropna().astype(str).str.strip().unique())
 
     pozos_sel_comp = st.multiselect(
-        "Selecciona pozos para comparar",
-        pozos_comp,
-        default=[str(pozo_sel).strip()] if str(pozo_sel).strip() in pozos_comp else []
+    "Selecciona pozos para comparar",
+    pozos_comp,
+    default=[str(pozo_sel).strip()] if str(pozo_sel).strip() in pozos_comp else []
+    )
+
+    modo_comparacion = st.radio(
+        "Modo de comparación",
+        ["Fecha real", "Normalizado a tiempo 0"],
+        horizontal=True
+    )
+
+    normalizar_tiempo = (
+        modo_comparacion == "Normalizado a tiempo 0"
     )
 
     if pozos_sel_comp:
