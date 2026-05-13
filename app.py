@@ -472,7 +472,7 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(l=35, r=35, t=60, b=35),
         plot_bgcolor="white",
-        paper_bgcolor="white"
+        paper_bgcolor="white",
         font=dict(
         family="Arial Black",
         size=16,
