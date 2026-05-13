@@ -576,7 +576,12 @@ if vista == "Producción por pozo":
     tickformat="%d/%m/%Y", tickfont=dict(size=18, color="black"),showline=True,
     linewidth=2,
     linecolor='black')
-    fig1.update_yaxes(title_text="Qo (bpd) / % Agua", secondary_y=False)
+    
+    fig1.update_yaxes(title_text="<b>Qo (bpd) / % Agua</b>",title_font=dict(size=22),
+     secondary_y=False, tickfont=dict(size=18, color="black"),showline=True,
+    linewidth=2,
+    linecolor='black')
+
     fig1.update_yaxes(title_text="Np (mbl) / Qg (mpcd)", secondary_y=True)
 
     st.plotly_chart(fig1, use_container_width=True)
