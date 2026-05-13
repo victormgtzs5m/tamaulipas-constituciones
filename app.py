@@ -493,7 +493,7 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
     )
 
     fig.update_yaxes(
-        title_text=<b>y_title</b>,
+        title_text=y_title,
         type="log" if semilog else "linear",
         showgrid=True,
         gridcolor="#EAECEE",
