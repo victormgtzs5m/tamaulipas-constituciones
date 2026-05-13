@@ -441,8 +441,9 @@ if vista == "Producción por pozo":
 def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False, normalizar_tiempo=False):
 
     fig = go.Figure()
-
     df_promedio = pd.DataFrame()
+
+    x_label = "Tiempo normalizado" if normalizar_tiempo else "Fecha"
 
     for pozo in pozos_sel_comp:
         dfi = data[data[COL_POZO].astype(str) == str(pozo)].copy()
@@ -451,11 +452,9 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
         if dfi.empty:
             continue
 
-        # Tiempo normalizado a cero
         dfi[COL_TIEMPO_NORM] = range(len(dfi))
 
         tmp = dfi[[COL_TIEMPO_NORM, y_col]].copy()
-
         tmp.columns = [COL_TIEMPO_NORM, pozo]
 
         if df_promedio.empty:
@@ -469,11 +468,9 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
 
         if normalizar_tiempo:
             x_values = dfi[COL_TIEMPO_NORM]
-            x_label = "Tiempo normalizado"
             hover_x = "Mes normalizado: %{x}"
         else:
             x_values = dfi[COL_FECHA]
-            x_label = "Fecha"
             hover_x = "Fecha: %{x|%d/%m/%Y}"
 
         y_values = dfi[y_col].copy()
@@ -496,8 +493,9 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
                     f"{y_title}: " + "%{y:,.2f}<extra></extra>"
             )
         )
-        
-        if normalizar_tiempo and not df_promedio.empty:
+
+    # PROMEDIO SOLO CUANDO ESTÁ NORMALIZADO
+    if normalizar_tiempo and not df_promedio.empty:
 
         cols_prom = [
             c for c in df_promedio.columns
@@ -505,15 +503,9 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
         ]
 
         if semilog:
-            df_promedio[cols_prom] = (
-                df_promedio[cols_prom]
-                .replace(0, np.nan)
-            )
+            df_promedio[cols_prom] = df_promedio[cols_prom].replace(0, np.nan)
 
-        df_promedio["PROMEDIO"] = (
-            df_promedio[cols_prom]
-            .mean(axis=1, skipna=True)
-        )
+        df_promedio["PROMEDIO"] = df_promedio[cols_prom].mean(axis=1, skipna=True)
 
         fig.add_trace(
             go.Scatter(
