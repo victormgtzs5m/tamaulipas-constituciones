@@ -574,7 +574,7 @@ if vista == "Producción por pozo":
 
     fig1.update_xaxes(title_text="<b>Fecha</b>", title_font=dict(size=22), 
     tickformat="%d/%m/%Y", tickfont=dict(size=18, color="black"),showline=True,
-    linewidth=1,
+    linewidth=0.5,
     linecolor='black')
     
     fig1.update_yaxes(title_text="<b>Qo (bpd) / % Agua</b>",title_font=dict(size=22),
