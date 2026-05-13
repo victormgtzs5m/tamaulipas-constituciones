@@ -16,14 +16,24 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 st.cache_data.clear()
+
 # =========================================================
 # RUTA DE LA BASE DE DATOS
 # Cambia esta ruta si tu archivo .db está en otra carpeta.
 # =========================================================
-ruta_db = r"C:\Users\VMGS\OneDrive - CONSORCIO PETROLERO 5M DEL GOLFO\Escritorio\Resplado C5M\Web\prod.db"
+
+# Ruta de la base SQLite
+ruta_db = "prod.db"
+
+# Nombre de la tabla
+TABLA_PROD = "PROD"
+
+
+conn = sqlite3.connect(ruta_db)
+#ruta_db = r"C:\Users\VMGS\OneDrive - CONSORCIO PETROLERO 5M DEL GOLFO\Escritorio\Resplado C5M\Web\prod.db"
 
 # Nombre de la tabla en SQLite
-TABLA_PROD = "PROD"
+#TABLA_PROD = "PROD"
 
 # =========================================================
 # COLUMNAS DE LA BASE NUEVA
