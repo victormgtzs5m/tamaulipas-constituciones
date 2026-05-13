@@ -625,8 +625,12 @@ if vista == "Producción por pozo":
         margin=dict(l=35, r=35, t=60, b=35)
     )
 
-    fig2.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y")
-    fig2.update_yaxes(title_text="Qw (bpd)", secondary_y=False)
+    fig2.update_xaxes(title_text="<b>Fecha</b>", tickformat="%d/%m/%Y", tickfont=dict(size=18, color="black"),showline=True,
+    linewidth=0.5,
+    linecolor='black')
+    fig2.update_yaxes(title_text="Qw (bpd)", secondary_y=False, tickfont=dict(size=18, color="black"),showline=True,
+    linewidth=0.5,
+    linecolor='black')
     fig2.update_yaxes(title_text="Wp (mbl)", secondary_y=True)
 
     st.plotly_chart(fig2, use_container_width=True)
@@ -671,8 +675,12 @@ if vista == "Producción por pozo":
         margin=dict(l=35, r=35, t=60, b=35)
     )
 
-    fig3.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y")
-    fig3.update_yaxes(title_text="RGA (pc/bl)", secondary_y=False)
+    fig3.update_xaxes(title_text="<b>Fecha</b>", tickformat="%d/%m/%Y", tickfont=dict(size=18, color="black"),showline=True,
+    linewidth=0.5,
+    linecolor='black')
+    fig3.update_yaxes(title_text="RGA (pc/bl)", secondary_y=False, tickfont=dict(size=18, color="black"),showline=True,
+    linewidth=0.5,
+    linecolor='black')
     fig3.update_yaxes(title_text="Gp (mmpc)", secondary_y=True)
 
     st.plotly_chart(fig3, use_container_width=True)
