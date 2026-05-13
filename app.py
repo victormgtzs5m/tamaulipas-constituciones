@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sqlite3
 
+
 # =========================================================
 # CONFIGURACIÓN GENERAL
 # =========================================================
@@ -14,15 +15,15 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed"
 )
-
+st.cache_data.clear()
 # =========================================================
 # RUTA DE LA BASE DE DATOS
 # Cambia esta ruta si tu archivo .db está en otra carpeta.
 # =========================================================
-ruta_db = r"C:\Users\VMGS\OneDrive - CONSORCIO PETROLERO 5M DEL GOLFO\Escritorio\Resplado C5M\Web\proyecto2.db"
+ruta_db = r"C:\Users\VMGS\OneDrive - CONSORCIO PETROLERO 5M DEL GOLFO\Escritorio\Resplado C5M\Web\prod.db"
 
 # Nombre de la tabla en SQLite
-TABLA_PROD = "produccion"
+TABLA_PROD = "PROD"
 
 # =========================================================
 # COLUMNAS DE LA BASE NUEVA
@@ -152,7 +153,7 @@ def convertir_fechas(serie: pd.Series) -> pd.Series:
     """Convierte fechas robustamente: dd/mm/yyyy, yyyy-mm-dd y serial Excel."""
     s = serie.copy()
 
-    fecha = pd.to_datetime(s, errors="coerce", dayfirst=True)
+    fecha = pd.to_datetime(s, errors="coerce", dayfirst=False)
 
     faltan = fecha.isna()
     if faltan.any():
@@ -171,85 +172,55 @@ def convertir_fechas(serie: pd.Series) -> pd.Series:
     return fecha
 
 
-def moda_o_primero(s: pd.Series):
-    """Regresa la moda si existe; si no, el primer valor no nulo."""
-    s = s.dropna()
-    if s.empty:
-        return ""
-    m = s.mode()
-    return m.iloc[0] if not m.empty else s.iloc[0]
-
-
-def completar_fechas_por_pozo(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Completa meses faltantes por pozo.
-    - Cada pozo conserva su rango real: mes mínimo a mes máximo.
-    - Si falta un mes intermedio, se agrega con DIAS, ACEITE, AGUA y GAS = 0.
-    - YACIMIENTO y CONTA se rellenan con el valor más frecuente del pozo.
-    - No se inventa producción.
-    """
-    salida = []
-
-    for pozo, dfi in df.groupby(COL_POZO, dropna=False):
-        dfi = dfi.sort_values(COL_FECHA).copy()
-
-        yac_pozo = moda_o_primero(dfi[COL_YAC])
-        conta_pozo = moda_o_primero(dfi[COL_CONTA])
-
-        dfi["PERIODO_MES"] = dfi[COL_FECHA].dt.to_period("M")
-
-        # Si hay más de un registro del mismo pozo en el mismo mes,
-        # se consolidan los volúmenes mensuales.
-        dfi_mes = (
-            dfi.groupby([COL_POZO, "PERIODO_MES"], as_index=False)
-            .agg({
-                COL_FECHA: "min",
-                COL_YAC: moda_o_primero,
-                COL_CONTA: moda_o_primero,
-                COL_DIAS: "sum",
-                COL_ACEITE: "sum",
-                COL_GAS: "sum",
-                COL_AGUA: "sum"
-            })
-        )
-
-        periodo_min = dfi_mes["PERIODO_MES"].min()
-        periodo_max = dfi_mes["PERIODO_MES"].max()
-
-        calendario = pd.DataFrame({
-            COL_POZO: pozo,
-            "PERIODO_MES": pd.period_range(periodo_min, periodo_max, freq="M")
-        })
-
-        dfi_full = calendario.merge(
-            dfi_mes,
-            on=[COL_POZO, "PERIODO_MES"],
-            how="left"
-        )
-
-        # Para meses agregados se asigna el día 1 del mes.
-        dfi_full[COL_FECHA] = dfi_full[COL_FECHA].fillna(
-            dfi_full["PERIODO_MES"].dt.to_timestamp(how="start")
-        )
-
-        dfi_full[COL_YAC] = dfi_full[COL_YAC].fillna(yac_pozo)
-        dfi_full[COL_CONTA] = dfi_full[COL_CONTA].fillna(conta_pozo)
-
-        for col in [COL_DIAS, COL_ACEITE, COL_GAS, COL_AGUA]:
-            dfi_full[col] = dfi_full[col].fillna(0)
-
-        dfi_full = dfi_full.drop(columns=["PERIODO_MES"])
-        salida.append(dfi_full)
-
-    return pd.concat(salida, ignore_index=True)
-
-
 # =========================================================
-# CARGA, COMPLETADO DE FECHAS Y CÁLCULOS
+# CARGA BASE Y CÁLCULOS DINÁMICOS
 # =========================================================
+def calcular_columnas_produccion(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcula conversiones, gastos, acumuladas, RGA y %Agua.
+    NO completa fechas. Grafica solamente los registros reales existentes en la base.
+    """
+    df = df.copy()
+    df = df.sort_values([COL_POZO, COL_FECHA]).reset_index(drop=True)
+    df[COL_FECHA_FILTRO] = df[COL_FECHA]
+
+    # Volúmenes mensuales convertidos
+    df[COL_ACEITE_BBL] = df[COL_ACEITE] * M3_A_BBL
+    df[COL_AGUA_BBL] = df[COL_AGUA] * M3_A_BBL
+    df[COL_GAS_PC] = df[COL_GAS] * M3_A_PC
+
+    # Gastos promedio diarios
+    dias_validos = df[COL_DIAS].replace(0, np.nan)
+    df[COL_QO] = df[COL_ACEITE_BBL] / dias_validos
+    df[COL_QW] = df[COL_AGUA_BBL] / dias_validos
+    df[COL_QG_PCD] = df[COL_GAS_PC] / dias_validos
+    df[COL_QG] = df[COL_QG_PCD] / 1000.0
+
+    for col in [COL_QO, COL_QW, COL_QG_PCD, COL_QG]:
+        df[col] = df[col].replace([np.inf, -np.inf], np.nan).fillna(0)
+
+    # Acumuladas por pozo usando únicamente registros reales de la base
+    df[COL_NP] = df.groupby(COL_POZO)[COL_ACEITE_BBL].cumsum() / 1000.0
+    df[COL_WP] = df.groupby(COL_POZO)[COL_AGUA_BBL].cumsum() / 1000.0
+    df[COL_GP] = df.groupby(COL_POZO)[COL_GAS_PC].cumsum() / 1_000_000.0
+
+    # RGA y corte de agua
+    df[COL_RGA] = np.where(df[COL_QO] > 0, df[COL_QG_PCD] / df[COL_QO], 0)
+    df[COL_WC] = np.where(
+        (df[COL_QO] + df[COL_QW]) > 0,
+        (df[COL_QW] / (df[COL_QO] + df[COL_QW])) * 100,
+        0
+    )
+
+    return df.replace([np.inf, -np.inf], 0).fillna(0)
+
+
 @st.cache_data(show_spinner="Cargando base de datos...")
 def load_data() -> pd.DataFrame:
-
+    """
+    Carga la base original sin completar fechas.
+    El visualizador trabaja solamente con los registros reales de SQLite.
+    """
     with sqlite3.connect(ruta_db) as conn:
         df = pd.read_sql_query(f'SELECT * FROM "{TABLA_PROD}"', conn)
 
@@ -263,7 +234,6 @@ def load_data() -> pd.DataFrame:
             f"{missing}. La tabla debe tener: Terminacion, Fecha, Yacimiento, Conta, Dias, Aceite, Gas, Agua."
         )
 
-    # Dejar únicamente las columnas necesarias de la base nueva
     df = df[REQUIRED_COLS].copy()
 
     # Limpieza básica
@@ -274,66 +244,14 @@ def load_data() -> pd.DataFrame:
     df[COL_FECHA] = convertir_fechas(df[COL_FECHA])
     df = df.dropna(subset=[COL_POZO, COL_FECHA])
     df = df[df[COL_POZO].str.upper().ne("NAN")]
-
-    # Normaliza fecha sin hora
     df[COL_FECHA] = df[COL_FECHA].dt.normalize()
+    df[COL_FECHA_FILTRO] = df[COL_FECHA]
 
-    # Numéricos: la base trae volúmenes mensuales en m3 y días del mes
     for col in [COL_DIAS, COL_ACEITE, COL_GAS, COL_AGUA]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    # Completar fechas truncadas por pozo
-    df = completar_fechas_por_pozo(df)
+    # No se completa ni se inventa ninguna fecha.
     df = df.sort_values([COL_POZO, COL_FECHA]).reset_index(drop=True)
-    df[COL_FECHA_FILTRO] = df[COL_FECHA]
-
-    # =====================================================
-    # CONVERSIONES DE VOLUMEN MENSUAL
-    # =====================================================
-    # ACEITE y AGUA: m3 -> barriles
-    # GAS: m3 -> pies cúbicos
-    df[COL_ACEITE_BBL] = df[COL_ACEITE] * M3_A_BBL
-    df[COL_AGUA_BBL] = df[COL_AGUA] * M3_A_BBL
-    df[COL_GAS_PC] = df[COL_GAS] * M3_A_PC
-
-    # =====================================================
-    # GASTOS DIARIOS PROMEDIO DEL MES
-    # =====================================================
-    dias_validos = df[COL_DIAS].replace(0, np.nan)
-
-    df[COL_QO] = df[COL_ACEITE_BBL] / dias_validos
-    df[COL_QW] = df[COL_AGUA_BBL] / dias_validos
-    df[COL_QG_PCD] = df[COL_GAS_PC] / dias_validos
-    df[COL_QG] = df[COL_QG_PCD] / 1000.0
-
-    # Las fechas agregadas artificialmente tienen DIAS = 0 y producción = 0,
-    # por lo tanto sus gastos se dejan en cero.
-    for col in [COL_QO, COL_QW, COL_QG_PCD, COL_QG]:
-        df[col] = df[col].replace([np.inf, -np.inf], np.nan).fillna(0)
-
-    # =====================================================
-    # ACUMULADAS
-    # =====================================================
-    df[COL_NP] = df.groupby(COL_POZO)[COL_ACEITE_BBL].cumsum() / 1000.0
-    df[COL_WP] = df.groupby(COL_POZO)[COL_AGUA_BBL].cumsum() / 1000.0
-    df[COL_GP] = df.groupby(COL_POZO)[COL_GAS_PC].cumsum() / 1_000_000.0
-
-    # =====================================================
-    # RGA Y CORTE DE AGUA
-    # =====================================================
-    df[COL_RGA] = np.where(
-        df[COL_QO] > 0,
-        df[COL_QG_PCD] / df[COL_QO],
-        0
-    )
-
-    df[COL_WC] = np.where(
-        (df[COL_QO] + df[COL_QW]) > 0,
-        (df[COL_QW] / (df[COL_QO] + df[COL_QW])) * 100,
-        0
-    )
-
-    df = df.replace([np.inf, -np.inf], 0).fillna(0)
 
     return df
 
@@ -362,34 +280,34 @@ st.markdown(
 # =========================================================
 st.markdown("<div class='filter-box'>", unsafe_allow_html=True)
 
-f1, f2, f3, f4, f5 = st.columns([1.7, 1.7, 2.0, 2.2, 2.2])
+# No se usa filtro de CONTA.
+# No se completan fechas.
+# Se grafica solamente lo que existe en la base.
+f1, f2, f3, f4 = st.columns([1.7, 2.3, 2.3, 2.2])
 
 with f1:
     yacs = sorted(df[COL_YAC].dropna().astype(str).unique())
     yac_sel = st.multiselect("Yacimiento", yacs, default=yacs)
 
-# Filtro por yacimiento
-df_yac = df[df[COL_YAC].astype(str).isin(yac_sel)].copy() if yac_sel else df.copy()
+# El filtro de Yacimiento solo se usa para listar/seleccionar pozos.
+df_base_filtro = df[df[COL_YAC].astype(str).isin(yac_sel)].copy() if yac_sel else df.copy()
 
 with f2:
-    contas = sorted(df_yac[COL_CONTA].dropna().astype(str).unique())
-    conta_sel = st.multiselect("Conta", contas, default=contas)
-
-# Filtro por conta
-df_base_filtro = df_yac[df_yac[COL_CONTA].astype(str).isin(conta_sel)].copy() if conta_sel else df_yac.copy()
-
-with f3:
     pozos = sorted(df_base_filtro[COL_POZO].dropna().astype(str).unique())
 
     if not pozos:
-        st.warning("No hay pozos para los filtros seleccionados.")
+        st.warning("No hay pozos para el yacimiento seleccionado.")
         st.stop()
 
     pozo_sel = st.selectbox("Pozo / Terminación", pozos)
 
-with f4:
-    min_date = df_base_filtro[COL_FECHA_FILTRO].min().date()
-    max_date = df_base_filtro[COL_FECHA_FILTRO].max().date()
+# Base real del pozo seleccionado.
+# Se toma desde df completo para no truncar la historia real del pozo.
+df_pozo_raw = df[df[COL_POZO].astype(str) == str(pozo_sel)].copy()
+
+with f3:
+    min_date = df_pozo_raw[COL_FECHA_FILTRO].min().date()
+    max_date = df_pozo_raw[COL_FECHA_FILTRO].max().date()
 
     date_range = st.date_input(
         "Rango de fechas",
@@ -398,7 +316,7 @@ with f4:
         max_value=max_date
     )
 
-with f5:
+with f4:
     vista = st.radio(
         "Tipo de análisis",
         ["Pozo individual", "Comparativo multipozo"],
@@ -408,22 +326,25 @@ with f5:
 st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================================================
-# FILTRO DE FECHAS
+# FILTRO DE FECHAS SIN ACOMPLETAR CALENDARIO
 # =========================================================
 if isinstance(date_range, tuple) and len(date_range) == 2:
     f_ini = pd.to_datetime(date_range[0]).normalize()
     f_fin = pd.to_datetime(date_range[1]).normalize()
 else:
-    f_ini = df_base_filtro[COL_FECHA_FILTRO].min()
-    f_fin = df_base_filtro[COL_FECHA_FILTRO].max()
+    f_ini = df_pozo_raw[COL_FECHA_FILTRO].min()
+    f_fin = df_pozo_raw[COL_FECHA_FILTRO].max()
 
-mask_pozo = (
-    (df_base_filtro[COL_POZO].astype(str) == str(pozo_sel)) &
-    (df_base_filtro[COL_FECHA] >= f_ini) &
-    (df_base_filtro[COL_FECHA] <= f_fin)
-)
+# Cambio clave:
+# Se calculan columnas directamente sobre la base real del pozo.
+# Ya no se llama completar_fechas_por_pozo().
+dfp_full = calcular_columnas_produccion(df_pozo_raw)
 
-dfp = df_base_filtro.loc[mask_pozo].copy()
+dfp = dfp_full[
+    (dfp_full[COL_FECHA_FILTRO] >= f_ini) &
+    (dfp_full[COL_FECHA_FILTRO] <= f_fin)
+].copy()
+
 dfp = dfp.sort_values(COL_FECHA).reset_index(drop=True)
 
 if dfp.empty:
@@ -448,7 +369,7 @@ if vista == "Pozo individual":
         f"<span class='small-note'>Pozo seleccionado: <b>{pozo_sel}</b> | "
         f"Yacimiento: <b>{first_row.get(COL_YAC, '')}</b> | "
         f"Conta: <b>{first_row.get(COL_CONTA, '')}</b> | "
-        f"Registros cargados: <b>{len(dfp)}</b></span>",
+        f"Registros reales cargados: <b>{len(dfp)}</b></span>",
         unsafe_allow_html=True
     )
 
@@ -736,10 +657,17 @@ elif vista == "Comparativo multipozo":
     )
 
     if pozos_sel_comp:
-        df_comp = df_base_filtro[
-            (df_base_filtro[COL_POZO].astype(str).isin(pozos_sel_comp)) &
-            (df_base_filtro[COL_FECHA_FILTRO] >= f_ini) &
-            (df_base_filtro[COL_FECHA_FILTRO] <= f_fin)
+        # Se toma la historia real de los pozos seleccionados.
+        # No se completan fechas ni se agregan meses en cero.
+        df_comp_raw = df[
+            df[COL_POZO].astype(str).isin(pozos_sel_comp)
+        ].copy()
+
+        df_comp = calcular_columnas_produccion(df_comp_raw)
+
+        df_comp = df_comp[
+            (df_comp[COL_FECHA_FILTRO] >= f_ini) &
+            (df_comp[COL_FECHA_FILTRO] <= f_fin)
         ].copy()
 
         df_comp = df_comp.sort_values([COL_POZO, COL_FECHA]).reset_index(drop=True)
