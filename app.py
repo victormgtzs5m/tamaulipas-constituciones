@@ -755,6 +755,14 @@ elif vista == "Comparativa por pozo":
         modo_comparacion == "Normalizado a tiempo 0"
     )
 
+    modo_escala = st.radio(
+    "Escala de gráficos",
+    ["Semilog", "Lineal"],
+    horizontal=True
+    )
+
+    usar_semilog = modo_escala == "Semilog"
+
     if pozos_sel_comp:
 
         df_comp_raw = df[
@@ -796,7 +804,7 @@ elif vista == "Comparativa por pozo":
                     "Comparativo semilog de producción de aceite por pozo",
                     "Qo (bpd)",
                     pozos_sel_comp,
-                    semilog=True,
+                    semilog=usar_semilog,
                     normalizar_tiempo=normalizar_tiempo
                 ),
                 use_container_width=True
@@ -809,7 +817,7 @@ elif vista == "Comparativa por pozo":
                     "Comparativo semilog de RGA por pozo",
                     "RGA (pc/bl)",
                     pozos_sel_comp,
-                    semilog=True,
+                    semilog=usar_semilog,
                     normalizar_tiempo=normalizar_tiempo
                 ),
                 use_container_width=True
@@ -822,7 +830,7 @@ elif vista == "Comparativa por pozo":
                     "Comparativo de corte de agua por pozo",
                     "% Agua",
                     pozos_sel_comp,
-                    semilog=False,
+                    semilog=usar_semilog,
                     normalizar_tiempo=normalizar_tiempo
                 ),
                 use_container_width=True
