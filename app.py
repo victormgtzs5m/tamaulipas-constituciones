@@ -870,7 +870,7 @@ elif vista == "Comparativa por pozo":
                     "Comparativo de corte de agua por pozo",
                     "% Agua",
                     pozos_sel_comp,
-                    semilog=usar_semilog,
+                    #semilog=usar_semilog,
                     normalizar_tiempo=normalizar_tiempo
                 ),
                 use_container_width=True
