@@ -498,7 +498,7 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
         tickfont=dict(
         family="Arial Black",
         size=16
-        )
+        ),
         type="log" if semilog else "linear",
         showgrid=True,
         gridcolor="#EAECEE",
