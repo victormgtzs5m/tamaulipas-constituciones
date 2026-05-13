@@ -687,7 +687,7 @@ if vista == "Producción por pozo":
         mime="text/csv"
     )
 
-# =========================================================
+
 # VISTA COMPARATIVO
 # =========================================================
 elif vista == "Comparativa por pozo":
@@ -697,61 +697,56 @@ elif vista == "Comparativa por pozo":
         unsafe_allow_html=True
     )
 
-    pozos_comp = sorted(df_base_filtro[COL_POZO].dropna().astype(str).unique())
+    pozos_comp = sorted(df_base_filtro[COL_POZO].dropna().astype(str).str.strip().unique())
 
     pozos_sel_comp = st.multiselect(
         "Selecciona pozos para comparar",
         pozos_comp,
-        default=[pozo_sel] if pozo_sel in pozos_comp else []
+        default=[str(pozo_sel).strip()] if str(pozo_sel).strip() in pozos_comp else []
     )
 
     if pozos_sel_comp:
-        # Se toma la historia real de los pozos seleccionados.
-        # No se completan fechas ni se agregan meses en cero.
-        if pozos_sel_comp:
 
-            df_comp_raw = df[
-                df[COL_POZO].astype(str).isin(pozos_sel_comp)
+        df_comp_raw = df[
+            df[COL_POZO].astype(str).str.strip().isin(pozos_sel_comp)
+        ].copy()
+
+        lista_pozos_completos = []
+
+        for pozo in pozos_sel_comp:
+            df_pozo_tmp = df_comp_raw[
+                df_comp_raw[COL_POZO].astype(str).str.strip() == str(pozo).strip()
             ].copy()
 
-            lista_pozos_completos = []
+            if not df_pozo_tmp.empty:
+                df_pozo_tmp = completar_fechas_pozo(df_pozo_tmp)
+                lista_pozos_completos.append(df_pozo_tmp)
 
-            for pozo in pozos_sel_comp:
-                df_pozo_tmp = df_comp_raw[
-                    df_comp_raw[COL_POZO].astype(str) == str(pozo)
-                ].copy()
-
-                if not df_pozo_tmp.empty:
-                    df_pozo_tmp = completar_fechas_pozo(df_pozo_tmp)
-                    lista_pozos_completos.append(df_pozo_tmp)
+        if lista_pozos_completos:
 
             df_comp_raw = pd.concat(lista_pozos_completos, ignore_index=True)
 
             df_comp = calcular_columnas_produccion(df_comp_raw)
 
+            # Rango de fechas propio de los pozos seleccionados
+            f_ini_comp = df_comp[COL_FECHA_FILTRO].min()
+            f_fin_comp = df_comp[COL_FECHA_FILTRO].max()
+
             df_comp = df_comp[
-                (df_comp[COL_FECHA_FILTRO] >= f_ini) &
-                (df_comp[COL_FECHA_FILTRO] <= f_fin)
+                (df_comp[COL_FECHA_FILTRO] >= f_ini_comp) &
+                (df_comp[COL_FECHA_FILTRO] <= f_fin_comp)
             ].copy()
 
             df_comp = df_comp.sort_values([COL_POZO, COL_FECHA]).reset_index(drop=True)
 
-            df_comp = df_comp[
-                (df_comp[COL_FECHA_FILTRO] >= f_ini) &
-                (df_comp[COL_FECHA_FILTRO] <= f_fin)
-            ].copy()
-
-            df_comp = df_comp.sort_values([COL_POZO, COL_FECHA]).reset_index(drop=True)
-
-        if not df_comp.empty:
             st.plotly_chart(
                 comparative_plot(
                     df_comp,
                     COL_QO,
-                    "Comparativo de producción de aceite por pozo",
+                    "Comparativo semilog de producción de aceite por pozo",
                     "Qo (bpd)",
                     pozos_sel_comp,
-                    semilog=False
+                    semilog=True
                 ),
                 use_container_width=True
             )
@@ -782,6 +777,7 @@ elif vista == "Comparativa por pozo":
 
         else:
             st.warning("No hay datos disponibles para los pozos seleccionados.")
+
     else:
         st.info("Selecciona uno o más pozos para generar el comparativo.")
 
