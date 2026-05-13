@@ -497,38 +497,38 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
             )
         )
         
-    if normalizar_tiempo and not df_promedio.empty:
+        if normalizar_tiempo and not df_promedio.empty:
 
-    cols_prom = [
-        c for c in df_promedio.columns
-        if c != COL_TIEMPO_NORM
-    ]
+        cols_prom = [
+            c for c in df_promedio.columns
+            if c != COL_TIEMPO_NORM
+        ]
 
-    if semilog:
-        df_promedio[cols_prom] = (
+        if semilog:
+            df_promedio[cols_prom] = (
+                df_promedio[cols_prom]
+                .replace(0, np.nan)
+            )
+
+        df_promedio["PROMEDIO"] = (
             df_promedio[cols_prom]
-            .replace(0, np.nan)
+            .mean(axis=1, skipna=True)
         )
 
-    df_promedio["PROMEDIO"] = (
-        df_promedio[cols_prom]
-        .mean(axis=1, skipna=True)
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=df_promedio[COL_TIEMPO_NORM],
-            y=df_promedio["PROMEDIO"],
-            mode="lines",
-            name="PROMEDIO",
-            line=dict(
-                width=5,
-                color="black",
-                dash="dash"
+        fig.add_trace(
+            go.Scatter(
+                x=df_promedio[COL_TIEMPO_NORM],
+                y=df_promedio["PROMEDIO"],
+                mode="lines",
+                name="PROMEDIO",
+                line=dict(
+                    width=5,
+                    color="black",
+                    dash="dash"
+                )
             )
         )
-    )
-    
+
     fig.update_layout(
         title=dict(text=title, font=dict(size=18, family="Arial", color="#17202A")),
         template="plotly_white",
