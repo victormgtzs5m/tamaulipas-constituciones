@@ -489,7 +489,7 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
         showgrid=True,
         gridcolor="#EAECEE",
         zeroline=False,
-        separatethousands=True
+        separatethousands=True,
         tickfont=dict(size=16)
     )
 
