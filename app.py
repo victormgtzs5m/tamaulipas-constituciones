@@ -494,16 +494,15 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
 
     fig.update_yaxes(
         title_text=y_title,
-        type="log" if semilog else "linear",
+        type="log" if semilog, tickvals=[0.1, 1, 10, 100, 1000],
+        ticktext=["0.1", "1", "10", "100", "1000"], else "linear",
         showgrid=True,
         gridcolor="#EAECEE",
         zeroline=False,
         tickfont=dict(size=19, color="black"),showline=True,
         linewidth=0.5,
         linecolor='black',
-        separatethousands=True,
-        tickvals=[0.1, 1, 10, 100, 1000],
-        ticktext=["0.1", "1", "10", "100", "1000"],
+        separatethousands=True,        
        # tickfont=dict(size=16)
     )
 
