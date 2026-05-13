@@ -59,9 +59,9 @@ COL_QW = "Qw (bpd)"
 COL_QG = "Qg (mpcd)"
 COL_QG_PCD = "Qg (pcd)"
 
-COL_NP = "Npx (mbl)"
-COL_WP = "Wpx (mbl)"
-COL_GP = "Gpx (mmpc)"
+COL_NP = "Np (mbl)"
+COL_WP = "Wp (mbl)"
+COL_GP = "Gp (mmpc)"
 
 COL_WC = "%Agua"
 COL_RGA = "RGA (pc/bl)"
