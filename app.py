@@ -483,9 +483,11 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
     )
 
     fig.update_xaxes(
-        title_text="Fecha",
+        title_text="<b>Fecha</b>",
         tickformat="%d/%m/%Y",
-        showgrid=True,
+        showgrid=True,tickfont=dict(size=18, color="black"),showline=True,
+        linewidth=0.5,
+        linecolor='black',
         gridcolor="#EAECEE",
         zeroline=False
     )
@@ -496,6 +498,9 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
         showgrid=True,
         gridcolor="#EAECEE",
         zeroline=False,
+        tickfont=dict(size=18, color="black"),showline=True,
+        linewidth=0.5,
+        linecolor='black',
         separatethousands=True,
         tickfont=dict(size=16)
     )
