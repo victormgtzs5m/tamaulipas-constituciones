@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed"
 )
-st.cache_data.clear()
+#
 
 # =========================================================
 # RUTA DE LA BASE DE DATOS
@@ -181,6 +181,39 @@ def convertir_fechas(serie: pd.Series) -> pd.Series:
 
     return fecha
 
+def completar_fechas_pozo(df_pozo: pd.DataFrame) -> pd.DataFrame:
+    df_pozo = df_pozo.copy()
+    df_pozo = df_pozo.sort_values(COL_FECHA)
+
+    pozo = df_pozo[COL_POZO].iloc[0]
+    yac = df_pozo[COL_YAC].iloc[0]
+    conta = df_pozo[COL_CONTA].iloc[0]
+
+    fecha_ini = df_pozo[COL_FECHA].min()
+    fecha_fin = df_pozo[COL_FECHA].max()
+
+    fechas_completas = pd.date_range(
+        start=fecha_ini,
+        end=fecha_fin,
+        freq="MS"
+    )
+
+    base = pd.DataFrame({COL_FECHA: fechas_completas})
+
+    df_out = base.merge(df_pozo, on=COL_FECHA, how="left")
+
+    df_out[COL_POZO] = df_out[COL_POZO].fillna(pozo)
+    df_out[COL_YAC] = df_out[COL_YAC].fillna(yac)
+    df_out[COL_CONTA] = df_out[COL_CONTA].fillna(conta)
+
+    df_out[COL_DIAS] = df_out[COL_FECHA].dt.days_in_month
+
+    for col in [COL_ACEITE, COL_GAS, COL_AGUA]:
+        df_out[col] = df_out[col].fillna(0)
+
+    df_out[COL_FECHA_FILTRO] = df_out[COL_FECHA]
+
+    return df_out
 
 # =========================================================
 # CARGA BASE Y CÁLCULOS DINÁMICOS
@@ -348,7 +381,10 @@ else:
 # Cambio clave:
 # Se calculan columnas directamente sobre la base real del pozo.
 # Ya no se llama completar_fechas_por_pozo().
-dfp_full = calcular_columnas_produccion(df_pozo_raw)
+#dfp_full = calcular_columnas_produccion(df_pozo_raw)
+
+df_pozo_completo = completar_fechas_pozo(df_pozo_raw)
+dfp_full = calcular_columnas_produccion(df_pozo_completo)
 
 dfp = dfp_full[
     (dfp_full[COL_FECHA_FILTRO] >= f_ini) &
@@ -373,7 +409,7 @@ last_row = df_prod.iloc[-1]
 # =========================================================
 # KPIs
 # =========================================================
-if vista == "Pozo individual":
+if vista == "Producción por pozo":
 
     st.markdown(
         f"<span class='small-note'>Pozo seleccionado: <b>{pozo_sel}</b> | "
@@ -461,7 +497,7 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
 # =========================================================
 # VISTA POZO INDIVIDUAL
 # =========================================================
-if vista == "Pozo individual":
+if vista == "Producción por pozo":
 
     fig1 = make_subplots(specs=[[{"secondary_y": True}]])
 
@@ -543,7 +579,7 @@ if vista == "Pozo individual":
             mode="lines+markers",
             name="Qw (bpd)",
             line=dict(width=3, color="#3498DB"),
-            marker=dict(size=5),
+            marker=dict(size=3),
             fill="tozeroy",
             fillcolor="rgba(52,152,219,0.20)",
             connectgaps=False
@@ -558,7 +594,7 @@ if vista == "Pozo individual":
             mode="lines+markers",
             name="Wp (mbl)",
             line=dict(width=3, color="#154360"),
-            marker=dict(size=5),
+            marker=dict(size=3),
             connectgaps=False
         ),
         secondary_y=True
@@ -581,6 +617,7 @@ if vista == "Pozo individual":
 
     fig3 = make_subplots(specs=[[{"secondary_y": True}]])
 
+    
     fig3.add_trace(
         go.Scatter(
             x=dfp[COL_FECHA],
@@ -588,7 +625,9 @@ if vista == "Pozo individual":
             mode="lines+markers",
             name="RGA (pc/bl)",
             line=dict(width=2, color="#FF0000"),
-            marker=dict(size=5),
+            marker=dict(size=3),
+            fill="tozeroy",
+            fillcolor="rgba(231,76,60,0.20)",
             connectgaps=False
         ),
         secondary_y=False
@@ -601,7 +640,7 @@ if vista == "Pozo individual":
             mode="lines+markers",
             name="Gp (mmpc)",
             line=dict(width=3, color="#641E16"),
-            marker=dict(size=5),
+            marker=dict(size=3),
             connectgaps=False
         ),
         secondary_y=True
@@ -651,7 +690,7 @@ if vista == "Pozo individual":
 # =========================================================
 # VISTA COMPARATIVO
 # =========================================================
-elif vista == "Comparativo multipozo":
+elif vista == "Comparativa por pozo":
 
     st.markdown(
         "<div class='section-title'>Comparativo de producción por pozos seleccionados</div>",
@@ -669,18 +708,40 @@ elif vista == "Comparativo multipozo":
     if pozos_sel_comp:
         # Se toma la historia real de los pozos seleccionados.
         # No se completan fechas ni se agregan meses en cero.
-        df_comp_raw = df[
-            df[COL_POZO].astype(str).isin(pozos_sel_comp)
-        ].copy()
+        if pozos_sel_comp:
 
-        df_comp = calcular_columnas_produccion(df_comp_raw)
+            df_comp_raw = df[
+                df[COL_POZO].astype(str).isin(pozos_sel_comp)
+            ].copy()
 
-        df_comp = df_comp[
-            (df_comp[COL_FECHA_FILTRO] >= f_ini) &
-            (df_comp[COL_FECHA_FILTRO] <= f_fin)
-        ].copy()
+            lista_pozos_completos = []
 
-        df_comp = df_comp.sort_values([COL_POZO, COL_FECHA]).reset_index(drop=True)
+            for pozo in pozos_sel_comp:
+                df_pozo_tmp = df_comp_raw[
+                    df_comp_raw[COL_POZO].astype(str) == str(pozo)
+                ].copy()
+
+                if not df_pozo_tmp.empty:
+                    df_pozo_tmp = completar_fechas_pozo(df_pozo_tmp)
+                    lista_pozos_completos.append(df_pozo_tmp)
+
+            df_comp_raw = pd.concat(lista_pozos_completos, ignore_index=True)
+
+            df_comp = calcular_columnas_produccion(df_comp_raw)
+
+            df_comp = df_comp[
+                (df_comp[COL_FECHA_FILTRO] >= f_ini) &
+                (df_comp[COL_FECHA_FILTRO] <= f_fin)
+            ].copy()
+
+            df_comp = df_comp.sort_values([COL_POZO, COL_FECHA]).reset_index(drop=True)
+
+            df_comp = df_comp[
+                (df_comp[COL_FECHA_FILTRO] >= f_ini) &
+                (df_comp[COL_FECHA_FILTRO] <= f_fin)
+            ].copy()
+
+            df_comp = df_comp.sort_values([COL_POZO, COL_FECHA]).reset_index(drop=True)
 
         if not df_comp.empty:
             st.plotly_chart(
