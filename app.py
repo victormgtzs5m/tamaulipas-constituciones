@@ -502,6 +502,8 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
         linewidth=0.5,
         linecolor='black',
         separatethousands=True,
+        tickvals=[0.1, 1, 10, 100, 1000],
+        ticktext=["0.1", "1", "10", "100", "1000"],
        # tickfont=dict(size=16)
     )
 
