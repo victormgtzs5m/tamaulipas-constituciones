@@ -474,7 +474,7 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
         plot_bgcolor="white",
         paper_bgcolor="white",
         font=dict(
-        family="Arial Black",
+        family="Tahoma",
         size=16,
         color="black"
     ),
