@@ -5,10 +5,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sqlite3
 
-
-# =============================
-# CONFIGURACIÓN DE PÁGINA
-# =============================
+# =========================================================
+# CONFIGURACIÓN GENERAL
+# =========================================================
 st.set_page_config(
     page_title="Visualizador de Producción",
     page_icon="🛢️",
@@ -16,22 +15,38 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# =============================
-# BASE DE DATOS LOCAL
-# =============================
-ruta_db = r"C:\Users\VMGS\OneDrive - CONSORCIO PETROLERO 5M DEL GOLFO\Escritorio\Resplado C5M\Web\producion.db"
+# =========================================================
+# RUTA DE LA BASE DE DATOS
+# Cambia esta ruta si tu archivo .db está en otra carpeta.
+# =========================================================
+ruta_db = r"C:\Users\VMGS\OneDrive - CONSORCIO PETROLERO 5M DEL GOLFO\Escritorio\Resplado C5M\Web\proyecto2.db"
 
-# =============================
-# COLUMNAS
-# =============================
+# Nombre de la tabla en SQLite
+TABLA_PROD = "produccion"
+
+# =========================================================
+# COLUMNAS DE LA BASE NUEVA
+# La base solo debe traer estas columnas:
+# Terminacion, Fecha, Yacimiento, Conta, Dias, Aceite, Gas, Agua
+# =========================================================
 COL_POZO = "TERMINACION"
 COL_FECHA = "FECHA"
-COL_YAC = "Yacimiento"
+COL_YAC = "YACIMIENTO"
+COL_CONTA = "CONTA"
 COL_DIAS = "DIAS"
+COL_ACEITE = "ACEITE"
+COL_GAS = "GAS"
+COL_AGUA = "AGUA"
+
+# Columnas calculadas para el visualizador
+COL_ACEITE_BBL = "Aceite (bl)"
+COL_AGUA_BBL = "Agua (bl)"
+COL_GAS_PC = "Gas (pc)"
 
 COL_QO = "Qo (bpd)"
 COL_QW = "Qw (bpd)"
 COL_QG = "Qg (mpcd)"
+COL_QG_PCD = "Qg (pcd)"
 
 COL_NP = "Npx (mbl)"
 COL_WP = "Wpx (mbl)"
@@ -39,24 +54,23 @@ COL_GP = "Gpx (mmpc)"
 
 COL_WC = "%Agua"
 COL_RGA = "RGA (pc/bl)"
-
-COL_ACEITE = "ACEITE"
-COL_AGUA = "AGUA"
-COL_GAS = "GAS"
+COL_FECHA_FILTRO = "FECHA_FILTRO"
 
 REQUIRED_COLS = [
-    COL_POZO, COL_FECHA, COL_YAC,
-    COL_DIAS, COL_ACEITE, COL_AGUA, COL_GAS
+    COL_POZO, COL_FECHA, COL_YAC, COL_CONTA,
+    COL_DIAS, COL_ACEITE, COL_GAS, COL_AGUA
 ]
 
-# =============================
+# Factores de conversión
+M3_A_BBL = 6.28981
+M3_A_PC = 35.3147
+
+# =========================================================
 # ESTILO
-# =============================
+# =========================================================
 st.markdown("""
 <style>
-    .main {
-        background-color: #f7f9fb;
-    }
+    .main { background-color: #f7f9fb; }
 
     .block-container {
         padding-top: 1.2rem;
@@ -65,9 +79,7 @@ st.markdown("""
         max-width: 100%;
     }
 
-    [data-testid="stSidebar"] {
-        display: none;
-    }
+    [data-testid="stSidebar"] { display: none; }
 
     [data-testid="metric-container"] {
         background-color: #ffffff;
@@ -126,66 +138,192 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# =============================
-# CARGA Y CÁLCULO DE DATOS
-# =============================
+# =========================================================
+# FUNCIONES AUXILIARES
+# =========================================================
+def normalizar_columnas(df: pd.DataFrame) -> pd.DataFrame:
+    """Convierte encabezados a mayúsculas para evitar errores por Fecha/FECHA, Aceite/ACEITE, etc."""
+    df = df.copy()
+    df.columns = [str(c).strip().upper() for c in df.columns]
+    return df
+
+
+def convertir_fechas(serie: pd.Series) -> pd.Series:
+    """Convierte fechas robustamente: dd/mm/yyyy, yyyy-mm-dd y serial Excel."""
+    s = serie.copy()
+
+    fecha = pd.to_datetime(s, errors="coerce", dayfirst=True)
+
+    faltan = fecha.isna()
+    if faltan.any():
+        fecha.loc[faltan] = pd.to_datetime(s.loc[faltan], errors="coerce", dayfirst=False)
+
+    faltan = fecha.isna()
+    if faltan.any():
+        nums = pd.to_numeric(s.loc[faltan], errors="coerce")
+        fecha.loc[faltan] = pd.to_datetime(
+            nums,
+            unit="D",
+            origin="1899-12-30",
+            errors="coerce"
+        )
+
+    return fecha
+
+
+def moda_o_primero(s: pd.Series):
+    """Regresa la moda si existe; si no, el primer valor no nulo."""
+    s = s.dropna()
+    if s.empty:
+        return ""
+    m = s.mode()
+    return m.iloc[0] if not m.empty else s.iloc[0]
+
+
+def completar_fechas_por_pozo(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Completa meses faltantes por pozo.
+    - Cada pozo conserva su rango real: mes mínimo a mes máximo.
+    - Si falta un mes intermedio, se agrega con DIAS, ACEITE, AGUA y GAS = 0.
+    - YACIMIENTO y CONTA se rellenan con el valor más frecuente del pozo.
+    - No se inventa producción.
+    """
+    salida = []
+
+    for pozo, dfi in df.groupby(COL_POZO, dropna=False):
+        dfi = dfi.sort_values(COL_FECHA).copy()
+
+        yac_pozo = moda_o_primero(dfi[COL_YAC])
+        conta_pozo = moda_o_primero(dfi[COL_CONTA])
+
+        dfi["PERIODO_MES"] = dfi[COL_FECHA].dt.to_period("M")
+
+        # Si hay más de un registro del mismo pozo en el mismo mes,
+        # se consolidan los volúmenes mensuales.
+        dfi_mes = (
+            dfi.groupby([COL_POZO, "PERIODO_MES"], as_index=False)
+            .agg({
+                COL_FECHA: "min",
+                COL_YAC: moda_o_primero,
+                COL_CONTA: moda_o_primero,
+                COL_DIAS: "sum",
+                COL_ACEITE: "sum",
+                COL_GAS: "sum",
+                COL_AGUA: "sum"
+            })
+        )
+
+        periodo_min = dfi_mes["PERIODO_MES"].min()
+        periodo_max = dfi_mes["PERIODO_MES"].max()
+
+        calendario = pd.DataFrame({
+            COL_POZO: pozo,
+            "PERIODO_MES": pd.period_range(periodo_min, periodo_max, freq="M")
+        })
+
+        dfi_full = calendario.merge(
+            dfi_mes,
+            on=[COL_POZO, "PERIODO_MES"],
+            how="left"
+        )
+
+        # Para meses agregados se asigna el día 1 del mes.
+        dfi_full[COL_FECHA] = dfi_full[COL_FECHA].fillna(
+            dfi_full["PERIODO_MES"].dt.to_timestamp(how="start")
+        )
+
+        dfi_full[COL_YAC] = dfi_full[COL_YAC].fillna(yac_pozo)
+        dfi_full[COL_CONTA] = dfi_full[COL_CONTA].fillna(conta_pozo)
+
+        for col in [COL_DIAS, COL_ACEITE, COL_GAS, COL_AGUA]:
+            dfi_full[col] = dfi_full[col].fillna(0)
+
+        dfi_full = dfi_full.drop(columns=["PERIODO_MES"])
+        salida.append(dfi_full)
+
+    return pd.concat(salida, ignore_index=True)
+
+
+# =========================================================
+# CARGA, COMPLETADO DE FECHAS Y CÁLCULOS
+# =========================================================
 @st.cache_data(show_spinner="Cargando base de datos...")
-def load_data():
+def load_data() -> pd.DataFrame:
 
     with sqlite3.connect(ruta_db) as conn:
-        df = pd.read_sql_query('SELECT * FROM "produccion"', conn)
+        df = pd.read_sql_query(f'SELECT * FROM "{TABLA_PROD}"', conn)
 
     df = df.loc[:, ~df.columns.astype(str).str.startswith("Unnamed")]
+    df = normalizar_columnas(df)
 
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
-        raise ValueError(f"Faltan columnas requeridas en la base: {missing}")
+        raise ValueError(
+            "Faltan columnas requeridas en la base: "
+            f"{missing}. La tabla debe tener: Terminacion, Fecha, Yacimiento, Conta, Dias, Aceite, Gas, Agua."
+        )
 
-    df[COL_FECHA] = pd.to_datetime(df[COL_FECHA], errors="coerce", dayfirst=True)
+    # Dejar únicamente las columnas necesarias de la base nueva
+    df = df[REQUIRED_COLS].copy()
+
+    # Limpieza básica
+    df[COL_POZO] = df[COL_POZO].astype(str).str.strip()
+    df[COL_YAC] = df[COL_YAC].astype(str).str.strip()
+    df[COL_CONTA] = df[COL_CONTA].astype(str).str.strip()
+
+    df[COL_FECHA] = convertir_fechas(df[COL_FECHA])
     df = df.dropna(subset=[COL_POZO, COL_FECHA])
+    df = df[df[COL_POZO].str.upper().ne("NAN")]
 
-    for c in [COL_DIAS, COL_ACEITE, COL_AGUA, COL_GAS]:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    # Normaliza fecha sin hora
+    df[COL_FECHA] = df[COL_FECHA].dt.normalize()
 
+    # Numéricos: la base trae volúmenes mensuales en m3 y días del mes
+    for col in [COL_DIAS, COL_ACEITE, COL_GAS, COL_AGUA]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    # Completar fechas truncadas por pozo
+    df = completar_fechas_por_pozo(df)
     df = df.sort_values([COL_POZO, COL_FECHA]).reset_index(drop=True)
+    df[COL_FECHA_FILTRO] = df[COL_FECHA]
 
-    df[COL_DIAS] = df[COL_DIAS].replace(0, np.nan)
+    # =====================================================
+    # CONVERSIONES DE VOLUMEN MENSUAL
+    # =====================================================
+    # ACEITE y AGUA: m3 -> barriles
+    # GAS: m3 -> pies cúbicos
+    df[COL_ACEITE_BBL] = df[COL_ACEITE] * M3_A_BBL
+    df[COL_AGUA_BBL] = df[COL_AGUA] * M3_A_BBL
+    df[COL_GAS_PC] = df[COL_GAS] * M3_A_PC
 
-    # =============================
-    # CONVERSIONES
-    # =============================
-    # ACEITE y AGUA vienen en m3
-    df["ACEITE_BBL"] = df[COL_ACEITE] * 6.28981
-    df["AGUA_BBL"] = df[COL_AGUA] * 6.28981
+    # =====================================================
+    # GASTOS DIARIOS PROMEDIO DEL MES
+    # =====================================================
+    dias_validos = df[COL_DIAS].replace(0, np.nan)
 
-    # GAS viene en m3 y se convierte a pies cúbicos
-    df["GAS_PC"] = df[COL_GAS] * 35.3147
+    df[COL_QO] = df[COL_ACEITE_BBL] / dias_validos
+    df[COL_QW] = df[COL_AGUA_BBL] / dias_validos
+    df[COL_QG_PCD] = df[COL_GAS_PC] / dias_validos
+    df[COL_QG] = df[COL_QG_PCD] / 1000.0
 
-    # =============================
-    # GASTOS
-    # =============================
-    df[COL_QO] = df["ACEITE_BBL"] / df[COL_DIAS]
-    df[COL_QW] = df["AGUA_BBL"] / df[COL_DIAS]
+    # Las fechas agregadas artificialmente tienen DIAS = 0 y producción = 0,
+    # por lo tanto sus gastos se dejan en cero.
+    for col in [COL_QO, COL_QW, COL_QG_PCD, COL_QG]:
+        df[col] = df[col].replace([np.inf, -np.inf], np.nan).fillna(0)
 
-    # Qg en mpcd
-    df[COL_QG] = (df["GAS_PC"] / df[COL_DIAS]) / 1000
-
-    # Qg en pc/d para RGA
-    df["Qg_pc_d"] = df["GAS_PC"] / df[COL_DIAS]
-
-    # =============================
+    # =====================================================
     # ACUMULADAS
-    # =============================
-    df[COL_NP] = df.groupby(COL_POZO)["ACEITE_BBL"].cumsum() / 1000
-    df[COL_WP] = df.groupby(COL_POZO)["AGUA_BBL"].cumsum() / 1000
-    df[COL_GP] = df.groupby(COL_POZO)["GAS_PC"].cumsum() / 1_000_000
+    # =====================================================
+    df[COL_NP] = df.groupby(COL_POZO)[COL_ACEITE_BBL].cumsum() / 1000.0
+    df[COL_WP] = df.groupby(COL_POZO)[COL_AGUA_BBL].cumsum() / 1000.0
+    df[COL_GP] = df.groupby(COL_POZO)[COL_GAS_PC].cumsum() / 1_000_000.0
 
-    # =============================
-    # RGA Y % AGUA
-    # =============================
+    # =====================================================
+    # RGA Y CORTE DE AGUA
+    # =====================================================
     df[COL_RGA] = np.where(
         df[COL_QO] > 0,
-        df["Qg_pc_d"] / df[COL_QO],
+        df[COL_QG_PCD] / df[COL_QO],
         0
     )
 
@@ -199,134 +337,59 @@ def load_data():
 
     return df
 
+
 try:
     df = load_data()
 except Exception as e:
     st.error(f"No fue posible cargar la base: {e}")
     st.stop()
 
-# =============================
-# COMPLETAR FECHAS MENSUALES
-# =============================
-def completar_fechas_mensuales(data):
-
-    data = data.copy()
-    data[COL_FECHA] = pd.to_datetime(data[COL_FECHA])
-
-    if data.empty:
-        return data
-
-    pozo = data[COL_POZO].iloc[0]
-    yacimiento = data[COL_YAC].iloc[0] if COL_YAC in data.columns else ""
-
-    fecha_min = data[COL_FECHA].min()
-    fecha_max = data[COL_FECHA].max()
-
-    fechas_completas = pd.date_range(
-        start=fecha_min,
-        end=fecha_max,
-        freq="MS"
-    )
-
-    data = data.set_index(COL_FECHA)
-
-    # REINDEX
-    data = data.reindex(fechas_completas)
-
-    data.index.name = COL_FECHA
-    data = data.reset_index()
-
-    # =========================
-    # RELLENAR IDENTIFICADORES
-    # =========================
-    data[COL_POZO] = data[COL_POZO].fillna(pozo)
-
-    if COL_YAC in data.columns:
-        data[COL_YAC] = data[COL_YAC].fillna(yacimiento)
-
-    # =========================
-    # COLUMNAS ORIGINALES
-    # =========================
-    columnas_originales = [
-        COL_DIAS,
-        COL_ACEITE,
-        COL_AGUA,
-        COL_GAS
-    ]
-
-    for col in columnas_originales:
-        if col in data.columns:
-            data[col] = data[col].fillna(0)
-
-    # =========================
-    # GASTOS
-    # =========================
-    columnas_gastos = [
-        COL_QO,
-        COL_QW,
-        COL_QG,
-        COL_WC,
-        COL_RGA
-    ]
-
-    for col in columnas_gastos:
-        if col in data.columns:
-            data[col] = data[col].fillna(0)
-
-    # =========================
-    # ACUMULADAS
-    # =========================
-    columnas_acumuladas = [
-        COL_NP,
-        COL_WP,
-        COL_GP
-    ]
-
-    for col in columnas_acumuladas:
-        if col in data.columns:
-            data[col] = data[col].ffill().fillna(0)
-
-    return data
-# =============================
+# =========================================================
 # ENCABEZADO
-# =============================
+# =========================================================
 st.markdown(
     "<div class='main-title'>Campo Tamaulipas-Constituciones Producción</div>",
     unsafe_allow_html=True
 )
 
 st.markdown(
-    "<div class='subtitle'>Producción diaria promedio mensual por yacimiento</div>",
+    "<div class='subtitle'>Producción diaria promedio mensual calculada desde volúmenes mensuales en m³</div>",
     unsafe_allow_html=True
 )
 
-# =============================
+# =========================================================
 # FILTROS
-# =============================
+# =========================================================
 st.markdown("<div class='filter-box'>", unsafe_allow_html=True)
 
-f1, f2, f3, f4 = st.columns([2.0, 2.0, 2.2, 2.2])
+f1, f2, f3, f4, f5 = st.columns([1.7, 1.7, 2.0, 2.2, 2.2])
 
 with f1:
     yacs = sorted(df[COL_YAC].dropna().astype(str).unique())
-    yac_sel = st.multiselect(
-        "Yacimiento",
-        yacs,
-        default=yacs
-    )
+    yac_sel = st.multiselect("Yacimiento", yacs, default=yacs)
 
-df_yac = df[df[COL_YAC].astype(str).isin(yac_sel)] if yac_sel else df.copy()
+# Filtro por yacimiento
+df_yac = df[df[COL_YAC].astype(str).isin(yac_sel)].copy() if yac_sel else df.copy()
 
 with f2:
-    pozos = sorted(df_yac[COL_POZO].dropna().astype(str).unique())
-    pozo_sel = st.selectbox(
-        "Pozo / Terminación",
-        pozos
-    )
+    contas = sorted(df_yac[COL_CONTA].dropna().astype(str).unique())
+    conta_sel = st.multiselect("Conta", contas, default=contas)
+
+# Filtro por conta
+df_base_filtro = df_yac[df_yac[COL_CONTA].astype(str).isin(conta_sel)].copy() if conta_sel else df_yac.copy()
 
 with f3:
-    min_date = df_yac[COL_FECHA].min().date()
-    max_date = df_yac[COL_FECHA].max().date()
+    pozos = sorted(df_base_filtro[COL_POZO].dropna().astype(str).unique())
+
+    if not pozos:
+        st.warning("No hay pozos para los filtros seleccionados.")
+        st.stop()
+
+    pozo_sel = st.selectbox("Pozo / Terminación", pozos)
+
+with f4:
+    min_date = df_base_filtro[COL_FECHA_FILTRO].min().date()
+    max_date = df_base_filtro[COL_FECHA_FILTRO].max().date()
 
     date_range = st.date_input(
         "Rango de fechas",
@@ -335,7 +398,7 @@ with f3:
         max_value=max_date
     )
 
-with f4:
+with f5:
     vista = st.radio(
         "Tipo de análisis",
         ["Pozo individual", "Comparativo multipozo"],
@@ -344,50 +407,48 @@ with f4:
 
 st.markdown("</div>", unsafe_allow_html=True)
 
-# =============================
-# FILTRADO
-# =============================
+# =========================================================
+# FILTRO DE FECHAS
+# =========================================================
 if isinstance(date_range, tuple) and len(date_range) == 2:
-    f_ini = pd.to_datetime(date_range[0])
-    f_fin = pd.to_datetime(date_range[1])
+    f_ini = pd.to_datetime(date_range[0]).normalize()
+    f_fin = pd.to_datetime(date_range[1]).normalize()
 else:
-    f_ini = df_yac[COL_FECHA].min()
-    f_fin = df_yac[COL_FECHA].max()
+    f_ini = df_base_filtro[COL_FECHA_FILTRO].min()
+    f_fin = df_base_filtro[COL_FECHA_FILTRO].max()
 
-mask = (
-    (df_yac[COL_POZO].astype(str) == str(pozo_sel)) &
-    (df_yac[COL_FECHA] >= f_ini) &
-    (df_yac[COL_FECHA] <= f_fin)
+mask_pozo = (
+    (df_base_filtro[COL_POZO].astype(str) == str(pozo_sel)) &
+    (df_base_filtro[COL_FECHA] >= f_ini) &
+    (df_base_filtro[COL_FECHA] <= f_fin)
 )
 
-dfp = df_yac.loc[mask].copy()
+dfp = df_base_filtro.loc[mask_pozo].copy()
+dfp = dfp.sort_values(COL_FECHA).reset_index(drop=True)
 
 if dfp.empty:
     st.warning("No hay datos para los filtros seleccionados.")
     st.stop()
 
-dfp = completar_fechas_mensuales(dfp)
-
-# =============================
-# FECHAS REALES CON PRODUCCIÓN
-# =============================
-prod_total = dfp[[COL_QO, COL_QW, COL_QG]].fillna(0).sum(axis=1)
-df_prod = dfp[prod_total > 0]
-
+# Primer y último registro con producción real para KPIs
+prod_total = dfp[[COL_ACEITE_BBL, COL_AGUA_BBL, COL_GAS_PC]].fillna(0).sum(axis=1)
+df_prod = dfp[prod_total > 0].copy()
 if df_prod.empty:
     df_prod = dfp.copy()
 
 first_row = df_prod.iloc[0]
 last_row = df_prod.iloc[-1]
 
-# =============================
-# KPIS
-# =============================
+# =========================================================
+# KPIs
+# =========================================================
 if vista == "Pozo individual":
 
     st.markdown(
         f"<span class='small-note'>Pozo seleccionado: <b>{pozo_sel}</b> | "
-        f"Yacimiento: <b>{first_row.get(COL_YAC, '')}</b></span>",
+        f"Yacimiento: <b>{first_row.get(COL_YAC, '')}</b> | "
+        f"Conta: <b>{first_row.get(COL_CONTA, '')}</b> | "
+        f"Registros cargados: <b>{len(dfp)}</b></span>",
         unsafe_allow_html=True
     )
 
@@ -402,22 +463,21 @@ if vista == "Pozo individual":
     k7.metric("Np total", f"{dfp[COL_NP].iloc[-1]:,.2f} mbl")
     k8.metric("Wp / Gp", f"{dfp[COL_WP].iloc[-1]:,.2f} / {dfp[COL_GP].iloc[-1]:,.2f}")
 
-# =============================
-# FUNCIÓN COMPARATIVA
-# =============================
+# =========================================================
+# FUNCIÓN PARA GRÁFICAS COMPARATIVAS
+# =========================================================
 def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False):
 
     fig = go.Figure()
 
     for pozo in pozos_sel_comp:
-
         dfi = data[data[COL_POZO].astype(str) == str(pozo)].copy()
+        dfi = dfi.sort_values(COL_FECHA).reset_index(drop=True)
 
         if dfi.empty:
             continue
 
         y_values = dfi[y_col].copy()
-
         if semilog:
             y_values = y_values.replace(0, np.nan)
 
@@ -425,9 +485,10 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
             go.Scatter(
                 x=dfi[COL_FECHA],
                 y=y_values,
-                mode="lines",
+                mode="lines+markers",
                 name=str(pozo),
                 line=dict(width=2.5),
+                marker=dict(size=5),
                 connectgaps=False,
                 hovertemplate=
                     "<b>Pozo: %{fullData.name}</b><br>" +
@@ -437,20 +498,11 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
         )
 
     fig.update_layout(
-        title=dict(
-            text=title,
-            font=dict(size=18, family="Arial", color="#17202A")
-        ),
+        title=dict(text=title, font=dict(size=18, family="Arial", color="#17202A")),
         template="plotly_white",
         hovermode="x unified",
         height=520,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(l=35, r=35, t=60, b=35),
         plot_bgcolor="white",
         paper_bgcolor="white"
@@ -458,7 +510,7 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
 
     fig.update_xaxes(
         title_text="Fecha",
-        tickformat="%Y",
+        tickformat="%d/%m/%Y",
         showgrid=True,
         gridcolor="#EAECEE",
         zeroline=False
@@ -475,25 +527,24 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
 
     return fig
 
-# =============================
-# VISTA 1: POZO INDIVIDUAL
-# =============================
+# =========================================================
+# VISTA POZO INDIVIDUAL
+# =========================================================
 if vista == "Pozo individual":
 
-    # =====================================================
-    # GRÁFICO 1: ACEITE + % AGUA + NP + GAS
-    # =====================================================
     fig1 = make_subplots(specs=[[{"secondary_y": True}]])
 
     fig1.add_trace(
         go.Scatter(
             x=dfp[COL_FECHA],
             y=dfp[COL_QO],
-            mode="lines",
+            mode="lines+markers",
             name="Qo (bpd)",
             line=dict(width=3, color="#27AE60"),
+            marker=dict(size=5),
             fill="tozeroy",
-            fillcolor="rgba(39,174,96,0.25)"
+            fillcolor="rgba(39,174,96,0.25)",
+            connectgaps=False
         ),
         secondary_y=False
     )
@@ -502,9 +553,11 @@ if vista == "Pozo individual":
         go.Scatter(
             x=dfp[COL_FECHA],
             y=dfp[COL_WC],
-            mode="lines",
+            mode="lines+markers",
             name="% Agua",
-            line=dict(width=2, color="#0000FF")
+            line=dict(width=2, color="#0000FF"),
+            marker=dict(size=5),
+            connectgaps=False
         ),
         secondary_y=False
     )
@@ -513,9 +566,11 @@ if vista == "Pozo individual":
         go.Scatter(
             x=dfp[COL_FECHA],
             y=dfp[COL_NP],
-            mode="lines",
+            mode="lines+markers",
             name="Np (mbl)",
-            line=dict(width=3, color="#1B4F72")
+            line=dict(width=3, color="#1B4F72"),
+            marker=dict(size=5),
+            connectgaps=False
         ),
         secondary_y=True
     )
@@ -524,9 +579,11 @@ if vista == "Pozo individual":
         go.Scatter(
             x=dfp[COL_FECHA],
             y=dfp[COL_QG],
-            mode="lines",
+            mode="lines+markers",
             name="Qg (mpcd)",
-            line=dict(width=3, color="#FF0000")
+            line=dict(width=3, color="#FF0000"),
+            marker=dict(size=5),
+            connectgaps=False
         ),
         secondary_y=True
     )
@@ -540,26 +597,25 @@ if vista == "Pozo individual":
         margin=dict(l=35, r=35, t=60, b=35)
     )
 
-    fig1.update_xaxes(title_text="Fecha", tickformat="%Y")
+    fig1.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y")
     fig1.update_yaxes(title_text="Qo (bpd) / % Agua", secondary_y=False)
     fig1.update_yaxes(title_text="Np (mbl) / Qg (mpcd)", secondary_y=True)
 
     st.plotly_chart(fig1, use_container_width=True)
 
-    # =====================================================
-    # GRÁFICO 2: AGUA + WP
-    # =====================================================
     fig2 = make_subplots(specs=[[{"secondary_y": True}]])
 
     fig2.add_trace(
         go.Scatter(
             x=dfp[COL_FECHA],
             y=dfp[COL_QW],
-            mode="lines",
+            mode="lines+markers",
             name="Qw (bpd)",
             line=dict(width=3, color="#3498DB"),
+            marker=dict(size=5),
             fill="tozeroy",
-            fillcolor="rgba(52,152,219,0.20)"
+            fillcolor="rgba(52,152,219,0.20)",
+            connectgaps=False
         ),
         secondary_y=False
     )
@@ -568,9 +624,11 @@ if vista == "Pozo individual":
         go.Scatter(
             x=dfp[COL_FECHA],
             y=dfp[COL_WP],
-            mode="lines",
+            mode="lines+markers",
             name="Wp (mbl)",
-            line=dict(width=3, color="#154360")
+            line=dict(width=3, color="#154360"),
+            marker=dict(size=5),
+            connectgaps=False
         ),
         secondary_y=True
     )
@@ -584,24 +642,23 @@ if vista == "Pozo individual":
         margin=dict(l=35, r=35, t=60, b=35)
     )
 
-    fig2.update_xaxes(title_text="Fecha", tickformat="%Y")
+    fig2.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y")
     fig2.update_yaxes(title_text="Qw (bpd)", secondary_y=False)
     fig2.update_yaxes(title_text="Wp (mbl)", secondary_y=True)
 
     st.plotly_chart(fig2, use_container_width=True)
 
-    # =====================================================
-    # GRÁFICO 3: RGA + GP
-    # =====================================================
     fig3 = make_subplots(specs=[[{"secondary_y": True}]])
 
     fig3.add_trace(
         go.Scatter(
             x=dfp[COL_FECHA],
             y=dfp[COL_RGA],
-            mode="lines",
+            mode="lines+markers",
             name="RGA (pc/bl)",
-            line=dict(width=2, color="#FF0000")
+            line=dict(width=2, color="#FF0000"),
+            marker=dict(size=5),
+            connectgaps=False
         ),
         secondary_y=False
     )
@@ -610,9 +667,11 @@ if vista == "Pozo individual":
         go.Scatter(
             x=dfp[COL_FECHA],
             y=dfp[COL_GP],
-            mode="lines",
+            mode="lines+markers",
             name="Gp (mmpc)",
-            line=dict(width=3, color="#641E16")
+            line=dict(width=3, color="#641E16"),
+            marker=dict(size=5),
+            connectgaps=False
         ),
         secondary_y=True
     )
@@ -626,26 +685,21 @@ if vista == "Pozo individual":
         margin=dict(l=35, r=35, t=60, b=35)
     )
 
-    fig3.update_xaxes(title_text="Fecha", tickformat="%Y")
+    fig3.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y")
     fig3.update_yaxes(title_text="RGA (pc/bl)", secondary_y=False)
     fig3.update_yaxes(title_text="Gp (mmpc)", secondary_y=True)
 
     st.plotly_chart(fig3, use_container_width=True)
 
-    # =============================
-    # TABLA
-    # =============================
     st.markdown("<div class='section-title'>Datos filtrados del pozo</div>", unsafe_allow_html=True)
 
     show_cols = [
-        c for c in [
-            COL_POZO, COL_FECHA, COL_YAC, COL_DIAS,
-            COL_ACEITE, COL_AGUA, COL_GAS,
-            COL_QO, COL_QW, COL_QG,
-            COL_NP, COL_WP, COL_GP,
-            COL_WC, COL_RGA
-        ]
-        if c in dfp.columns
+        COL_POZO, COL_FECHA, COL_YAC, COL_CONTA, COL_DIAS,
+        COL_ACEITE, COL_AGUA, COL_GAS,
+        COL_ACEITE_BBL, COL_AGUA_BBL, COL_GAS_PC,
+        COL_QO, COL_QW, COL_QG,
+        COL_NP, COL_WP, COL_GP,
+        COL_WC, COL_RGA
     ]
 
     st.dataframe(
@@ -663,9 +717,9 @@ if vista == "Pozo individual":
         mime="text/csv"
     )
 
-# =============================
-# VISTA 2: COMPARATIVO MULTIPOZO
-# =============================
+# =========================================================
+# VISTA COMPARATIVO
+# =========================================================
 elif vista == "Comparativo multipozo":
 
     st.markdown(
@@ -673,7 +727,7 @@ elif vista == "Comparativo multipozo":
         unsafe_allow_html=True
     )
 
-    pozos_comp = sorted(df_yac[COL_POZO].dropna().astype(str).unique())
+    pozos_comp = sorted(df_base_filtro[COL_POZO].dropna().astype(str).unique())
 
     pozos_sel_comp = st.multiselect(
         "Selecciona pozos para comparar",
@@ -682,33 +736,15 @@ elif vista == "Comparativo multipozo":
     )
 
     if pozos_sel_comp:
-
-        df_comp_raw = df_yac[
-            (df_yac[COL_POZO].astype(str).isin(pozos_sel_comp)) &
-            (df_yac[COL_FECHA] >= f_ini) &
-            (df_yac[COL_FECHA] <= f_fin)
+        df_comp = df_base_filtro[
+            (df_base_filtro[COL_POZO].astype(str).isin(pozos_sel_comp)) &
+            (df_base_filtro[COL_FECHA_FILTRO] >= f_ini) &
+            (df_base_filtro[COL_FECHA_FILTRO] <= f_fin)
         ].copy()
 
-        lista_pozos = []
+        df_comp = df_comp.sort_values([COL_POZO, COL_FECHA]).reset_index(drop=True)
 
-        for pozo in pozos_sel_comp:
-            dfi = df_comp_raw[df_comp_raw[COL_POZO].astype(str) == str(pozo)].copy()
-
-            if dfi.empty:
-                continue
-
-            dfi = completar_fechas_mensuales(dfi)
-
-            for col in [COL_QO, COL_RGA, COL_WC]:
-                if col in dfi.columns:
-                    dfi[col] = dfi[col].fillna(0)
-
-            lista_pozos.append(dfi)
-
-        if lista_pozos:
-            df_comp = pd.concat(lista_pozos, ignore_index=True)
-            df_comp = df_comp.sort_values([COL_POZO, COL_FECHA])
-
+        if not df_comp.empty:
             st.plotly_chart(
                 comparative_plot(
                     df_comp,
@@ -747,7 +783,6 @@ elif vista == "Comparativo multipozo":
 
         else:
             st.warning("No hay datos disponibles para los pozos seleccionados.")
-
     else:
         st.info("Selecciona uno o más pozos para generar el comparativo.")
 
