@@ -473,6 +473,11 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False)
         margin=dict(l=35, r=35, t=60, b=35),
         plot_bgcolor="white",
         paper_bgcolor="white"
+        font=dict(
+        family="Arial Black",
+        size=16,
+        color="black"
+    )
     )
 
     fig.update_xaxes(
