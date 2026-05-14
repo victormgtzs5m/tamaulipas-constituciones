@@ -439,7 +439,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
         # nombre del pozo + valor acumulado
         text=mapa["ETIQUETA_MAPA"],
         textposition="top center",
-        textfont=dict(size=7, color="black"),
+        textfont=dict(size=12, color="black"),
 
         marker=dict(
             size=mapa["SIZE"],
