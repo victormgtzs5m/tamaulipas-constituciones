@@ -5,7 +5,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sqlite3
 
-
 # =========================================================
 # CONFIGURACIÓN GENERAL
 # =========================================================
@@ -15,25 +14,15 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed"
 )
-#
-
+#st.cache_data.clear()
 # =========================================================
 # RUTA DE LA BASE DE DATOS
-# Cambia esta ruta si tu archivo .db está en otra carpeta.
 # =========================================================
+ruta_db = "prodcoord.db"
 
-# Ruta de la base SQLite
-ruta_db = "prod.db"
-
-# Nombre de la tabla
-TABLA_PROD = "PROD"
-
-
-conn = sqlite3.connect(ruta_db)
-#ruta_db = r"C:\Users\VMGS\OneDrive - CONSORCIO PETROLERO 5M DEL GOLFO\Escritorio\Resplado C5M\Web\prod.db"
-
-# Nombre de la tabla en SQLite
-#TABLA_PROD = "PROD"
+# Tablas en SQLite
+TABLA_PROD = "Produccion"
+TABLA_COORD = "Coord"
 
 # =========================================================
 # COLUMNAS DE LA BASE NUEVA
@@ -48,6 +37,7 @@ COL_DIAS = "DIAS"
 COL_ACEITE = "ACEITE"
 COL_GAS = "GAS"
 COL_AGUA = "AGUA"
+COL_ALIAS = "Pozo"
 
 # Columnas calculadas para el visualizador
 COL_ACEITE_BBL = "Aceite (bl)"
@@ -304,8 +294,238 @@ def load_data() -> pd.DataFrame:
     return df
 
 
+@st.cache_data(show_spinner="Cargando coordenadas...")
+def load_coord() -> pd.DataFrame:
+    """Carga la tabla de coordenadas Coord desde SQLite."""
+    with sqlite3.connect(ruta_db) as conn:
+        coord = pd.read_sql_query(f'SELECT * FROM "{TABLA_COORD}"', conn)
+
+    coord = coord.loc[:, ~coord.columns.astype(str).str.startswith("Unnamed")]
+    coord = normalizar_columnas(coord)
+
+    if COL_POZO not in coord.columns:
+        raise ValueError(f"La tabla Coord no tiene la columna {COL_POZO}.")
+
+    if COL_YAC not in coord.columns:
+        raise ValueError(f"La tabla Coord no tiene la columna {COL_YAC}.")
+
+    coord[COL_POZO] = coord[COL_POZO].astype(str).str.strip()
+    coord[COL_YAC] = coord[COL_YAC].astype(str).str.strip()
+
+    cols_coord = [
+        "CIMA X UTM", "CIMA Y UTM",
+        "SUP X UTM", "SUP Y UTM",
+        "FONDO X UTM", "FONDO Y UTM"
+    ]
+
+    for c in cols_coord:
+        if c in coord.columns:
+            coord[c] = pd.to_numeric(coord[c], errors="coerce")
+
+    return coord
+
+
+def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
+    """Mapa de burbujas independiente con filtro por yacimiento y variable Np/Wp/Gp."""
+
+    st.markdown("<div class='section-title'>Mapa de burbujas por acumuladas</div>", unsafe_allow_html=True)
+
+    coord = df_coord.copy()
+    prod = calcular_columnas_produccion(df_base.copy())
+
+    # Acumuladas totales por pozo
+    acum = (
+        prod.groupby(COL_POZO, as_index=False)
+        .agg({
+            COL_ACEITE_BBL: "sum",
+            COL_AGUA_BBL: "sum",
+            COL_GAS_PC: "sum"
+        })
+    )
+
+    acum = acum.rename(columns={
+        COL_ACEITE_BBL: "NP_BLS",
+        COL_AGUA_BBL: "WP_BLS",
+        COL_GAS_PC: "GP_PC"
+    })
+
+    mapa = coord.merge(acum, on=COL_POZO, how="left")
+    mapa[["NP_BLS", "WP_BLS", "GP_PC"]] = mapa[["NP_BLS", "WP_BLS", "GP_PC"]].fillna(0)
+
+    # Validar columnas de coordenadas necesarias
+    req_coord = [
+        "CIMA X UTM", "CIMA Y UTM",
+        "SUP X UTM", "SUP Y UTM",
+        "FONDO X UTM", "FONDO Y UTM"
+    ]
+    faltantes = [c for c in req_coord if c not in mapa.columns]
+    if faltantes:
+        st.error(f"Faltan columnas en Coord: {faltantes}")
+        return
+
+    # Filtros propios del mapa
+    col_filtro1, col_filtro2 = st.columns([1.3, 1])
+
+    with col_filtro1:
+        yacs_mapa = sorted(mapa[COL_YAC].dropna().astype(str).unique())
+        yac_mapa_sel = st.multiselect(
+            "Yacimiento del mapa",
+            yacs_mapa,
+            default=yacs_mapa,
+            key="yac_mapa_burbujas"
+        )
+
+    with col_filtro2:
+        variable = st.selectbox(
+            "Tamaño de burbuja",
+            ["NP_BLS", "WP_BLS", "GP_PC"],
+            format_func=lambda x: {
+                "NP_BLS": "Np - Aceite acumulado [bls]",
+                "WP_BLS": "Wp - Agua acumulada [bls]",
+                "GP_PC": "Gp - Gas acumulado [pc]"
+            }[x],
+            key="variable_mapa_burbujas"
+        )
+
+    if yac_mapa_sel:
+        mapa = mapa[mapa[COL_YAC].astype(str).isin(yac_mapa_sel)].copy()
+
+    mapa = mapa.dropna(subset=["CIMA X UTM", "CIMA Y UTM"])
+
+    if mapa.empty:
+        st.warning("No hay coordenadas para el filtro seleccionado.")
+        return
+
+    # Escalamiento de burbuja
+    max_val = mapa[variable].max()
+    if max_val > 0:
+        mapa["SIZE"] = 15 + (mapa[variable] / max_val) * 120
+    else:
+        mapa["SIZE"] = 20
+
+    titulo_variable = {
+        "NP_BLS": "Np - Aceite acumulado",
+        "WP_BLS": "Wp - Agua acumulada",
+        "GP_PC": "Gp - Gas acumulado"
+    }[variable]
+
+    fig = go.Figure()
+
+    # Burbujas en cima de formación
+    color_variable = {
+    "NP_BLS": "green",
+    "WP_BLS": "blue",
+    "GP_PC": "red"
+    }
+
+    unidad_variable = {
+        "NP_BLS": "bls",
+        "WP_BLS": "bls",
+        "GP_PC": "pc"
+    }
+
+    mapa["ETIQUETA_MAPA"] = (
+        mapa["POZO"].fillna("").astype(str)
+        + "<br>"
+        + mapa[variable].fillna(0).map(lambda x: f"{x:,.0f}")
+    )
+
+    fig.add_trace(go.Scatter(
+        x=mapa["CIMA X UTM"],
+        y=mapa["CIMA Y UTM"],
+        mode="markers+text",
+
+        # nombre del pozo + valor acumulado
+        text=mapa["ETIQUETA_MAPA"],
+        textposition="top center",
+        textfont=dict(size=7, color="black"),
+
+        marker=dict(
+            size=mapa["SIZE"],
+            sizemode="diameter",
+            opacity=0.55,
+            color=color_variable[variable],
+            line=dict(width=1, color="black")
+        ),
+
+        customdata=mapa[[
+            "POZO",
+            COL_YAC,
+            "NP_BLS",
+            "WP_BLS",
+            "GP_PC"
+        ]],
+
+        hovertemplate=
+            "<b>Pozo:</b> %{customdata[0]}<br>" +
+            "<b>Yacimiento:</b> %{customdata[1]}<br>" +
+            "<b>Np:</b> %{customdata[2]:,.0f} bls<br>" +
+            "<b>Wp:</b> %{customdata[3]:,.0f} bls<br>" +
+            "<b>Gp:</b> %{customdata[4]:,.0f} pc<br>" +
+            "<extra></extra>"
+    ))
+
+
+        # Punto central del pozo
+    fig.add_trace(go.Scatter(
+        x=mapa["CIMA X UTM"],
+        y=mapa["CIMA Y UTM"],
+        mode="markers",
+
+        marker=dict(
+            size=5,
+            color="black",
+            symbol="circle"
+        ),
+
+        hoverinfo="skip",
+        showlegend=False
+    ))
+
+    fig.update_layout(
+        title=f"Mapa de burbujas - {titulo_variable}",
+        template="plotly_white",
+        height=780,
+        margin=dict(l=20, r=20, t=60, b=20),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        font=dict(family="Tahoma", size=11, color="black")
+    )
+
+    fig.update_xaxes(
+        title_text="UTM X",
+        showgrid=True,
+        gridcolor="#EAECEE",
+        zeroline=False,
+        showline=True,
+        linewidth=1,
+        linecolor="black"
+    )
+
+    fig.update_yaxes(
+        title_text="UTM Y",
+        showgrid=True,
+        gridcolor="#EAECEE",
+        zeroline=False,
+        scaleanchor="x",
+        scaleratio=1,
+        showline=True,
+        linewidth=1,
+        linecolor="black"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    with st.expander("Ver tabla del mapa"):
+        st.dataframe(
+            mapa[[COL_POZO, COL_YAC, "NP_BLS", "WP_BLS", "GP_PC", "CIMA X UTM", "CIMA Y UTM"]],
+            use_container_width=True,
+            hide_index=True
+        )
+
 try:
     df = load_data()
+    df_coord = load_coord()
 except Exception as e:
     st.error(f"No fue posible cargar la base: {e}")
     st.stop()
@@ -367,7 +587,7 @@ with f3:
 with f4:
     vista = st.radio(
         "Tipo de análisis",
-        ["Producción por pozo", "Comparativa por pozo"],
+        ["Producción por pozo", "Comparativa por pozo", "Mapa de burbujas"],
         horizontal=True
     )
 
@@ -767,7 +987,6 @@ if vista == "Producción por pozo":
         mime="text/csv"
     )
 
-
 # VISTA COMPARATIVO
 # =========================================================
 elif vista == "Comparativa por pozo":
@@ -881,5 +1100,10 @@ elif vista == "Comparativa por pozo":
 
     else:
         st.info("Selecciona uno o más pozos para generar el comparativo.")
+
+
+elif vista == "Mapa de burbujas":
+
+    mapa_burbujas(df, df_coord)
 
 st.caption("Desarrollado en Python + Streamlit.")
