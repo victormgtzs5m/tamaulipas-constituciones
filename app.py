@@ -315,7 +315,8 @@ def load_coord() -> pd.DataFrame:
     cols_coord = [
         "CIMA X UTM", "CIMA Y UTM",
         "SUP X UTM", "SUP Y UTM",
-        "FONDO X UTM", "FONDO Y UTM"
+        "FONDO X UTM", "FONDO Y UTM",
+        "RADIO DRENE"
     ]
 
     for c in cols_coord:
@@ -464,6 +465,45 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
             "<b>Gp:</b> %{customdata[4]:,.0f} pc<br>" +
             "<extra></extra>"
     ))
+
+    # ==========================================
+    # RADIOS DE DRENE
+    # ==========================================
+    # Nota: como las coordenadas UTM están en metros, el valor
+    # de RADIO DRENE se dibuja directamente en metros alrededor
+    # de la coordenada de cima del pozo.
+    if "RADIO DRENE" in mapa.columns:
+
+        mapa["RADIO DRENE"] = pd.to_numeric(mapa["RADIO DRENE"], errors="coerce")
+        theta = np.linspace(0, 2 * np.pi, 240)
+
+        for _, row in mapa.iterrows():
+
+            radio = row.get("RADIO DRENE")
+            x0 = row.get("CIMA X UTM")
+            y0 = row.get("CIMA Y UTM")
+
+            if pd.notna(radio) and radio > 0 and pd.notna(x0) and pd.notna(y0):
+
+                x_circulo = x0 + radio * np.cos(theta)
+                y_circulo = y0 + radio * np.sin(theta)
+
+                fig.add_trace(go.Scatter(
+                    x=x_circulo,
+                    y=y_circulo,
+                    mode="lines",
+                    line=dict(
+                        width=1.5,
+                        color="black",
+                        #dash="dash"
+                    ),
+                    hovertemplate=(
+                        "<b>Pozo:</b> " + str(row.get("POZO", "")) + "<br>" +
+                        "<b>Radio drene:</b> " + f"{radio:,.0f} m" +
+                        "<extra></extra>"
+                    ),
+                    showlegend=False
+                ))
 
 
         # Punto central del pozo
