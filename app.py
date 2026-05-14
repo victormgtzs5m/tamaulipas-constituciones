@@ -391,6 +391,14 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
     if yac_mapa_sel:
         mapa = mapa[mapa[COL_YAC].astype(str).isin(yac_mapa_sel)].copy()
 
+        pozos_mapa = sorted(mapa["POZO"].dropna().astype(str).unique())
+
+        pozo_zoom = st.selectbox(
+            "Zoom a pozo",
+            options=["Todos"] + pozos_mapa,
+            key="pozo_zoom_mapa"
+        )
+
     mapa = mapa.dropna(subset=["CIMA X UTM", "CIMA Y UTM"])
 
     if mapa.empty:
@@ -439,8 +447,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
         # nombre del pozo + valor acumulado
         text=mapa["ETIQUETA_MAPA"],
         textposition="top center",
-        textfont=dict(size=12, color="black"),
-
+        textfont=dict(size=10, color="black"),
+        showlegend=False,
         marker=dict(
             size=mapa["SIZE"],
             sizemode="diameter",
@@ -492,6 +500,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
                     x=x_circulo,
                     y=y_circulo,
                     mode="lines",
+                    
                     line=dict(
                         width=1.5,
                         color="black",
@@ -511,7 +520,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
         x=mapa["CIMA X UTM"],
         y=mapa["CIMA Y UTM"],
         mode="markers",
-
+        
         marker=dict(
             size=5,
             color="black",
@@ -522,46 +531,85 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
         showlegend=False
     ))
 
+    # ==========================================
+    # LEYENDA MAPA
+    # ==========================================
+
+    # Leyenda burbuja
+    fig.add_trace(go.Scatter(
+        x=[None],
+        y=[None],
+        mode="markers",
+
+        marker=dict(
+            size=18,
+            color=color_variable[variable],
+            opacity=0.60,
+            line=dict(width=2, color="black")
+        ),
+
+        name="Burbuja acumulada"
+    ))
+
+    # Leyenda radio de drene
+    fig.add_trace(go.Scatter(
+        x=[None],
+        y=[None],
+        mode="lines",
+
+        line=dict(
+            width=3,
+            color="black"
+        ),
+
+        name="Radio de drene"
+    ))
+
     fig.update_layout(
-        title=f"Mapa de burbujas - {titulo_variable}",
-        template="plotly_white",
-        height=780,
-        margin=dict(l=20, r=20, t=60, b=20),
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        font=dict(family="Tahoma", size=14, color="black")
-    )
+    title=f"Mapa de burbujas - {titulo_variable}",
+    template="plotly_white",
+    height=760,
 
-    fig.update_xaxes(
-        title_text="UTM X",
-        showgrid=True,
-        gridcolor="#EAECEE",
-        zeroline=False,
-        showline=True,
-        linewidth=1,
-        linecolor="black"
-    )
+    showlegend=True,
 
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=1.02,
+        xanchor="right",
+        x=1
+    )
+    )
+    fig.update_xaxes(title_text="UTM X")
     fig.update_yaxes(
         title_text="UTM Y",
-        showgrid=True,
-        gridcolor="#EAECEE",
-        zeroline=False,
         scaleanchor="x",
-        scaleratio=1,
-        showline=True,
-        linewidth=1,
-        linecolor="black"
+        scaleratio=1
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    # Zoom automático al pozo seleccionado
+    if pozo_zoom != "Todos":
 
-    with st.expander("Ver tabla del mapa"):
-        st.dataframe(
-            mapa[[COL_POZO, COL_YAC, "NP_BLS", "WP_BLS", "GP_PC", "CIMA X UTM", "CIMA Y UTM"]],
-            use_container_width=True,
-            hide_index=True
-        )
+        row_zoom = mapa[mapa["POZO"].astype(str) == pozo_zoom]
+
+        if not row_zoom.empty:
+
+            x0 = row_zoom["CIMA X UTM"].iloc[0]
+            y0 = row_zoom["CIMA Y UTM"].iloc[0]
+
+            radio_zoom = 500  # metros alrededor del pozo
+
+            fig.update_xaxes(range=[x0 - radio_zoom, x0 + radio_zoom])
+            fig.update_yaxes(range=[y0 - radio_zoom, y0 + radio_zoom])
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("Ver tabla del mapa"):
+            st.dataframe(
+                mapa[[COL_POZO, COL_YAC, "NP_BLS", "WP_BLS", "GP_PC", "CIMA X UTM", "CIMA Y UTM"]],
+                use_container_width=True,
+                hide_index=True
+            )
 
 try:
     df = load_data()
@@ -747,6 +795,7 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
                 line=dict(width=2.5),
                 marker=dict(size=4),
                 connectgaps=False,
+                
                 hovertemplate=
                     "<b>Pozo: %{fullData.name}</b><br>" +
                     hover_x + "<br>" +
