@@ -529,7 +529,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
         margin=dict(l=20, r=20, t=60, b=20),
         plot_bgcolor="white",
         paper_bgcolor="white",
-        font=dict(family="Tahoma", size=11, color="black")
+        font=dict(family="Tahoma", size=14, color="black")
     )
 
     fig.update_xaxes(
