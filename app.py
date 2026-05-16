@@ -4,6 +4,8 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sqlite3
+from scipy.interpolate import griddata
+
 
 # =========================================================
 # CONFIGURACIÓN GENERAL
@@ -17,12 +19,45 @@ st.set_page_config(
 #st.cache_data.clear()
 # =========================================================
 # RUTA DE LA BASE DE DATOS
+# Cambia esta ruta si tu archivo .db está en otra carpeta.
 # =========================================================
+
+# Ruta de la base
 ruta_db = "prodcoord.db"
 
-# Tablas en SQLite
+# Tablas
 TABLA_PROD = "Produccion"
 TABLA_COORD = "Coord"
+TABLA_CONTORNO = "Contorno"
+TABLA_ASIGNACION = "Asignacion"
+
+@st.cache_data(show_spinner=False)
+def load_table(tabla):
+
+    conn = sqlite3.connect(ruta_db)
+
+    df = pd.read_sql(
+        f"SELECT * FROM {tabla}",
+        conn
+    )
+
+    conn.close()
+
+    return df
+# Conexión
+#conn = sqlite3.connect(ruta_db)
+
+# Leer producción
+#df_prod = pd.read_sql(f"SELECT * FROM {TABLA_PROD}", conn)
+
+# Leer coordenadas
+#df_coord = pd.read_sql(f"SELECT * FROM {TABLA_COORD}", conn)
+
+#conn.close()
+#ruta_db = r"C:\Users\VMGS\OneDrive - CONSORCIO PETROLERO 5M DEL GOLFO\Escritorio\Resplado C5M\Web\prod.db"
+
+# Nombre de la tabla en SQLite
+#TABLA_PROD = "PROD"
 
 # =========================================================
 # COLUMNAS DE LA BASE NUEVA
@@ -37,7 +72,6 @@ COL_DIAS = "DIAS"
 COL_ACEITE = "ACEITE"
 COL_GAS = "GAS"
 COL_AGUA = "AGUA"
-COL_ALIAS = "Pozo"
 
 # Columnas calculadas para el visualizador
 COL_ACEITE_BBL = "Aceite (bl)"
@@ -296,45 +330,38 @@ def load_data() -> pd.DataFrame:
 
 @st.cache_data(show_spinner="Cargando coordenadas...")
 def load_coord() -> pd.DataFrame:
-    """Carga la tabla de coordenadas Coord desde SQLite."""
+    """Carga la tabla Coord para el mapa de burbujas."""
     with sqlite3.connect(ruta_db) as conn:
         coord = pd.read_sql_query(f'SELECT * FROM "{TABLA_COORD}"', conn)
 
     coord = coord.loc[:, ~coord.columns.astype(str).str.startswith("Unnamed")]
     coord = normalizar_columnas(coord)
 
-    if COL_POZO not in coord.columns:
-        raise ValueError(f"La tabla Coord no tiene la columna {COL_POZO}.")
-
-    if COL_YAC not in coord.columns:
-        raise ValueError(f"La tabla Coord no tiene la columna {COL_YAC}.")
-
-    coord[COL_POZO] = coord[COL_POZO].astype(str).str.strip()
-    coord[COL_YAC] = coord[COL_YAC].astype(str).str.strip()
-
-    cols_coord = [
-        "CIMA X UTM", "CIMA Y UTM",
-        "SUP X UTM", "SUP Y UTM",
-        "FONDO X UTM", "FONDO Y UTM",
-        "RADIO DRENE"
-    ]
-
-    for c in cols_coord:
+    for c in ["CIMA X UTM", "CIMA Y UTM", "RADIO DRENE"]:
         if c in coord.columns:
             coord[c] = pd.to_numeric(coord[c], errors="coerce")
+
+    if COL_POZO in coord.columns:
+        coord[COL_POZO] = coord[COL_POZO].astype(str).str.strip()
+    if COL_YAC in coord.columns:
+        coord[COL_YAC] = coord[COL_YAC].astype(str).str.strip()
+    if "POZO" in coord.columns:
+        coord["POZO"] = coord["POZO"].astype(str).str.strip()
 
     return coord
 
 
 def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
-    """Mapa de burbujas independiente con filtro por yacimiento y variable Np/Wp/Gp."""
+    """Mapa de burbujas con radios de drene y leyenda interactiva por grupos."""
 
-    st.markdown("<div class='section-title'>Mapa de burbujas por acumuladas</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>Mapa de burbujas y radios de drene</div>", unsafe_allow_html=True)
 
     coord = df_coord.copy()
     prod = calcular_columnas_produccion(df_base.copy())
 
-    # Acumuladas totales por pozo
+    contorno = load_table(TABLA_CONTORNO)
+    asignacion = load_table(TABLA_ASIGNACION)
+
     acum = (
         prod.groupby(COL_POZO, as_index=False)
         .agg({
@@ -342,244 +369,249 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
             COL_AGUA_BBL: "sum",
             COL_GAS_PC: "sum"
         })
+        .rename(columns={
+            COL_ACEITE_BBL: "NP_BLS",
+            COL_AGUA_BBL: "WP_BLS",
+            COL_GAS_PC: "GP_PC"
+        })
     )
-
-    acum = acum.rename(columns={
-        COL_ACEITE_BBL: "NP_BLS",
-        COL_AGUA_BBL: "WP_BLS",
-        COL_GAS_PC: "GP_PC"
-    })
 
     mapa = coord.merge(acum, on=COL_POZO, how="left")
     mapa[["NP_BLS", "WP_BLS", "GP_PC"]] = mapa[["NP_BLS", "WP_BLS", "GP_PC"]].fillna(0)
 
-    # Validar columnas de coordenadas necesarias
-    req_coord = [
-        "CIMA X UTM", "CIMA Y UTM",
-        "SUP X UTM", "SUP Y UTM",
-        "FONDO X UTM", "FONDO Y UTM"
-    ]
-    faltantes = [c for c in req_coord if c not in mapa.columns]
-    if faltantes:
-        st.error(f"Faltan columnas en Coord: {faltantes}")
-        return
+    if "RADIO DRENE" in mapa.columns:
+        mapa["RADIO DRENE"] = pd.to_numeric(mapa["RADIO DRENE"], errors="coerce")
+    else:
+        mapa["RADIO DRENE"] = np.nan
 
     # Filtros propios del mapa
-    col_filtro1, col_filtro2 = st.columns([1.3, 1])
+    c1, c2, c3 = st.columns([1.4, 1.4, 1.4])
 
-    with col_filtro1:
+    with c1:
         yacs_mapa = sorted(mapa[COL_YAC].dropna().astype(str).unique())
-        yac_mapa_sel = st.multiselect(
+        yac_mapa = st.selectbox(
             "Yacimiento del mapa",
-            yacs_mapa,
-            default=yacs_mapa,
+            options=[None] + yacs_mapa,
+            format_func=lambda x: "Seleccionar yacimiento" if x is None else x,
             key="yac_mapa_burbujas"
         )
 
-    with col_filtro2:
+    if yac_mapa is None:
+        st.info("Selecciona un yacimiento para visualizar el mapa.")
+        return
+
+    mapa = mapa[mapa[COL_YAC].astype(str) == str(yac_mapa)].copy()
+
+    with c2:
         variable = st.selectbox(
-            "Tamaño de burbuja",
+            "Variable de burbuja",
             ["NP_BLS", "WP_BLS", "GP_PC"],
             format_func=lambda x: {
-                "NP_BLS": "Np - Aceite acumulado [bls]",
-                "WP_BLS": "Wp - Agua acumulada [bls]",
-                "GP_PC": "Gp - Gas acumulado [pc]"
+                "NP_BLS": "Aceite acumulado, Np [bls]",
+                "WP_BLS": "Agua acumulada, Wp [bls]",
+                "GP_PC": "Gas acumulado, Gp [pc]"
             }[x],
             key="variable_mapa_burbujas"
-        )
+        )        
 
-    if yac_mapa_sel:
-        mapa = mapa[mapa[COL_YAC].astype(str).isin(yac_mapa_sel)].copy()
-
-        pozos_mapa = sorted(mapa["POZO"].dropna().astype(str).unique())
-
+    with c3:
+        pozos_mapa = sorted(mapa["POZO"].dropna().astype(str).unique()) if "POZO" in mapa.columns else []
         pozo_zoom = st.selectbox(
             "Zoom a pozo",
             options=["Todos"] + pozos_mapa,
             key="pozo_zoom_mapa"
         )
 
-    mapa = mapa.dropna(subset=["CIMA X UTM", "CIMA Y UTM"])
+    color_variable = {
+        "NP_BLS": "green",
+        "WP_BLS": "blue",
+        "GP_PC": "red"
+    }
 
-    if mapa.empty:
-        st.warning("No hay coordenadas para el filtro seleccionado.")
-        return
-
-    # Escalamiento de burbuja
     max_val = mapa[variable].max()
     if max_val > 0:
-        mapa["SIZE"] = 15 + (mapa[variable] / max_val) * 120
+        mapa["SIZE"] = 18 + (mapa[variable] / max_val) * 150
     else:
-        mapa["SIZE"] = 20
+        mapa["SIZE"] = 18
 
-    titulo_variable = {
-        "NP_BLS": "Np - Aceite acumulado",
-        "WP_BLS": "Wp - Agua acumulada",
-        "GP_PC": "Gp - Gas acumulado"
-    }[variable]
+    # Etiqueta: nombre del pozo + acumulada
+    if "POZO" not in mapa.columns:
+        mapa["POZO"] = mapa[COL_POZO]
+
+    mapa["ETIQUETA_MAPA"] = (
+        mapa[variable].fillna(0).map(lambda x: f"{x/1000:,.1f}")
+    )
 
     fig = go.Figure()
 
-    # Burbujas en cima de formación
-    color_variable = {
-    "NP_BLS": "green",
-    "WP_BLS": "blue",
-    "GP_PC": "red"
-    }
+    # =========================
+    # CONTORNO Y ASIGNACION
+    # =========================
 
-    unidad_variable = {
-        "NP_BLS": "bls",
-        "WP_BLS": "bls",
-        "GP_PC": "pc"
-    }
+    contorno = contorno.sort_values("Orden")
+    asignacion = asignacion.sort_values("Orden")
 
-    mapa["ETIQUETA_MAPA"] = (
-        mapa["POZO"].fillna("").astype(str)
-        + "<br>"
-        + mapa[variable].fillna(0).map(lambda x: f"{x:,.0f}")
+    # Cerrar poligonos
+    contorno_plot = pd.concat(
+        [contorno, contorno.iloc[[0]]],
+        ignore_index=True
     )
 
+    asignacion_plot = pd.concat(
+        [asignacion, asignacion.iloc[[0]]],
+        ignore_index=True
+    )
+
+    # Contorno campo
     fig.add_trace(go.Scatter(
-        x=mapa["CIMA X UTM"],
-        y=mapa["CIMA Y UTM"],
-        mode="markers+text",
-
-        # nombre del pozo + valor acumulado
-        text=mapa["ETIQUETA_MAPA"],
-        textposition="top center",
-        textfont=dict(size=10, color="black"),
-        showlegend=False,
-        marker=dict(
-            size=mapa["SIZE"],
-            sizemode="diameter",
-            opacity=0.55,
-            color=color_variable[variable],
-            line=dict(width=1, color="black")
+        x=contorno_plot["X"],
+        y=contorno_plot["Y"],
+        mode="lines",
+        name="Campo",
+        line=dict(
+            color="black",
+            width=3
         ),
+        hoverinfo="skip"
+    ))
 
-        customdata=mapa[[
-            "POZO",
-            COL_YAC,
-            "NP_BLS",
-            "WP_BLS",
-            "GP_PC"
-        ]],
+    # Asignacion
+    fig.add_trace(go.Scatter(
+        x=asignacion_plot["X"],
+        y=asignacion_plot["Y"],
+        mode="lines",
+        name="Asignacion",
+        line=dict(
+            color="red",
+            width=3,
+            dash="dash"
+        ),
+        hoverinfo="skip"
+    ))
+    # =====================================================
+    # RADIOS DE DRENE
+    # legendgroup='radios' permite que la leyenda los oculte/muestre juntos.
+    # =====================================================
+    theta = np.linspace(0, 2*np.pi, 180)
 
+    for _, row in mapa.iterrows():
+        radio = row.get("RADIO DRENE")
+
+        if (
+            pd.notna(radio) and radio > 0 and
+            pd.notna(row.get("CIMA X UTM")) and
+            pd.notna(row.get("CIMA Y UTM"))
+        ):
+            x0 = row["CIMA X UTM"]
+            y0 = row["CIMA Y UTM"]
+
+            fig.add_trace(go.Scatter(
+                x=x0 + radio * np.cos(theta),
+                y=y0 + radio * np.sin(theta),
+                mode="lines",
+                line=dict(width=2, color="black"),
+                name="Radio de drene (m)",
+                legendgroup="radios",
+                #mode="text",
+                text=[f"{radio:,.0f} m"],
+                textfont=dict(
+                    size=9,
+                    color="black"
+                ),
+                showlegend=False,
+                hovertemplate=
+                "<b>Pozo:</b> " + str(row.get("POZO", "")) + "<br>" +
+                "<b>Radio drene:</b> " + f"{radio:,.0f} m" +
+                "<extra></extra>",
+            ))
+
+    mapa_burb = mapa[mapa[variable] > 0].copy()
+    # =====================================================
+    # BURBUJAS
+    # legendgroup='burbujas' permite que burbuja, brillo y punto se apaguen juntos.
+    # =====================================================
+    fig.add_trace(go.Scatter(
+        x=mapa_burb["CIMA X UTM"],
+        y=mapa_burb["CIMA Y UTM"],
+        mode="markers+text",
+        text=mapa_burb["ETIQUETA_MAPA"],
+        textposition="top center",
+        textfont=dict(size=13, color="green"),
+        marker=dict(
+            size=mapa_burb["SIZE"],
+            sizemode="diameter",
+            opacity=0.65,
+            color=color_variable[variable],
+            line=dict(width=2, color="rgba(0,0,0,0.55)")
+        ),
+        customdata=mapa_burb[["POZO", COL_YAC, "NP_BLS", "WP_BLS", "GP_PC", "RADIO DRENE"]],
         hovertemplate=
             "<b>Pozo:</b> %{customdata[0]}<br>" +
             "<b>Yacimiento:</b> %{customdata[1]}<br>" +
             "<b>Np:</b> %{customdata[2]:,.0f} bls<br>" +
             "<b>Wp:</b> %{customdata[3]:,.0f} bls<br>" +
             "<b>Gp:</b> %{customdata[4]:,.0f} pc<br>" +
-            "<extra></extra>"
+            "<b>Radio drene:</b> %{customdata[5]:,.0f} m<br>" +
+            "<extra></extra>",
+        name="Burbuja acumulada (mb)",
+        legendgroup="burbujas",
+        showlegend=True
     ))
-
-    # ==========================================
-    # RADIOS DE DRENE
-    # ==========================================
-    # Nota: como las coordenadas UTM están en metros, el valor
-    # de RADIO DRENE se dibuja directamente en metros alrededor
-    # de la coordenada de cima del pozo.
-    if "RADIO DRENE" in mapa.columns:
-
-        mapa["RADIO DRENE"] = pd.to_numeric(mapa["RADIO DRENE"], errors="coerce")
-        theta = np.linspace(0, 2 * np.pi, 240)
-
-        for _, row in mapa.iterrows():
-
-            radio = row.get("RADIO DRENE")
-            x0 = row.get("CIMA X UTM")
-            y0 = row.get("CIMA Y UTM")
-
-            if pd.notna(radio) and radio > 0 and pd.notna(x0) and pd.notna(y0):
-
-                x_circulo = x0 + radio * np.cos(theta)
-                y_circulo = y0 + radio * np.sin(theta)
-
-                fig.add_trace(go.Scatter(
-                    x=x_circulo,
-                    y=y_circulo,
-                    mode="lines",
-                    
-                    line=dict(
-                        width=1.5,
-                        color="black",
-                        #dash="dash"
-                    ),
-                    hovertemplate=(
-                        "<b>Pozo:</b> " + str(row.get("POZO", "")) + "<br>" +
-                        "<b>Radio drene:</b> " + f"{radio:,.0f} m" +
-                        "<extra></extra>"
-                    ),
-                    showlegend=False
-                ))
-
-
-        # Punto central del pozo
+   
+   # Punto exacto de cima + nombre pozo
     fig.add_trace(go.Scatter(
-        x=mapa["CIMA X UTM"],
-        y=mapa["CIMA Y UTM"],
-        mode="markers",
-        
-        marker=dict(
-            size=5,
-            color="black",
-            symbol="circle"
-        ),
+    x=mapa["CIMA X UTM"],
+    y=mapa["CIMA Y UTM"],
 
-        hoverinfo="skip",
-        showlegend=False
+    mode="markers+text",
+
+    text=mapa["POZO"],
+    textposition="top center",
+
+    textfont=dict(
+        size=13,
+        color="black"
+    ),
+
+    marker=dict(
+        size=5,
+        color="black"
+    ),
+
+    hoverinfo="skip",
+
+    showlegend=False
     ))
 
-    # ==========================================
-    # LEYENDA MAPA
-    # ==========================================
 
-    # Leyenda burbuja
-    fig.add_trace(go.Scatter(
-        x=[None],
-        y=[None],
-        mode="markers",
 
-        marker=dict(
-            size=18,
-            color=color_variable[variable],
-            opacity=0.60,
-            line=dict(width=2, color="black")
-        ),
-
-        name="Burbuja acumulada"
-    ))
-
-    # Leyenda radio de drene
+    # Traza ficticia para que Radio de drene aparezca en la leyenda una sola vez
     fig.add_trace(go.Scatter(
         x=[None],
         y=[None],
         mode="lines",
-
-        line=dict(
-            width=3,
-            color="black"
-        ),
-
-        name="Radio de drene"
+        line=dict(width=2, color="black"),
+        name="Radio de drene (m)",
+        legendgroup="radios",
+        showlegend=True
     ))
 
     fig.update_layout(
-    title=f"Mapa de burbujas - {titulo_variable}",
-    template="plotly_white",
-    height=760,
-
-    showlegend=True,
-
-    legend=dict(
-        orientation="h",
-        yanchor="bottom",
-        y=1.02,
-        xanchor="right",
-        x=1
+        title=f"Mapa de burbujas - {yac_mapa}",
+        template="plotly_white",
+        height=780,
+        margin=dict(l=20, r=20, t=70, b=20),
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            groupclick="togglegroup"
+        )
     )
-    )
+
     fig.update_xaxes(title_text="UTM X")
     fig.update_yaxes(
         title_text="UTM Y",
@@ -588,28 +620,17 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
     )
 
     # Zoom automático al pozo seleccionado
-    if pozo_zoom != "Todos":
-
-        row_zoom = mapa[mapa["POZO"].astype(str) == pozo_zoom]
-
+    if pozo_zoom != "Todos" and "POZO" in mapa.columns:
+        row_zoom = mapa[mapa["POZO"].astype(str) == str(pozo_zoom)]
         if not row_zoom.empty:
-
             x0 = row_zoom["CIMA X UTM"].iloc[0]
             y0 = row_zoom["CIMA Y UTM"].iloc[0]
-
-            radio_zoom = 500  # metros alrededor del pozo
-
+            radio_zoom = 500
             fig.update_xaxes(range=[x0 - radio_zoom, x0 + radio_zoom])
             fig.update_yaxes(range=[y0 - radio_zoom, y0 + radio_zoom])
 
-        st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True)
 
-        with st.expander("Ver tabla del mapa"):
-            st.dataframe(
-                mapa[[COL_POZO, COL_YAC, "NP_BLS", "WP_BLS", "GP_PC", "CIMA X UTM", "CIMA Y UTM"]],
-                use_container_width=True,
-                hide_index=True
-            )
 
 try:
     df = load_data()
@@ -643,7 +664,7 @@ f1, f2, f3, f4 = st.columns([1.7, 2.3, 2.3, 2.2])
 
 with f1:
     yacs = sorted(df[COL_YAC].dropna().astype(str).unique())
-    yac_sel = st.multiselect("Yacimiento", yacs, default=yacs)
+    yac_sel = st.multiselect("Filtro por Yacimiento", yacs, default=yacs)
 
 # El filtro de Yacimiento solo se usa para listar/seleccionar pozos.
 df_base_filtro = df[df[COL_YAC].astype(str).isin(yac_sel)].copy() if yac_sel else df.copy()
@@ -795,7 +816,6 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
                 line=dict(width=2.5),
                 marker=dict(size=4),
                 connectgaps=False,
-                
                 hovertemplate=
                     "<b>Pozo: %{fullData.name}</b><br>" +
                     hover_x + "<br>" +
@@ -1050,32 +1070,7 @@ if vista == "Producción por pozo":
 
     st.plotly_chart(fig3, use_container_width=True)
 
-    st.markdown("<div class='section-title'>Datos filtrados del pozo</div>", unsafe_allow_html=True)
-
-    show_cols = [
-        COL_POZO, COL_FECHA, COL_YAC, COL_CONTA, COL_DIAS,
-        COL_ACEITE, COL_AGUA, COL_GAS,
-        COL_ACEITE_BBL, COL_AGUA_BBL, COL_GAS_PC,
-        COL_QO, COL_QW, COL_QG,
-        COL_NP, COL_WP, COL_GP,
-        COL_WC, COL_RGA
-    ]
-
-    st.dataframe(
-        dfp[show_cols],
-        use_container_width=True,
-        hide_index=True
-    )
-
-    csv = dfp[show_cols].to_csv(index=False).encode("utf-8-sig")
-
-    st.download_button(
-        "Descargar datos filtrados en CSV",
-        data=csv,
-        file_name=f"produccion_{pozo_sel}.csv",
-        mime="text/csv"
-    )
-
+    
 # VISTA COMPARATIVO
 # =========================================================
 elif vista == "Comparativa por pozo":
@@ -1191,8 +1186,9 @@ elif vista == "Comparativa por pozo":
         st.info("Selecciona uno o más pozos para generar el comparativo.")
 
 
+# VISTA MAPA DE BURBUJAS
+# =========================================================
 elif vista == "Mapa de burbujas":
-
     mapa_burbujas(df, df_coord)
 
 st.caption("Desarrollado en Python + Streamlit.")
