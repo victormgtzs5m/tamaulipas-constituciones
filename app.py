@@ -5,7 +5,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sqlite3
 
-
 # =========================================================
 # CONFIGURACIÓN GENERAL
 # =========================================================
@@ -566,7 +565,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
         mode="markers+text",
         text=mapa_burb["ETIQUETA_MAPA"],
         textposition="top center",
-        textfont=dict(size=13, color="green"),
+        textfont=dict(size=13, color="blue"),
         marker=dict(
             size=mapa_burb["SIZE"],
             sizemode="diameter",
