@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sqlite3
 
+
 # =========================================================
 # CONFIGURACIÓN GENERAL
 # =========================================================
@@ -348,6 +349,23 @@ def load_coord() -> pd.DataFrame:
 
     return coord
 
+# Ultimo Porcetaje de Agua por pozo
+@st.cache_data(show_spinner=False)
+def calcular_ultimo_wc_mapa(df_base):
+
+    prod = calcular_columnas_produccion(df_base.copy())
+
+    prod = prod.sort_values([COL_POZO, COL_FECHA])
+
+    ultimo_wc = (
+        prod.dropna(subset=[COL_WC])
+        .groupby(COL_POZO, as_index=False)
+        .tail(1)[[COL_POZO, COL_WC]]
+        .rename(columns={COL_WC: "ULTIMO_WC"})
+    )
+
+    return ultimo_wc
+
 
 def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
     """Mapa de burbujas con radios de drene y leyenda interactiva por grupos."""
@@ -375,6 +393,16 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
     )
 
     mapa = coord.merge(acum, on=COL_POZO, how="left")
+    ultimo_wc = calcular_ultimo_wc_mapa(df_base)
+
+    mapa = mapa.merge(
+        ultimo_wc,
+        on=COL_POZO,
+        how="left"
+    )
+
+    mapa["ULTIMO_WC"] = mapa["ULTIMO_WC"].fillna(0)
+
     mapa[["NP_BLS", "WP_BLS", "GP_PC"]] = mapa[["NP_BLS", "WP_BLS", "GP_PC"]].fillna(0)
 
     if "RADIO DRENE" in mapa.columns:
@@ -403,11 +431,12 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
     with c2:
         variable = st.selectbox(
             "Variable de burbuja",
-            ["NP_BLS", "WP_BLS", "GP_PC"],
+            ["NP_BLS", "WP_BLS", "GP_PC","ULTIMO_WC"],
             format_func=lambda x: {
                 "NP_BLS": "Aceite acumulado, Np [bls]",
                 "WP_BLS": "Agua acumulada, Wp [bls]",
-                "GP_PC": "Gas acumulado, Gp [pc]"
+                "GP_PC": "Gas acumulado, Gp [pc]",
+                "ULTIMO_WC": "Último % Agua [%]"
             }[x],
             key="variable_mapa_burbujas"
         )        
@@ -423,7 +452,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
     color_variable = {
         "NP_BLS": "green",
         "WP_BLS": "blue",
-        "GP_PC": "red"
+        "GP_PC": "red",
+        "ULTIMO_WC": "deepskyblue"
     }
 
     max_val = mapa[variable].max()
@@ -436,9 +466,11 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
     if "POZO" not in mapa.columns:
         mapa["POZO"] = mapa[COL_POZO]
 
-    mapa["ETIQUETA_MAPA"] = (
-        mapa[variable].fillna(0).map(lambda x: f"{x/1000:,.1f}")
-    )
+    if variable == "ULTIMO_WC":
+        mapa["ETIQUETA_MAPA"] = mapa[variable].fillna(0).map(lambda x: f"{x:.1f}%")
+    else:
+        mapa["ETIQUETA_MAPA"] = mapa[variable].fillna(0).map(lambda x: f"{x/1000:,.1f}")
+    
 
     fig = go.Figure()
 
@@ -879,8 +911,8 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
     fig.update_yaxes(
         title_text=f"<b>{y_title}</b>",
         type="log" if semilog else "linear",
-        tickvals=[0.1, 1, 10, 100, 1000] if semilog else None,
-        ticktext=["0.1", "1", "10", "100", "1000"] if semilog else None,
+        tickvals=[0.1, 1, 10, 100, 1000, 10000, 100000] if semilog else None,
+        ticktext=["0.1", "1", "10", "100", "1000","10000","100000"] if semilog else None,
         showgrid=True,
         gridcolor="#EAECEE",
         zeroline=False,
@@ -973,7 +1005,10 @@ if vista == "Producción por pozo":
     linewidth=1,
     linecolor='black')
 
-    fig1.update_yaxes(title_text="Np (mbl) / Qg (mpcd)", secondary_y=True)
+    fig1.update_yaxes(title_text="Np (mbl) / Qg (mpcd)", title_font=dict(size=22),
+     secondary_y=True, tickfont=dict(size=18, color="black"),showline=True,
+    linewidth=1,
+    linecolor='black')
 
     st.plotly_chart(fig1, use_container_width=True)
 
@@ -1016,9 +1051,17 @@ if vista == "Producción por pozo":
         margin=dict(l=35, r=35, t=60, b=35)
     )
 
-    fig2.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y")
-    fig2.update_yaxes(title_text="Qw (bpd)", secondary_y=False)
-    fig2.update_yaxes(title_text="Wp (mbl)", secondary_y=True)
+    fig2.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y", title_font=dict(size=22), tickfont=dict(size=18, color="black"),showline=True,
+    linewidth=1,
+    linecolor='black')
+    fig2.update_yaxes(title_text="Qw (bpd)", title_font=dict(size=22),
+     secondary_y=False, tickfont=dict(size=18, color="black"),showline=True,
+    linewidth=1,
+    linecolor='black')
+    fig2.update_yaxes(title_text="Wp (mbl)", title_font=dict(size=22),
+     secondary_y=True, tickfont=dict(size=18, color="black"),showline=True,
+    linewidth=1,
+    linecolor='black')
 
     st.plotly_chart(fig2, use_container_width=True)
 
@@ -1062,9 +1105,17 @@ if vista == "Producción por pozo":
         margin=dict(l=35, r=35, t=60, b=35)
     )
 
-    fig3.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y")
-    fig3.update_yaxes(title_text="RGA (pc/bl)", secondary_y=False)
-    fig3.update_yaxes(title_text="Gp (mmpc)", secondary_y=True)
+    fig3.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y", title_font=dict(size=22), tickfont=dict(size=18, color="black"),showline=True,
+    linewidth=1,
+    linecolor='black')
+    fig3.update_yaxes(title_text="RGA (pc/bl)", title_font=dict(size=22),
+     secondary_y=False, tickfont=dict(size=18, color="black"),showline=True,
+    linewidth=1,
+    linecolor='black')
+    fig3.update_yaxes(title_text="Gp (mmpc)", title_font=dict(size=22),
+     secondary_y=True, tickfont=dict(size=18, color="black"),showline=True,
+    linewidth=1,
+    linecolor='black')
 
     st.plotly_chart(fig3, use_container_width=True)
 
