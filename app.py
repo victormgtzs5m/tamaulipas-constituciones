@@ -4,6 +4,8 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sqlite3
+import plotly.express as px
+
 
 # =========================================================
 # CONFIGURACIÓN GENERAL
@@ -365,6 +367,8 @@ def calcular_ultimo_wc_mapa(df_base):
 
     return ultimo_wc
 
+#######Mapa con tiempo
+
 
 def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
     """Mapa de burbujas con radios de drene y leyenda interactiva por grupos."""
@@ -439,6 +443,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
             }[x],
             key="variable_mapa_burbujas"
         )        
+
 
     with c3:
         pozos_mapa = sorted(mapa["POZO"].dropna().astype(str).unique()) if "POZO" in mapa.columns else []
