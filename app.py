@@ -30,6 +30,7 @@ TABLA_PROD = "Produccion"
 TABLA_COORD = "Coord"
 TABLA_CONTORNO = "Contorno"
 TABLA_ASIGNACION = "Asignacion"
+TABLA_TERM = "TERM"
 
 @st.cache_data(show_spinner=False)
 def load_table(tabla):
@@ -350,6 +351,43 @@ def load_coord() -> pd.DataFrame:
 
     return coord
 
+#Aqui van los pozos historicos del campo del 2011 al 2020
+@st.cache_data(show_spinner="Cargando pozos perforados históricos...")
+def load_term_perforados() -> pd.DataFrame:
+    term = load_table(TABLA_TERM)
+    term = term.loc[:, ~term.columns.astype(str).str.startswith("Unnamed")]
+    term = normalizar_columnas(term)
+
+    # Si TERMINACION no viene como encabezado, usa la segunda columna
+    if COL_POZO not in term.columns:
+        segunda_col = term.columns[1]
+        term = term.rename(columns={segunda_col: COL_POZO})
+
+    term[COL_POZO] = term[COL_POZO].astype(str).str.strip()
+
+    # Detectar año si existe
+    col_anio = None
+    for c in ["AÑO", "ANO", "YEAR"]:
+        if c in term.columns:
+            col_anio = c
+            break
+
+    if col_anio:
+        term[col_anio] = pd.to_numeric(term[col_anio], errors="coerce")
+        term = term[(term[col_anio] >= 2011) & (term[col_anio] <= 2020)]
+
+    elif COL_FECHA in term.columns:
+        term[COL_FECHA] = convertir_fechas(term[COL_FECHA])
+        term = term[
+            (term[COL_FECHA].dt.year >= 2011) &
+            (term[COL_FECHA].dt.year <= 2020)
+        ]
+
+    term = term[[COL_POZO]].dropna().drop_duplicates()
+    term["PERFORADO_TERM"] = "Sí"
+
+    return term
+
 # Ultimo Porcetaje de Agua por pozo
 @st.cache_data(show_spinner=False)
 def calcular_ultimo_wc_mapa(df_base):
@@ -404,6 +442,16 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
         how="left"
     )
 
+    term = load_term_perforados()
+
+    mapa = mapa.merge(
+        term,
+        on=COL_POZO,
+        how="left"
+    )
+
+    mapa["PERFORADO_TERM"] = mapa["PERFORADO_TERM"].fillna("No")
+
     mapa["ULTIMO_WC"] = mapa["ULTIMO_WC"].fillna(0)
 
     mapa[["NP_BLS", "WP_BLS", "GP_PC"]] = mapa[["NP_BLS", "WP_BLS", "GP_PC"]].fillna(0)
@@ -414,7 +462,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
         mapa["RADIO DRENE"] = np.nan
 
     # Filtros propios del mapa
-    c1, c2, c3 = st.columns([1.4, 1.4, 1.4])
+    c1, c2, c3, c4 = st.columns([1.3, 1.3, 1.3, 1.3])
+    #c1, c2, c3 = st.columns([1.4, 1.4, 1.4])
 
     with c1:
         yacs_mapa = sorted(mapa[COL_YAC].dropna().astype(str).unique())
@@ -453,6 +502,19 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
             key="pozo_zoom_mapa"
         )
 
+    with c4:
+        filtro_term = st.selectbox(
+            "Pozos perforados históricos TERM",
+            ["Todos", "Solo perforados 2011-2020", "Solo no perforados"],
+            key="filtro_term_mapa"
+        )
+
+        if filtro_term == "Solo perforados 2011-2020":
+            mapa = mapa[mapa["PERFORADO_TERM"] == "Sí"].copy()
+
+        elif filtro_term == "Solo no perforados":
+            mapa = mapa[mapa["PERFORADO_TERM"] == "No"].copy()
+
     color_variable = {
         "NP_BLS": "green",
         "WP_BLS": "blue",
@@ -462,7 +524,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
 
     max_val = mapa[variable].max()
     if max_val > 0:
-        mapa["SIZE"] = 18 + (mapa[variable] / max_val) * 150
+        mapa["SIZE"] = 18 + (mapa[variable] / max_val) * 50
     else:
         mapa["SIZE"] = 18
 
@@ -617,6 +679,26 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
     showlegend=False
     ))
 
+    mapa_term = mapa[mapa["PERFORADO_TERM"] == "Sí"].copy()
+
+    fig.add_trace(go.Scatter(
+        x=mapa_term["CIMA X UTM"],
+        y=mapa_term["CIMA Y UTM"],
+        mode="markers",
+        marker=dict(
+            size=5,
+            symbol="circle",
+            color="red",
+            #line=dict(width=3, color="orange")
+        ),
+        name="Perforados TERM 2011-2020",
+        hovertemplate=
+            "<b>Pozo perforado:</b> %{customdata[0]}<br>" +
+            "<b>Yacimiento:</b> %{customdata[1]}<br>" +
+            "<extra></extra>",
+        customdata=mapa_term[["POZO", COL_YAC]],
+        showlegend=True
+    ))
 
 
     # Traza ficticia para que Radio de drene aparezca en la leyenda una sola vez
@@ -633,7 +715,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
     fig.update_layout(
         title=f"Mapa de burbujas - {yac_mapa}",
         template="plotly_white",
-        height=780,
+        height=1500,
         margin=dict(l=20, r=20, t=70, b=20),
         showlegend=True,
         legend=dict(
@@ -659,7 +741,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
         if not row_zoom.empty:
             x0 = row_zoom["CIMA X UTM"].iloc[0]
             y0 = row_zoom["CIMA Y UTM"].iloc[0]
-            radio_zoom = 500
+            radio_zoom = 2000
             fig.update_xaxes(range=[x0 - radio_zoom, x0 + radio_zoom])
             fig.update_yaxes(range=[y0 - radio_zoom, y0 + radio_zoom])
 
@@ -673,18 +755,938 @@ except Exception as e:
     st.error(f"No fue posible cargar la base: {e}")
     st.stop()
 
-# =========================================================
-# ENCABEZADO
-# =========================================================
-st.markdown(
-    "<div class='main-title'>Campo Tamaulipas-Constituciones Producción</div>",
-    unsafe_allow_html=True
-)
+#Analisis de las terminaciones
+def analisis_term():
+    st.markdown("<div class='section-title'>Análisis estadístico de terminaciones históricas</div>", unsafe_allow_html=True)
 
-st.markdown(
-    "<div class='subtitle'>Producción diaria promedio mensual</div>",
-    unsafe_allow_html=True
-)
+    term = load_table(TABLA_TERM)
+    term = normalizar_columnas(term)
+    term = term.loc[:, ~term.columns.astype(str).str.startswith("UNNAMED")]
+
+    if COL_POZO not in term.columns:
+        segunda_col = term.columns[1]
+        term = term.rename(columns={segunda_col: COL_POZO})
+
+    term[COL_POZO] = term[COL_POZO].astype(str).str.strip()
+
+    # =========================
+    # COLUMNAS TERM
+    # =========================
+    col_anio = "AÑO"
+    col_qoi_prog = "QO PROG"
+    col_qoi = "QOI"
+    col_yac_term = COL_YAC
+
+    cols_necesarias = [col_anio, col_qoi_prog, col_qoi, COL_POZO]
+
+    for c in cols_necesarias:
+        if c not in term.columns:
+            st.error(f"No existe la columna '{c}' en TERM. Revisa el nombre exacto del encabezado.")
+            st.write(term.columns.tolist())
+            return
+
+    # Si TERM no trae yacimiento, lo toma de Coord
+    if col_yac_term not in term.columns:
+        coord_yac = df_coord[[COL_POZO, COL_YAC]].drop_duplicates()
+        term = term.merge(coord_yac, on=COL_POZO, how="left")
+
+    term[col_anio] = pd.to_numeric(term[col_anio], errors="coerce")
+    term[col_qoi_prog] = pd.to_numeric(term[col_qoi_prog], errors="coerce")
+    term[col_qoi] = pd.to_numeric(term[col_qoi], errors="coerce")
+
+    term = term[(term[col_anio] >= 2011) & (term[col_anio] <= 2020)].copy()
+
+    term["DIF_QOI"] = term[col_qoi] - term[col_qoi_prog]
+    term["CUMPLIMIENTO_QOI_%"] = np.where(
+        term[col_qoi_prog] > 0,
+        term[col_qoi] / term[col_qoi_prog] * 100,
+        np.nan
+    )
+
+    # =========================
+    # FILTROS PRINCIPALES
+    # =========================
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        anios = sorted(term[col_anio].dropna().astype(int).unique())
+        anio_sel = st.multiselect(
+            "Campaña / año de perforación",
+            anios,
+            default=anios
+        )
+
+    term_f = term[term[col_anio].astype("Int64").isin(anio_sel)].copy()
+
+    with c2:
+        yacs = sorted(term_f[COL_YAC].dropna().astype(str).unique())
+        yac_sel = st.multiselect(
+            "Yacimiento",
+            yacs,
+            default=yacs
+        )
+
+    if yac_sel:
+        term_f = term_f[term_f[COL_YAC].astype(str).isin(yac_sel)].copy()
+
+    with c3:
+        pozos = sorted(term_f[COL_POZO].dropna().astype(str).unique())
+        pozo_sel = st.selectbox(
+            "Pozo / Terminación",
+            ["Todos"] + pozos
+        )
+
+    if pozo_sel != "Todos":
+        term_f = term_f[term_f[COL_POZO].astype(str) == str(pozo_sel)].copy()
+
+    if term_f.empty:
+        st.warning("No hay datos con los filtros seleccionados.")
+        return
+
+    # =========================
+    # MÉTRICAS
+    # =========================
+    #m1, m2, m3, m4 = st.columns(4)
+    m1, m2 = st.columns(2)
+
+    m1.metric("Pozos terminados", f"{term_f[COL_POZO].nunique():,.0f}")
+    #m2.metric("Qoi Prog prom.", f"{term_f[col_qoi_prog].mean():,.1f}")
+    m2.metric("Qoi promedio.", f"{term_f[col_qoi].mean():,.1f}")
+    #m4.metric("Cumplimiento prom.", f"{term_f['CUMPLIMIENTO_QOI_%'].mean():,.1f} %")
+
+    term_f = term_f.sort_values([col_anio, COL_POZO])
+
+    term_f["POZO_CAMP"] = (
+        term_f[col_anio].astype(int).astype(str)
+        + " | "
+        + term_f[COL_POZO].astype(str)
+    )
+
+    # =========================
+    # 1. QOI PROGRAMADO VS QOI REAL
+    # =========================
+    fig1 = go.Figure()
+
+    fig1.add_trace(go.Bar(
+        x=term_f["POZO_CAMP"],
+        #x=term_f[COL_POZO],
+        y=term_f[col_qoi_prog],
+        name="Qo programa (bpd)",
+        marker=dict(
+            color="#1F4E79",
+            line=dict(color="#0B1F33", width=1.5)
+        ),
+        opacity=0.88,
+        text=term_f[col_qoi_prog].round(1),
+        textposition="outside"
+    ))
+
+    fig1.add_trace(go.Bar(
+        x=term_f["POZO_CAMP"],
+        #x=term_f[COL_POZO],
+        y=term_f[col_qoi],
+        name="Qoi real (bpd)",
+        marker=dict(
+            color="#00A65A",
+            line=dict(color="#006B3A", width=1.5)
+        ),
+        opacity=0.95,
+        text=term_f[col_qoi].round(1),
+        textposition="outside"
+    ))
+
+    fig1.update_layout(
+        title="<b>Comparación Qoi programado vs Qoi real por pozo</b>",
+        xaxis=dict(
+        tickangle=-75,
+        categoryorder="array",
+        categoryarray=term_f["POZO_CAMP"]
+        ),
+        xaxis_title="Terminación",
+        yaxis_title="Qoi (bpd)",
+        barmode="group",
+        height=560,
+        template="plotly_white",
+        bargap=0.22,
+        bargroupgap=0.08,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.03,
+            xanchor="right",
+            x=1
+        ),
+        font=dict(
+            size=14,
+            color="black",
+            family="Arial Black"
+            ),
+        plot_bgcolor="white",
+        paper_bgcolor="white"
+    )
+
+    fig1.update_xaxes(
+        tickangle=-45,
+        showline=True,
+        linewidth=1,
+        tickfont=dict(
+        size=11,
+        color="black",
+        family="Tahoma"
+        ),
+        linecolor="black"
+    )
+
+    fig1.update_yaxes(
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        tickfont=dict(
+        size=12,
+        color="black",
+        family="Arial Black"
+        ),
+        linecolor="black"
+    )
+
+    st.plotly_chart(fig1, use_container_width=True)
+
+    # =========================
+    # 2. QOI PROMEDIO Y NÚMERO DE POZOS POR CAMPAÑA (Grafico 2)
+    # =========================
+    resumen_anio = term_f.groupby(col_anio, as_index=False).agg(
+        QOI_PROM=(col_qoi, "mean"),
+        POZOS=(COL_POZO, "nunique")
+    )
+
+    fig2 = make_subplots(specs=[[{"secondary_y": True}]])
+
+    fig2.add_trace(
+    go.Bar(
+        x=resumen_anio[col_anio],
+        y=resumen_anio["QOI_PROM"],
+        name="Qoi real promedio",
+
+        marker=dict(
+            color="#14A1FF",
+            line=dict(color="#000000", width=1.5)
+        ),
+
+        text=resumen_anio["QOI_PROM"].round(1),
+
+        textposition="outside",
+
+        textfont=dict(
+            size=13,
+            color="#000000",
+            family="Tahoma"
+        ),
+
+        opacity=0.65
+    ),
+    secondary_y=False
+    )
+
+    #fig2.add_trace(
+    #    go.Scatter(
+    #        x=resumen_anio[col_anio],
+    #        y=resumen_anio["POZOS"],
+    #        mode="lines+markers+text",
+    #        name="Número de pozos",
+    #        line=dict(color="#d62728", width=2),
+    #        marker=dict(
+    #            size=10,
+    #            color="#d62728",
+    #            line=dict(color="white", width=1)
+    #        ),
+    #        text=resumen_anio["POZOS"],
+    #        textposition="bottom center"
+    #    ),
+    #    secondary_y=True
+    #)
+
+    fig2.update_layout(
+        title="<b>Qoi promedio y pozos por campaña</b>",
+        height=520,
+        font=dict(
+            size=14,
+            color="black",
+            family="Arial Black"
+            ),
+        template="plotly_white",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.15,
+            xanchor="center",
+            x=0.5
+        ),
+        #font=dict(size=13),
+        plot_bgcolor="white",
+        paper_bgcolor="white"
+    )
+
+    for x, y, p in zip(
+        resumen_anio[col_anio],
+        resumen_anio["QOI_PROM"],
+        resumen_anio["POZOS"]
+    ):
+
+        fig2.add_annotation(
+            x=x,
+            y=y * 0.05,   # posición abajo dentro barra
+
+            text=f"<b>{p} pozos</b>",
+
+            showarrow=False,
+
+            font=dict(
+                size=12,
+                color="black",
+                family="Arial Black"
+            )
+        )
+
+    fig2.update_xaxes(
+        title_text="Campaña",
+        dtick=1,
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(
+        size=12,
+        color="black",
+        family="Arial Black"
+        ),
+
+    )
+
+    fig2.update_yaxes(
+        title_text="Qoi promedio (bpd)",
+        secondary_y=False,
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(
+        size=12,
+        color="black",
+        family="Arial Black"
+        ),
+    )
+
+    fig2.update_yaxes(
+        title_text="Número de pozos",
+        secondary_y=True,
+        showgrid=False,
+        tickfont=dict(
+        size=12,
+        color="black",
+        family="Arial Black"
+        ),
+    )
+
+    #st.plotly_chart(fig2, use_container_width=True)
+
+    colg1, colg2 = st.columns(2)
+
+    with colg1:
+        st.plotly_chart(fig2, use_container_width=True)
+
+    with colg2:
+
+        # =========================
+        # 3. BOXPLOT QOI POR CAMPAÑA
+        # =========================
+        fig3 = px.box(
+            term_f,
+            x=col_anio,
+            y=col_qoi,
+            points="all",
+            hover_name=COL_POZO,
+            title="<b>Modelo estadístico</b>",
+            template="plotly_white"
+        )
+        
+        #Color Cajas
+        fig3.update_traces(
+            marker=dict(
+                color="#30E460",
+                size=7,
+                opacity=0.65,
+                line=dict(color="black", width=1)
+            ),
+            line=dict(color="#006B3A", width=1),
+            fillcolor="rgba(0,166,90,0.25)"
+        )
+
+        medianas = term_f.groupby(col_anio, as_index=False)[col_qoi].median()
+
+        fig3.add_trace(go.Scatter(
+            x=medianas[col_anio],
+            y=medianas[col_qoi],
+            mode="text",
+            text=medianas[col_qoi].round(1),
+            textposition="top center",
+            textfont=dict(
+                size=10,
+                color="black"
+            ),
+            name="Mediana",
+            showlegend=False
+        ))
+
+        fig3.update_layout(
+            height=520,
+            xaxis_title="Campaña",
+            yaxis_title="Qoi por campaña (bpd)",
+            font=dict(
+            size=14,
+            color="black",
+            family="Arial Black"
+            ),
+            plot_bgcolor="white",
+            paper_bgcolor="white"
+        )
+
+        fig3.update_xaxes(
+            dtick=1,
+            showline=True,
+            linewidth=1,
+            linecolor="black",
+            tickfont=dict(
+            size=12,
+            color="black",
+            family="Arial Black"
+            ),
+        )
+
+        fig3.update_yaxes(
+            showgrid=True,
+            gridcolor="#EAECEE",
+            showline=True,
+            linewidth=1,
+            linecolor="black",
+            tickfont=dict(
+            size=12,
+            color="black",
+            family="Arial Black"
+            ),
+        )
+
+        #st.plotly_chart(fig3, use_container_width=True)
+
+        st.plotly_chart(fig3, use_container_width=True)
+
+        # =========================
+    # 4. GASTO INICIAL VS NP POR POZO
+    # =========================
+
+    st.markdown("<div class='section-title'>Análisis de producción acumulada por campaña</div>", unsafe_allow_html=True)
+
+    # Base de producción con acumuladas calculadas
+    df_prod_term = calcular_columnas_produccion(df.copy())
+
+    # =========================
+    # FILTRO DE TIEMPO PARA NP
+    # =========================
+    c_np1, c_np2 = st.columns([1, 3])
+
+    with c_np1:
+        meses_np = st.selectbox(
+            "Np acumulada a:",
+            ["Total", "12 meses", "36 meses", "60 meses"],
+            index=0,
+            key="filtro_np_meses_term"
+        )
+
+    df_prod_term = df_prod_term.sort_values([COL_POZO, COL_FECHA]).copy()
+
+    # Mes normalizado por pozo: 1, 2, 3, ...
+    df_prod_term["MES_PROD_TERM"] = (
+        df_prod_term
+        .groupby(COL_POZO)
+        .cumcount() + 1
+    )
+
+    if meses_np == "12 meses":
+        df_prod_np = df_prod_term[df_prod_term["MES_PROD_TERM"] <= 12].copy()
+        nombre_np = "Np a 12 meses"
+
+    elif meses_np == "36 meses":
+        df_prod_np = df_prod_term[df_prod_term["MES_PROD_TERM"] <= 36].copy()
+        nombre_np = "Np a 36 meses"
+
+    elif meses_np == "60 meses":
+        df_prod_np = df_prod_term[df_prod_term["MES_PROD_TERM"] <= 60].copy()
+        nombre_np = "Np a 60 meses"
+
+    else:
+        df_prod_np = df_prod_term.copy()
+        nombre_np = "Np (mb)"
+
+    # Np acumulada al periodo seleccionado
+    np_pozo = (
+        df_prod_np
+        .sort_values([COL_POZO, COL_FECHA])
+        .groupby(COL_POZO, as_index=False)
+        .agg(
+            NP_FINAL=(COL_NP, "last")
+        )
+    )
+    # Base de producción con acumuladas calculadas
+    #df_prod_term = calcular_columnas_produccion(df.copy())
+
+    # Última Np de cada pozo
+    #np_pozo = (
+    #    df_prod_term
+    #    .sort_values([COL_POZO, COL_FECHA])
+    #    .groupby(COL_POZO, as_index=False)
+    #    .agg(
+    #        NP_FINAL=(COL_NP, "last")
+    #    )
+    #)
+
+    # Unir Np con los pozos filtrados de TERM
+    term_np = term_f.merge(
+        np_pozo,
+        on=COL_POZO,
+        how="left"
+    )
+
+    term_np["NP_FINAL"] = pd.to_numeric(term_np["NP_FINAL"], errors="coerce").fillna(0)
+
+    term_np = term_np.sort_values([col_anio, COL_POZO])
+
+    term_np["POZO_CAMP"] = (
+        term_np[col_anio].astype(int).astype(str)
+        + " | "
+        + term_np[COL_POZO].astype(str)
+    )
+
+    # =========================
+    # 4.1 GASTO INICIAL Y NP FINAL POR POZO
+    # =========================
+
+    # =========================
+# 4.1 GASTO INICIAL Y NP POR POZO / TIEMPO
+# =========================
+
+    modo_fig4 = st.radio(
+        "Vista gráfico Qoi / Np",
+        [
+            "Qoi y Np en barras",
+            "Solo Np en scatter"
+        ],
+        horizontal=True,
+        key="modo_fig4_np"
+    )
+
+    if modo_fig4 == "Qoi y Np en barras":
+
+        fig4 = make_subplots(specs=[[{"secondary_y": True}]])
+
+        fig4.add_trace(
+            go.Bar(
+                x=term_np["POZO_CAMP"],
+                y=term_np[col_qoi],
+                name="Qoi (bpd)",
+                marker=dict(
+                    color="#00A65A",
+                    line=dict(color="#000000", width=1.5)
+                ),
+                text=term_np[col_qoi].round(1),
+                textposition="outside",
+                textfont=dict(
+                    size=12,
+                    color="black",
+                    family="Tahoma"
+                ),
+                opacity=0.80
+            ),
+            secondary_y=False
+        )
+
+        fig4.add_trace(
+        go.Scatter(
+            x=term_np["POZO_CAMP"],
+            y=term_np["NP_FINAL"],
+
+            name=nombre_np,
+
+            mode="lines+markers+text",
+
+            line=dict(
+                color="#1F4E79",
+                width=3
+            ),
+
+            marker=dict(
+                size=9,
+                color="#1F4E79",
+                line=dict(
+                    color="white",
+                    width=1
+                )
+            ),
+
+            text=term_np["NP_FINAL"].round(1),
+
+            textposition="top center",
+
+            textfont=dict(
+                size=11,
+                color="black",
+                family="Tahoma"
+            )
+            ),
+            secondary_y=True
+        )
+
+        fig4.update_layout(
+            title=f"<b>Gasto inicial y {nombre_np} por pozo</b>",
+            xaxis=dict(
+                tickangle=-75,
+                categoryorder="array",
+                categoryarray=term_np["POZO_CAMP"]
+            ),
+            height=650,
+            template="plotly_white",
+            barmode="group",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.12,
+                xanchor="center",
+                x=0.5
+            ),
+            font=dict(
+                size=14,
+                color="black",
+                family="Arial Black"
+            ),
+            plot_bgcolor="white",
+            paper_bgcolor="white"
+        )
+
+        fig4.update_xaxes(
+            title_text="Campaña | Terminación",
+            showline=True,
+            linewidth=1,
+            linecolor="black",
+            tickfont=dict(
+                size=11,
+                color="black",
+                family="Tahoma"
+            )
+        )
+
+        fig4.update_yaxes(
+            title_text="Qoi (bpd)",
+            secondary_y=False,
+            showgrid=True,
+            gridcolor="#EAECEE",
+            showline=True,
+            linewidth=1,
+            linecolor="black",
+            tickfont=dict(
+                size=12,
+                color="black",
+                family="Arial Black"
+            )
+        )
+
+        fig4.update_yaxes(
+            title_text=f"{nombre_np}",
+            secondary_y=True,
+            showgrid=False,
+            tickfont=dict(
+                size=12,
+                color="black",
+                family="Arial Black"
+            )
+        )
+
+        st.plotly_chart(fig4, use_container_width=True)
+
+    else:
+
+        # Datos de Np por tiempo para los pozos filtrados en TERM
+        pozos_term_np = term_np[COL_POZO].dropna().astype(str).unique().tolist()
+
+        df_scatter_np = df_prod_np[
+            df_prod_np[COL_POZO].astype(str).isin(pozos_term_np)
+        ].copy()
+
+        df_scatter_np = df_scatter_np.merge(
+            term_np[[COL_POZO, col_anio]].drop_duplicates(),
+            on=COL_POZO,
+            how="left"
+        )
+
+        fig4 = px.scatter(
+            df_scatter_np,
+            x="MES_PROD_TERM",
+            y=COL_NP,
+            color=COL_POZO,
+            symbol=col_anio,
+            hover_name=COL_POZO,
+            hover_data={
+                col_anio: True,
+                "MES_PROD_TERM": True,
+                COL_NP: ":,.1f"
+            },
+            title=f"<b>Comportamiento de {nombre_np} por tiempo de producción</b>",
+            template="plotly_white"
+        )
+
+        fig4.update_traces(
+            mode="lines+markers",
+            marker=dict(
+                size=5,
+                line=dict(color="black", width=0.5)
+            ),
+            line=dict(width=2)
+        )
+
+        fig4.update_layout(
+            height=560,
+            legend_title_text="Pozo",
+            font=dict(
+                size=14,
+                color="black",
+                family="Arial Black"
+            ),
+            plot_bgcolor="white",
+            paper_bgcolor="white"
+        )
+
+        fig4.update_xaxes(
+            title_text="Tiempo de producción, meses",
+            dtick=6,
+            showline=True,
+            linewidth=1,
+            linecolor="black",
+            tickfont=dict(
+                size=12,
+                color="black",
+                family="Arial Black"
+            )
+        )
+
+        fig4.update_yaxes(
+            title_text=f"{nombre_np}",
+            showgrid=True,
+            gridcolor="#EAECEE",
+            showline=True,
+            linewidth=1,
+            linecolor="black",
+            tickfont=dict(
+                size=12,
+                color="black",
+                family="Arial Black"
+            )
+        )
+
+        st.plotly_chart(fig4, use_container_width=True)
+
+    # =========================
+    # 4.2 NP PROMEDIO Y NÚMERO DE POZOS POR CAMPAÑA
+    # =========================
+
+    resumen_np = term_np.groupby(col_anio, as_index=False).agg(
+        NP_PROM=("NP_FINAL", "mean"),
+        POZOS=(COL_POZO, "nunique")
+    )
+
+    fig5 = go.Figure()
+
+    fig5.add_trace(
+        go.Bar(
+            x=resumen_np[col_anio],
+            y=resumen_np["NP_PROM"],
+            name="Np promedio",
+            marker=dict(
+                color="#FFA500",
+                line=dict(color="#000000", width=1.5)
+            ),
+            text=resumen_np["NP_PROM"].round(1),
+            textposition="outside",
+            textfont=dict(
+                size=13,
+                color="black",
+                family="Tahoma"
+            ),
+            opacity=0.80
+        )
+    )
+
+    for x, y, p in zip(
+        resumen_np[col_anio],
+        resumen_np["NP_PROM"],
+        resumen_np["POZOS"]
+    ):
+        fig5.add_annotation(
+            x=x,
+            y=y * 0.05,
+            text=f"<b>{p} pozos</b>",
+            showarrow=False,
+            font=dict(
+                size=12,
+                color="black",
+                family="Arial Black"
+            )
+        )
+
+    fig5.update_layout(
+        title=f"<b>{nombre_np} promedio y pozos por campaña</b>",
+        #title="<b>Np promedio y pozos por campaña</b>",
+        height=520,
+        template="plotly_white",
+        font=dict(
+            size=14,
+            color="black",
+            family="Arial Black"
+        ),
+        plot_bgcolor="white",
+        paper_bgcolor="white"
+    )
+
+    fig5.update_xaxes(
+        title_text="Campaña",
+        dtick=1,
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(
+            size=12,
+            color="black",
+            family="Arial Black"
+        )
+    )
+
+    fig5.update_yaxes(
+        title_text=f"{nombre_np}",
+        #title_text="Np promedio (mbl)",
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(
+            size=12,
+            color="black",
+            family="Arial Black"
+        )
+    )
+
+    # =========================
+    # 4.3 BOXPLOT NP POR CAMPAÑA
+    # =========================
+
+    fig6 = px.box(
+        term_np,
+        x=col_anio,
+        y="NP_FINAL",
+        points="all",
+        hover_name=COL_POZO,
+        title="<b>Modelo estadístico Np por campaña</b>",
+        #title="<b>Modelo estadístico Np por campaña</b>",
+        template="plotly_white"
+    )
+
+    fig6.update_traces(
+        marker=dict(
+            color="#F4B183",
+            size=7,
+            opacity=0.65,
+            line=dict(color="black", width=1)
+        ),
+        line=dict(color="#C55A11", width=1),
+        fillcolor="rgba(244,177,131,0.35)"
+    )
+
+    medianas_np = term_np.groupby(col_anio, as_index=False)["NP_FINAL"].median()
+
+    fig6.add_trace(go.Scatter(
+        x=medianas_np[col_anio],
+        y=medianas_np["NP_FINAL"],
+        mode="text",
+        text=medianas_np["NP_FINAL"].round(1),
+        textposition="top center",
+        textfont=dict(
+            size=10,
+            color="black"
+        ),
+        name="Mediana",
+        showlegend=False
+    ))
+
+    fig6.update_layout(
+        height=520,
+        xaxis_title="Campaña",
+        yaxis_title=f"{nombre_np}",
+        #yaxis_title="Producción Acumulada (mbl)",
+        font=dict(
+            size=14,
+            color="black",
+            family="Arial Black"
+        ),
+        plot_bgcolor="white",
+        paper_bgcolor="white"
+    )
+
+    fig6.update_xaxes(
+        dtick=1,
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(
+            size=12,
+            color="black",
+            family="Arial Black"
+        )
+    )
+
+    fig6.update_yaxes(
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(
+            size=12,
+            color="black",
+            family="Arial Black"
+        )
+    )
+
+    colnp1, colnp2 = st.columns(2)
+
+    with colnp1:
+        st.plotly_chart(fig5, use_container_width=True)
+
+    with colnp2:
+        st.plotly_chart(fig6, use_container_width=True)
+        
+    # =========================
+    # MAPA DE BURBUJAS FILTRADO CON TERM
+    # =========================
+    #st.markdown("<div class='section-title'>Mapa de pozos seleccionados en TERM</div>", unsafe_allow_html=True)
+
+    pozos_term = term_f[COL_POZO].dropna().astype(str).unique().tolist()
+
+    df_mapa_term = df.copy()
+    df_coord_term = df_coord.copy()
+    #df_mapa_term = df[df[COL_POZO].astype(str).isin(pozos_term)].copy()
+    #df_coord_term = df_coord[df_coord[COL_POZO].astype(str).isin(pozos_term)].copy()
+
+    if df_coord_term.empty:
+        st.warning("Los pozos seleccionados en TERM no tienen coordenadas en Coord.")
+    else:
+        mapa_burbujas(df_mapa_term, df_coord_term)
 
 # =========================================================
 # FILTROS
@@ -730,9 +1732,14 @@ with f3:
 with f4:
     vista = st.radio(
         "Tipo de análisis",
-        ["Producción por pozo", "Comparativa por pozo", "Mapa de burbujas"],
+        ["Producción por pozo", "Comparativa por pozo", "Mapa de burbujas", "Campañas 2011-2020"],
         horizontal=True
     )
+    #vista = st.radio(
+     #   "Tipo de análisis",
+      #  ["Producción por pozo", "Comparativa por pozo", "Mapa de burbujas"],
+       # horizontal=True
+    #)
 
 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -781,22 +1788,23 @@ if vista == "Producción por pozo":
 
     st.markdown(
         f"<span class='small-note'>Pozo seleccionado: <b>{pozo_sel}</b> | "
-        f"Yacimiento: <b>{first_row.get(COL_YAC, '')}</b> | "
-        f"Conta: <b>{first_row.get(COL_CONTA, '')}</b> | "
-        f"Registros reales cargados: <b>{len(dfp)}</b></span>",
+        f"Yacimiento: <b>{first_row.get(COL_YAC, '')}</b> | ",
+        #f"Conta: <b>{first_row.get(COL_CONTA, '')}</b> | "
+        #f"Registros reales cargados: <b>{len(dfp)}</b></span>",
         unsafe_allow_html=True
     )
 
-    k1, k2, k3, k4, k5, k6, k7, k8 = st.columns(8)
+    k1, k2, k3, k4, k5, k6, k7, k8, k9 = st.columns(9)
 
     k1.metric("Inicio producción", first_row[COL_FECHA].strftime("%d/%m/%Y"))
     k2.metric("Última producción", last_row[COL_FECHA].strftime("%d/%m/%Y"))
-    k3.metric("Qoi aceite", f"{first_row[COL_QO]:,.1f} bpd")
-    k4.metric("Último Qo", f"{last_row[COL_QO]:,.1f} bpd")
-    k5.metric("Último Qw", f"{last_row[COL_QW]:,.1f} bpd")
-    k6.metric("Último Qg", f"{last_row[COL_QG]:,.1f} mpcd")
-    k7.metric("Np total", f"{dfp[COL_NP].iloc[-1]:,.2f} mbl")
-    k8.metric("Wp / Gp", f"{dfp[COL_WP].iloc[-1]:,.2f} mbl/ {dfp[COL_GP].iloc[-1]:,.2f} mmpc")
+    k3.metric("Gasto Inicial", f"{first_row[COL_QO]:,.1f} bpd")
+    k4.metric("Último Gasto Aceite", f"{last_row[COL_QO]:,.1f} bpd")
+    k5.metric("Último Gasto Agua", f"{last_row[COL_QW]:,.1f} bpd")
+    k6.metric("Último Gasto Gas", f"{last_row[COL_QG]:,.1f} mpcd")
+    k7.metric("Acumulada Aceite", f"{dfp[COL_NP].iloc[-1]:,.2f} mbl")
+    k8.metric("Acumulada Agua", f"{dfp[COL_WP].iloc[-1]:,.2f} mbl")
+    k9.metric("Acumulada Gas", f"{dfp[COL_GP].iloc[-1]:,.2f} mmpc")
 
 # =========================================================
 # FUNCIÓN PARA GRÁFICAS COMPARATIVAS
@@ -1000,17 +2008,29 @@ if vista == "Producción por pozo":
     )
 
     fig1.update_xaxes(title_text="<b>Fecha</b>", title_font=dict(size=22), 
-    tickformat="%d/%m/%Y", tickfont=dict(size=18, color="black"),showline=True,
+    tickformat="%d/%m/%Y", tickfont=dict(
+        size=16,
+        color="black",
+        family="Arial Black"
+        ),showline=True,
     linewidth=1,
     linecolor='black')
 
     fig1.update_yaxes(title_text="<b>Qo (bpd) / % Agua</b>",title_font=dict(size=22),
-     secondary_y=False, tickfont=dict(size=18, color="black"),showline=True,
+     secondary_y=False, tickfont=dict(
+        size=16,
+        color="black",
+        family="Arial Black"
+        ),showline=True,
     linewidth=1,
     linecolor='black')
 
     fig1.update_yaxes(title_text="Np (mbl) / Qg (mpcd)", title_font=dict(size=22),
-     secondary_y=True, tickfont=dict(size=18, color="black"),showline=True,
+     secondary_y=True,tickfont=dict(
+        size=16,
+        color="black",
+        family="Arial Black"
+        ),showline=True,
     linewidth=1,
     linecolor='black')
 
@@ -1055,15 +2075,27 @@ if vista == "Producción por pozo":
         margin=dict(l=35, r=35, t=60, b=35)
     )
 
-    fig2.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y", title_font=dict(size=22), tickfont=dict(size=18, color="black"),showline=True,
+    fig2.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y", title_font=dict(size=22), tickfont=dict(
+        size=16,
+        color="black",
+        family="Arial Black"
+        ),showline=True,
     linewidth=1,
     linecolor='black')
     fig2.update_yaxes(title_text="Qw (bpd)", title_font=dict(size=22),
-     secondary_y=False, tickfont=dict(size=18, color="black"),showline=True,
+     secondary_y=False, tickfont=dict(
+        size=16,
+        color="black",
+        family="Arial Black"
+        ),showline=True,
     linewidth=1,
     linecolor='black')
     fig2.update_yaxes(title_text="Wp (mbl)", title_font=dict(size=22),
-     secondary_y=True, tickfont=dict(size=18, color="black"),showline=True,
+     secondary_y=True, tickfont=dict(
+        size=16,
+        color="black",
+        family="Arial Black"
+        ),showline=True,
     linewidth=1,
     linecolor='black')
 
@@ -1109,15 +2141,27 @@ if vista == "Producción por pozo":
         margin=dict(l=35, r=35, t=60, b=35)
     )
 
-    fig3.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y", title_font=dict(size=22), tickfont=dict(size=18, color="black"),showline=True,
+    fig3.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y", title_font=dict(size=22), tickfont=dict(
+        size=16,
+        color="black",
+        family="Arial Black"
+        ),showline=True,
     linewidth=1,
     linecolor='black')
     fig3.update_yaxes(title_text="RGA (pc/bl)", title_font=dict(size=22),
-     secondary_y=False, tickfont=dict(size=18, color="black"),showline=True,
+     secondary_y=False, tickfont=dict(
+        size=16,
+        color="black",
+        family="Arial Black"
+        ),showline=True,
     linewidth=1,
     linecolor='black')
     fig3.update_yaxes(title_text="Gp (mmpc)", title_font=dict(size=22),
-     secondary_y=True, tickfont=dict(size=18, color="black"),showline=True,
+     secondary_y=True, tickfont=dict(
+        size=16,
+        color="black",
+        family="Arial Black"
+        ),showline=True,
     linewidth=1,
     linecolor='black')
 
@@ -1243,5 +2287,7 @@ elif vista == "Comparativa por pozo":
 # =========================================================
 elif vista == "Mapa de burbujas":
     mapa_burbujas(df, df_coord)
+elif vista == "Campañas 2011-2020":
+    analisis_term()
 
-st.caption("Desarrollado en Python + Streamlit.")
+#st.caption("Desarrollado en Python + Streamlit.")
