@@ -406,8 +406,6 @@ def calcular_ultimo_wc_mapa(df_base):
     return ultimo_wc
 
 #######Mapa con tiempo
-
-
 def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
     """Mapa de burbujas con radios de drene y leyenda interactiva por grupos."""
 
@@ -1943,6 +1941,7 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
 if vista == "Producción por pozo":
 
     fig1 = make_subplots(specs=[[{"secondary_y": True}]])
+    dfp["QB"] = dfp[COL_QO] + dfp[COL_QW]
 
     fig1.add_trace(
         go.Scatter(
@@ -1997,6 +1996,23 @@ if vista == "Producción por pozo":
         ),
         secondary_y=True
     )
+
+    fig1.add_trace(go.Scatter(
+            x=dfp[COL_FECHA],
+            y=dfp["QB"],
+
+            name="Qb (bpd)",
+
+            mode="lines",
+
+            line=dict(
+                color="#000000",
+                width=3,
+                dash="dot"
+            ),
+
+            connectgaps=False
+    ))
 
     fig1.update_layout(
         title="Gasto de aceite, % Agua, Acumulada de aceite y Gasto de gas",
