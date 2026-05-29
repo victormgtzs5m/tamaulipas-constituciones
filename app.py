@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sqlite3
 import plotly.express as px
+import streamlit.components.v1 as components
 
 
 # =========================================================
@@ -31,6 +32,8 @@ TABLA_COORD = "Coord"
 TABLA_CONTORNO = "Contorno"
 TABLA_ASIGNACION = "Asignacion"
 TABLA_TERM = "TERM"
+TABLA_RMA = "RMA"
+TABLA_ESTADO_POZOS = "Estado"
 
 @st.cache_data(show_spinner=False)
 def load_table(tabla):
@@ -174,9 +177,82 @@ st.markdown("""
         color: #697386;
         font-size: 0.9rem;
     }
+    
+        /* Filtros multiselect */
+    div[data-baseweb="select"] > div {
+        background-color: #FFFFFF;
+        border: 1px solid #CBD5E1;
+        border-radius: 10px;
+        min-height: 44px;
+        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+    }
+
+    /* Etiquetas seleccionadas */
+    span[data-baseweb="tag"] {
+    background-color: #1F4E79 !important;
+    }
+
+    /* Texto de filtros */
+    div[data-baseweb="select"] span {
+        font-weight: 600;
+    }
+
+    /* Botón X de cada etiqueta */
+    span[data-baseweb="tag"] svg {
+        fill: white !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
+def kpi_card(titulo, valor, subtitulo="", color="#1F4E79"):
+    components.html(
+        f"""
+        <div style="
+            background:white;
+            border-radius:10px;
+            box-shadow:0 4px 14px rgba(0,0,0,0.12);
+            overflow:hidden;
+            border:1px solid #1F4E79;
+            font-family:Arial, sans-serif;
+            height:70px;
+        ">
+            <div style="
+                background:{color};
+                color:white;
+                padding:8px 12px;
+                font-size:10px;
+                font-weight:700;
+                letter-spacing:0.4px;
+                text-transform:uppercase;
+            ">
+                {titulo}
+            </div>
+
+            <div style="
+                padding:12px;
+                display:flex;
+                align-items:center;
+                justify-content:space-between;
+            ">
+                <div style="
+                    font-size:16px;
+                    font-weight:800;
+                    color:#111827;
+                ">
+                    {valor}
+                    <span style="
+                        font-size:12px;
+                        font-weight:600;
+                        color:#6B7280;
+                    ">
+                        {subtitulo}
+                    </span>
+                </div>               
+            </div>
+        </div>
+        """,
+        height=80
+    )
 # =========================================================
 # FUNCIONES AUXILIARES
 # =========================================================
@@ -388,6 +464,43 @@ def load_term_perforados() -> pd.DataFrame:
 
     return term
 
+@st.cache_data(show_spinner="Cargando pozos intervenidos RMA...")
+def load_rma_intervenidos() -> pd.DataFrame:
+    rma = load_table(TABLA_RMA)
+    rma = rma.loc[:, ~rma.columns.astype(str).str.startswith("Unnamed")]
+    rma = normalizar_columnas(rma)
+
+    if COL_POZO not in rma.columns:
+        segunda_col = rma.columns[1]
+        rma = rma.rename(columns={segunda_col: COL_POZO})
+
+    rma[COL_POZO] = rma[COL_POZO].astype(str).str.strip()
+
+    rma = rma[[COL_POZO]].dropna().drop_duplicates()
+    rma["POZO_RMA"] = "Sí"
+
+    return rma
+
+@st.cache_data(show_spinner="Cargando estado de pozos...")
+def load_estado_pozos() -> pd.DataFrame:
+    estado = load_table(TABLA_ESTADO_POZOS)
+    estado = estado.loc[:, ~estado.columns.astype(str).str.startswith("Unnamed")]
+    estado = normalizar_columnas(estado)
+
+    cols_req = ["POZO", "ESTADO", "SAP"]
+
+    for c in cols_req:
+        if c not in estado.columns:
+            st.error(f"No existe la columna '{c}' en la tabla de estado de pozos.")
+            st.write(estado.columns.tolist())
+            return pd.DataFrame()
+
+    estado["POZO"] = estado["POZO"].astype(str).str.strip()
+    estado["ESTADO"] = estado["ESTADO"].astype(str).str.strip()
+    estado["SAP"] = estado["SAP"].astype(str).str.strip()
+
+    return estado[["POZO", "ESTADO", "SAP"]].drop_duplicates()
+
 # Ultimo Porcetaje de Agua por pozo
 @st.cache_data(show_spinner=False)
 def calcular_ultimo_wc_mapa(df_base):
@@ -406,7 +519,7 @@ def calcular_ultimo_wc_mapa(df_base):
     return ultimo_wc
 
 #######Mapa con tiempo
-def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
+def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM"):
     """Mapa de burbujas con radios de drene y leyenda interactiva por grupos."""
 
     st.markdown("<div class='section-title'>Mapa de burbujas y radios de drene</div>", unsafe_allow_html=True)
@@ -432,6 +545,22 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
     )
 
     mapa = coord.merge(acum, on=COL_POZO, how="left")
+
+    estado_pozos = load_estado_pozos()
+
+    if not estado_pozos.empty and "POZO" in mapa.columns:
+        mapa = mapa.merge(
+            estado_pozos,
+            on="POZO",
+            how="left"
+        )
+
+        mapa["ESTADO"] = mapa["ESTADO"].fillna("Sin estado")
+        mapa["SAP"] = mapa["SAP"].fillna("Sin SAP")
+    else:
+        mapa["ESTADO"] = "Sin estado"
+        mapa["SAP"] = "Sin SAP"
+
     ultimo_wc = calcular_ultimo_wc_mapa(df_base)
 
     mapa = mapa.merge(
@@ -440,19 +569,41 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
         how="left"
     )
 
-    term = load_term_perforados()
+    if modo_mapa == "RMA":
+        rma = load_rma_intervenidos()
 
-    mapa = mapa.merge(
-        term,
-        on=COL_POZO,
-        how="left"
-    )
+        mapa = mapa.merge(
+            rma,
+            on=COL_POZO,
+            how="left"
+        )
 
-    mapa["PERFORADO_TERM"] = mapa["PERFORADO_TERM"].fillna("No")
+        mapa["POZO_RMA"] = mapa["POZO_RMA"].fillna("No")
 
-    mapa["ULTIMO_WC"] = mapa["ULTIMO_WC"].fillna(0)
+    else:
+        term = load_term_perforados()
 
-    mapa[["NP_BLS", "WP_BLS", "GP_PC"]] = mapa[["NP_BLS", "WP_BLS", "GP_PC"]].fillna(0)
+        mapa = mapa.merge(
+            term,
+            on=COL_POZO,
+            how="left"
+        )
+
+        mapa["PERFORADO_TERM"] = mapa["PERFORADO_TERM"].fillna("No")
+
+    #term = load_term_perforados()
+
+    #mapa = mapa.merge(
+    #    term,
+    #    on=COL_POZO,
+    #    how="left"
+    #)
+
+        mapa["PERFORADO_TERM"] = mapa["PERFORADO_TERM"].fillna("No")
+
+        mapa["ULTIMO_WC"] = mapa["ULTIMO_WC"].fillna(0)
+
+        mapa[["NP_BLS", "WP_BLS", "GP_PC"]] = mapa[["NP_BLS", "WP_BLS", "GP_PC"]].fillna(0)
 
     if "RADIO DRENE" in mapa.columns:
         mapa["RADIO DRENE"] = pd.to_numeric(mapa["RADIO DRENE"], errors="coerce")
@@ -501,12 +652,40 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
         )
 
     with c4:
-        filtro_term = st.selectbox(
-            "Pozos perforados históricos TERM",
-            ["Todos", "Solo perforados 2011-2020", "Solo no perforados"],
-            key="filtro_term_mapa"
-        )
+        #filtro_term = st.selectbox(
+        #    "Pozos perforados históricos TERM",
+        #    ["Todos", "Solo perforados 2011-2020", "Solo no perforados"],
+        #    key="filtro_term_mapa"
+        #
+        if modo_mapa == "RMA":
 
+            filtro_term = st.selectbox(
+                "Pozos intervenidos RMA",
+                ["Todos", "Solo RMA", "Solo no RMA"],
+                key="filtro_rma_mapa"
+            )
+
+            if filtro_term == "Solo RMA":
+                mapa = mapa[mapa["POZO_RMA"] == "Sí"].copy()
+
+            elif filtro_term == "Solo no RMA":
+                mapa = mapa[mapa["POZO_RMA"] == "No"].copy()
+
+        else:
+
+            filtro_term = st.selectbox(
+                "Pozos perforados históricos TERM",
+                ["Todos", "Solo perforados 2011-2020", "Solo no perforados"],
+                key="filtro_term_mapa"
+            )
+
+            if filtro_term == "Solo perforados 2011-2020":
+                mapa = mapa[mapa["PERFORADO_TERM"] == "Sí"].copy()
+
+            elif filtro_term == "Solo no perforados":
+                mapa = mapa[mapa["PERFORADO_TERM"] == "No"].copy()
+
+        #
         if filtro_term == "Solo perforados 2011-2020":
             mapa = mapa[mapa["PERFORADO_TERM"] == "Sí"].copy()
 
@@ -522,7 +701,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
 
     max_val = mapa[variable].max()
     if max_val > 0:
-        mapa["SIZE"] = 18 + (mapa[variable] / max_val) * 50
+        mapa["SIZE"] = 18 + (mapa[variable] / max_val) * 80
     else:
         mapa["SIZE"] = 18
 
@@ -652,51 +831,110 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
         showlegend=True
     ))
    
-   # Punto exacto de cima + nombre pozo
-    fig.add_trace(go.Scatter(
-    x=mapa["CIMA X UTM"],
-    y=mapa["CIMA Y UTM"],
+   # =====================================================
+    # PUNTOS POR ESTADO DEL POZO / SAP
+    # =====================================================
+    color_estado = {
+        "OP": "#00A65A",   # verde
+        "NOP": "#000000",  # negro
+        "IA": "#0000FF",   # azul
+    }
 
-    mode="markers+text",
-
-    text=mapa["POZO"],
-    textposition="top center",
-
-    textfont=dict(
-        size=13,
-        color="black"
-    ),
-
-    marker=dict(
-        size=5,
-        color="black"
-    ),
-
-    hoverinfo="skip",
-
-    showlegend=False
-    ))
-
-    mapa_term = mapa[mapa["PERFORADO_TERM"] == "Sí"].copy()
+    mapa["COLOR_ESTADO"] = (
+        mapa["ESTADO"]
+        .astype(str)
+        .str.upper()
+        .map(color_estado)
+        .fillna("#000000")
+    )
 
     fig.add_trace(go.Scatter(
-        x=mapa_term["CIMA X UTM"],
-        y=mapa_term["CIMA Y UTM"],
-        mode="markers",
-        marker=dict(
-            size=5,
-            symbol="circle",
-            color="red",
-            #line=dict(width=3, color="orange")
+        x=mapa["CIMA X UTM"],
+        y=mapa["CIMA Y UTM"],
+
+        mode="markers+text",
+
+        text=mapa["POZO"],
+        textposition="bottom center",
+
+        textfont=dict(
+            size=10,
+            color="black",
+            family="Arial"
         ),
-        name="Perforados TERM 2011-2020",
+
+        marker=dict(
+            size=6,          # aquí cambias el tamaño del círculo
+            symbol="circle",
+            color=mapa["COLOR_ESTADO"],
+            line=dict(
+                color="black",
+                width=1
+            ),
+            opacity=1
+        ),
+
+        name="Estado / SAP",
+
+        customdata=mapa[["POZO", "ESTADO", "SAP", COL_YAC]],
+
         hovertemplate=
-            "<b>Pozo perforado:</b> %{customdata[0]}<br>" +
-            "<b>Yacimiento:</b> %{customdata[1]}<br>" +
+            "<b>Pozo:</b> %{customdata[0]}<br>" +
+            "<b>Estado:</b> %{customdata[1]}<br>" +
+            "<b>SAP:</b> %{customdata[2]}<br>" +
+            "<b>Yacimiento:</b> %{customdata[3]}<br>" +
             "<extra></extra>",
-        customdata=mapa_term[["POZO", COL_YAC]],
+
         showlegend=True
     ))
+
+    #mapa_term = mapa[mapa["PERFORADO_TERM"] == "Sí"].copy()
+    if modo_mapa == "RMA":
+        mapa_destacado = mapa[mapa["POZO_RMA"] == "Sí"].copy()
+        nombre_destacado = "Pozos intervenidos RMA"
+        color_destacado = "red"
+    else:
+        mapa_destacado = mapa[mapa["PERFORADO_TERM"] == "Sí"].copy()
+        nombre_destacado = "Perforados TERM 2011-2020"
+        color_destacado = "red"
+
+    fig.add_trace(go.Scatter(
+        x=mapa_destacado["CIMA X UTM"],
+        y=mapa_destacado["CIMA Y UTM"],
+        mode="markers",
+        marker=dict(
+            size=6,
+            symbol="circle",
+            color=color_destacado,
+        ),
+        name=nombre_destacado,
+        hovertemplate=
+            "<b>Pozo:</b> %{customdata[0]}<br>" +
+            "<b>Yacimiento:</b> %{customdata[1]}<br>" +
+            "<extra></extra>",
+        customdata=mapa_destacado[["POZO", COL_YAC]],
+        showlegend=True
+    ))
+
+    #
+    #fig.add_trace(go.Scatter(
+    #    x=mapa_term["CIMA X UTM"],
+    #    y=mapa_term["CIMA Y UTM"],
+    #    mode="markers",
+    #    marker=dict(
+    #        size=5,
+    #        symbol="circle",
+    #        color="red",
+    #        #line=dict(width=3, color="orange")
+    #    ),
+    #    name="Perforados TERM 2011-2020",
+    #    hovertemplate=
+    #        "<b>Pozo perforado:</b> %{customdata[0]}<br>" +
+    #        "<b>Yacimiento:</b> %{customdata[1]}<br>" +
+    #        "<extra></extra>",
+    #    customdata=mapa_term[["POZO", COL_YAC]],
+    #    showlegend=True
+    #))
 
 
     # Traza ficticia para que Radio de drene aparezca en la leyenda una sola vez
@@ -713,7 +951,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
     fig.update_layout(
         title=f"Mapa de burbujas - {yac_mapa}",
         template="plotly_white",
-        height=1500,
+        height=700,
         margin=dict(l=20, r=20, t=70, b=20),
         showlegend=True,
         legend=dict(
@@ -739,11 +977,23 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame):
         if not row_zoom.empty:
             x0 = row_zoom["CIMA X UTM"].iloc[0]
             y0 = row_zoom["CIMA Y UTM"].iloc[0]
-            radio_zoom = 2000
+            radio_zoom = 1000
             fig.update_xaxes(range=[x0 - radio_zoom, x0 + radio_zoom])
             fig.update_yaxes(range=[y0 - radio_zoom, y0 + radio_zoom])
 
-    st.plotly_chart(fig, use_container_width=True)
+    #st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+    fig,
+        use_container_width=True,
+        config={
+            "scrollZoom": True,
+            "displaylogo": False,
+            "modeBarButtonsToRemove": [
+                "lasso2d",
+                "select2d"
+            ]
+        }
+    )
 
 
 try:
@@ -829,13 +1079,16 @@ def analisis_term():
 
     with c3:
         pozos = sorted(term_f[COL_POZO].dropna().astype(str).unique())
-        pozo_sel = st.selectbox(
-            "Pozo / Terminación",
-            ["Todos"] + pozos
-        )
 
-    if pozo_sel != "Todos":
-        term_f = term_f[term_f[COL_POZO].astype(str) == str(pozo_sel)].copy()
+        pozos_sel = st.multiselect(
+            "Pozo / Terminación",
+            pozos,
+            default=pozos,
+            key="term_pozos_sel"
+    )
+
+    if pozos_sel:
+        term_f = term_f[term_f[COL_POZO].astype(str).isin(pozos_sel)].copy()
 
     if term_f.empty:
         st.warning("No hay datos con los filtros seleccionados.")
@@ -865,19 +1118,19 @@ def analisis_term():
     # =========================
     fig1 = go.Figure()
 
-    fig1.add_trace(go.Bar(
-        x=term_f["POZO_CAMP"],
-        #x=term_f[COL_POZO],
-        y=term_f[col_qoi_prog],
-        name="Qo programa (bpd)",
-        marker=dict(
-            color="#1F4E79",
-            line=dict(color="#0B1F33", width=1.5)
-        ),
-        opacity=0.88,
-        text=term_f[col_qoi_prog].round(1),
-        textposition="outside"
-    ))
+    #fig1.add_trace(go.Bar(
+    #    x=term_f["POZO_CAMP"],
+    #    #x=term_f[COL_POZO],
+    #    y=term_f[col_qoi_prog],
+    #    name="Qo programa (bpd)",
+    #    marker=dict(
+    #        color="#1F4E79",
+    #        line=dict(color="#0B1F33", width=1.5)
+    #    ),
+    #    opacity=0.88,
+    #    text=term_f[col_qoi_prog].round(1),
+    #    textposition="outside"
+    #))
 
     fig1.add_trace(go.Bar(
         x=term_f["POZO_CAMP"],
@@ -1269,6 +1522,7 @@ def analisis_term():
     # =========================
 
     # =========================
+
 # 4.1 GASTO INICIAL Y NP POR POZO / TIEMPO
 # =========================
 
@@ -1494,12 +1748,17 @@ def analisis_term():
     # 4.2 NP PROMEDIO Y NÚMERO DE POZOS POR CAMPAÑA
     # =========================
 
+    #Aqui debo corregir las terminaciones
     resumen_np = term_np.groupby(col_anio, as_index=False).agg(
         NP_PROM=("NP_FINAL", "mean"),
         POZOS=(COL_POZO, "nunique")
     )
 
     fig5 = go.Figure()
+
+    # =========================
+    # 5. BOXPLOT NP RMA
+    # =========================
 
     fig5.add_trace(
         go.Bar(
@@ -1686,6 +1945,1032 @@ def analisis_term():
     else:
         mapa_burbujas(df_mapa_term, df_coord_term)
 
+@st.cache_data(show_spinner="Calculando producción total del campo...")
+def preparar_resumen_campo(df_base: pd.DataFrame):
+
+    prod = calcular_columnas_produccion(df_base.copy())
+    prod = prod.sort_values([COL_FECHA, COL_YAC, COL_POZO]).copy()
+
+    prod["POZO_ACTIVO"] = np.where(
+        (prod[COL_QO] > 0) | (prod[COL_QW] > 0) | (prod[COL_QG] > 0),
+        1,
+        0
+    )
+
+    # =========================
+    # TOTAL CAMPO
+    # =========================
+    total = (
+        prod.groupby(COL_FECHA, as_index=False)
+        .agg(
+            QO_TOTAL=(COL_QO, "sum"),
+            QW_TOTAL=(COL_QW, "sum"),
+            QG_TOTAL=(COL_QG, "sum"),
+            QG_PCD_TOTAL=(COL_QG_PCD, "sum"),
+            ACEITE_BBL=(COL_ACEITE_BBL, "sum"),
+            AGUA_BBL=(COL_AGUA_BBL, "sum"),
+            GAS_PC=(COL_GAS_PC, "sum"),
+            POZOS_ACTIVOS=(COL_POZO, lambda x: x[prod.loc[x.index, "POZO_ACTIVO"] == 1].nunique())
+        )
+        .sort_values(COL_FECHA)
+    )
+
+    total["RGA_TOTAL"] = np.where(
+        total["QO_TOTAL"] > 0,
+        total["QG_PCD_TOTAL"] / total["QO_TOTAL"],
+        0
+    )
+
+    total["WC_TOTAL"] = np.where(
+        (total["QO_TOTAL"] + total["QW_TOTAL"]) > 0,
+        total["QW_TOTAL"] / (total["QO_TOTAL"] + total["QW_TOTAL"]) * 100,
+        0
+    )
+
+    total["NP_TOTAL"] = total["ACEITE_BBL"].cumsum() / 1000
+    total["WP_TOTAL"] = total["AGUA_BBL"].cumsum() / 1000
+    total["GP_TOTAL"] = total["GAS_PC"].cumsum() / 1_000_000
+
+    # =========================
+    # POR YACIMIENTO
+    # =========================
+    yac = (
+        prod.groupby([COL_FECHA, COL_YAC], as_index=False)
+        .agg(
+            QO_TOTAL=(COL_QO, "sum"),
+            QW_TOTAL=(COL_QW, "sum"),
+            QG_TOTAL=(COL_QG, "sum"),
+            QG_PCD_TOTAL=(COL_QG_PCD, "sum"),
+            ACEITE_BBL=(COL_ACEITE_BBL, "sum"),
+            AGUA_BBL=(COL_AGUA_BBL, "sum"),
+            GAS_PC=(COL_GAS_PC, "sum"),
+            POZOS_ACTIVOS=(COL_POZO, lambda x: x[prod.loc[x.index, "POZO_ACTIVO"] == 1].nunique())
+        )
+        .sort_values([COL_YAC, COL_FECHA])
+    )
+
+    yac["RGA_TOTAL"] = np.where(
+        yac["QO_TOTAL"] > 0,
+        yac["QG_PCD_TOTAL"] / yac["QO_TOTAL"],
+        0
+    )
+
+    yac["WC_TOTAL"] = np.where(
+        (yac["QO_TOTAL"] + yac["QW_TOTAL"]) > 0,
+        yac["QW_TOTAL"] / (yac["QO_TOTAL"] + yac["QW_TOTAL"]) * 100,
+        0
+    )
+
+    yac["NP_TOTAL"] = yac.groupby(COL_YAC)["ACEITE_BBL"].cumsum() / 1000
+    yac["WP_TOTAL"] = yac.groupby(COL_YAC)["AGUA_BBL"].cumsum() / 1000
+    yac["GP_TOTAL"] = yac.groupby(COL_YAC)["GAS_PC"].cumsum() / 1_000_000
+
+    return total, yac
+
+def produccion_total_campo():
+
+    st.markdown(
+        "<div class='section-title'>Producción total del campo / por yacimiento</div>",
+        unsafe_allow_html=True
+    )
+
+    # Cálculo pesado cacheado
+    total_all, yac_all = preparar_resumen_campo(df)
+
+    # =========================
+    # FILTRO YACIMIENTO
+    # =========================
+    yacs_disponibles = sorted(
+        yac_all[COL_YAC].dropna().astype(str).unique()
+    )
+
+    yacs_sel = st.multiselect(
+        "Yacimientos",
+        yacs_disponibles,
+        default=yacs_disponibles,
+        key="filtro_yac_prod_total"
+    )
+
+    yac = yac_all.copy()
+
+    if yacs_sel:
+        yac = yac[
+            yac[COL_YAC].astype(str).isin(yacs_sel)
+        ].copy()
+
+    if yac.empty:
+        st.warning("No hay datos para los yacimientos seleccionados.")
+        return
+
+    # Recalcular total campo con los yacimientos seleccionados
+    total = (
+        yac.groupby(COL_FECHA, as_index=False)
+        .agg(
+            QO_TOTAL=("QO_TOTAL", "sum"),
+            QW_TOTAL=("QW_TOTAL", "sum"),
+            QG_TOTAL=("QG_TOTAL", "sum"),
+            QG_PCD_TOTAL=("QG_PCD_TOTAL", "sum"),
+            ACEITE_BBL=("ACEITE_BBL", "sum"),
+            AGUA_BBL=("AGUA_BBL", "sum"),
+            GAS_PC=("GAS_PC", "sum"),
+            POZOS_ACTIVOS=("POZOS_ACTIVOS", "sum")
+        )
+        .sort_values(COL_FECHA)
+    )
+
+    total["RGA_TOTAL"] = np.where(
+        total["QO_TOTAL"] > 0,
+        total["QG_PCD_TOTAL"] / total["QO_TOTAL"],
+        0
+    )
+
+    total["WC_TOTAL"] = np.where(
+        (total["QO_TOTAL"] + total["QW_TOTAL"]) > 0,
+        total["QW_TOTAL"] / (total["QO_TOTAL"] + total["QW_TOTAL"]) * 100,
+        0
+    )
+
+    total["NP_TOTAL"] = total["ACEITE_BBL"].cumsum() / 1000
+    total["WP_TOTAL"] = total["AGUA_BBL"].cumsum() / 1000
+    total["GP_TOTAL"] = total["GAS_PC"].cumsum() / 1_000_000
+
+    # =========================
+    # GRÁFICO 1: Qo, Qw, Qg y pozos activos
+    # =========================
+    fig1 = make_subplots(specs=[[{"secondary_y": True}]])
+
+    fig1.add_trace(go.Scatter(
+        x=total[COL_FECHA],
+        y=total["QO_TOTAL"],
+        mode="lines",
+        name="Qo total",
+        line=dict(color="#00A65A", width=3)
+    ), secondary_y=False)
+
+    fig1.add_trace(go.Scatter(
+        x=total[COL_FECHA],
+        y=total["QW_TOTAL"],
+        mode="lines",
+        name="Qw total",
+        line=dict(color="#1E88E5", width=3)
+    ), secondary_y=False)
+
+    fig1.add_trace(go.Scatter(
+        x=total[COL_FECHA],
+        y=total["QG_TOTAL"],
+        mode="lines",
+        name="Qg total",
+        line=dict(color="#E53935", width=3)
+    ), secondary_y=False)
+
+    fig1.add_trace(go.Bar(
+        x=total[COL_FECHA],
+        y=total["POZOS_ACTIVOS"],
+        name="Pozos activos",
+        marker=dict(color="rgba(0,0,0,0.35)"),
+        opacity=0.45
+    ), secondary_y=True)
+
+    fig1.update_layout(
+        title="<b>Producción de aceite, agua, gas y pozos activos</b>",
+        template="plotly_white",
+        height=600,
+        hovermode="x unified",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.05,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=13, color="black", family="Arial Black")
+        ),
+        font=dict(size=14, color="black", family="Arial Black"),
+        plot_bgcolor="white",
+        paper_bgcolor="white"
+    )
+
+    fig1.update_xaxes(
+        title_text="Fecha",
+        tickformat="%d/%m/%Y",
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black"
+    )
+
+    fig1.update_yaxes(
+        title_text="Qo / Qw (bpd) y Qg (mpcd)",
+        secondary_y=False,
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black"
+    )
+
+    fig1.update_yaxes(
+        title_text="Pozos activos",
+        secondary_y=True,
+        showgrid=False
+    )
+
+    st.plotly_chart(fig1, use_container_width=True)
+
+    # =========================
+    # GRÁFICO 2: RGA y % Agua
+    # =========================
+    fig2 = make_subplots(specs=[[{"secondary_y": True}]])
+
+    fig2.add_trace(go.Scatter(
+        x=total[COL_FECHA],
+        y=total["RGA_TOTAL"],
+        mode="lines",
+        name="RGA total",
+        line=dict(color="#E53935", width=3)
+    ), secondary_y=False)
+
+    fig2.add_trace(go.Scatter(
+        x=total[COL_FECHA],
+        y=total["WC_TOTAL"],
+        mode="lines",
+        name="% Agua total",
+        line=dict(color="#1E88E5", width=3)
+    ), secondary_y=True)
+
+    fig2.update_layout(
+        title="<b>RGA y corte de agua</b>",
+        template="plotly_white",
+        height=560,
+        hovermode="x unified",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.05,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=13, color="black", family="Arial Black")
+        ),
+        font=dict(size=14, color="black", family="Arial Black"),
+        plot_bgcolor="white",
+        paper_bgcolor="white"
+    )
+
+    fig2.update_xaxes(
+        title_text="Fecha",
+        tickformat="%d/%m/%Y",
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black"
+    )
+
+    fig2.update_yaxes(
+        title_text="RGA (pc/bl)",
+        secondary_y=False,
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black"
+    )
+
+    fig2.update_yaxes(
+        title_text="% Agua",
+        secondary_y=True,
+        showgrid=False
+    )
+
+    st.plotly_chart(fig2, use_container_width=True)
+
+    # =========================
+    # GRÁFICO 3: Acumuladas Np, Wp, Gp
+    # =========================
+    fig3 = go.Figure()
+
+    fig3.add_trace(go.Scatter(
+        x=total[COL_FECHA],
+        y=total["NP_TOTAL"],
+        mode="lines",
+        name="Np total",
+        line=dict(color="#00A65A", width=3)
+    ))
+
+    fig3.add_trace(go.Scatter(
+        x=total[COL_FECHA],
+        y=total["WP_TOTAL"],
+        mode="lines",
+        name="Wp total",
+        line=dict(color="#1E88E5", width=3)
+    ))
+
+    fig3.add_trace(go.Scatter(
+        x=total[COL_FECHA],
+        y=total["GP_TOTAL"],
+        mode="lines",
+        name="Gp total",
+        line=dict(color="#E53935", width=3)
+    ))
+
+    fig3.update_layout(
+        title="<b>Producción acumulada de aceite, agua y gas</b>",
+        template="plotly_white",
+        height=600,
+        hovermode="x unified",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.05,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=13, color="black", family="Arial Black")
+        ),
+        font=dict(size=14, color="black", family="Arial Black"),
+        plot_bgcolor="white",
+        paper_bgcolor="white"
+    )
+
+    fig3.update_xaxes(
+        title_text="Fecha",
+        tickformat="%d/%m/%Y",
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black"
+    )
+
+    fig3.update_yaxes(
+        title_text="Np / Wp (mbl) y Gp (mmpc)",
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black"
+    )
+
+    st.plotly_chart(fig3, use_container_width=True)
+    
+#Análisis RMA
+def analisis_rma():
+    st.markdown("<div class='section-title'>Análisis estadístico de reparaciones mayores RMA</div>", unsafe_allow_html=True)
+
+    rma = load_table(TABLA_RMA)
+    rma = normalizar_columnas(rma)
+    rma = rma.loc[:, ~rma.columns.astype(str).str.startswith("UNNAMED")]
+
+    col_anio = "AÑO"
+    col_qoi_prog = "QO PROG"
+    col_qoi = "QOI"
+    col_yac = "YACIMIENTO"
+    col_yac_rma = "YACIMIENTO RMA"
+    col_np_rma = "NP (MB)"
+    col_meses_activos = "MESES ACTIVO"
+
+    if COL_POZO not in rma.columns:
+        segunda_col = rma.columns[1]
+        rma = rma.rename(columns={segunda_col: COL_POZO})
+
+    rma[COL_POZO] = rma[COL_POZO].astype(str).str.strip()
+
+    cols_necesarias = [
+        col_anio, col_qoi_prog, col_qoi,
+        col_yac, col_yac_rma, COL_POZO,
+        col_np_rma, col_meses_activos
+    ]
+
+    for c in cols_necesarias:
+        if c not in rma.columns:
+            st.error(f"No existe la columna '{c}' en RMA. Revisa el encabezado exacto.")
+            st.write(rma.columns.tolist())
+            return
+
+    rma[col_anio] = pd.to_numeric(rma[col_anio], errors="coerce")
+    rma[col_qoi_prog] = pd.to_numeric(rma[col_qoi_prog], errors="coerce")
+    rma[col_qoi] = pd.to_numeric(rma[col_qoi], errors="coerce")
+    rma[col_np_rma] = pd.to_numeric(rma[col_np_rma],errors="coerce").fillna(0)
+    rma[col_meses_activos] = pd.to_numeric(rma[col_meses_activos],errors="coerce").fillna(0)
+
+    rma["DIF_QOI"] = rma[col_qoi] - rma[col_qoi_prog]
+    rma["CUMPLIMIENTO_QOI_%"] = np.where(
+        rma[col_qoi_prog] > 0,
+        rma[col_qoi] / rma[col_qoi_prog] * 100,
+        np.nan
+    )
+
+    # =========================
+    # FILTROS
+    # =========================
+    c1, c2, c3, c4 = st.columns(4)
+
+    with c1:
+        anios = sorted(rma[col_anio].dropna().astype(int).unique())
+        anio_sel = st.multiselect(
+            "Año RMA",
+            anios,
+            default=anios,
+            key="rma_anio"
+        )
+
+    rma_f = rma[rma[col_anio].astype("Int64").isin(anio_sel)].copy()
+
+    with c2:
+        yacs = sorted(rma_f[col_yac].dropna().astype(str).unique())
+        yac_sel = st.multiselect(
+            "Origen",
+            yacs,
+            default=yacs,
+            key="rma_yac"
+        )
+
+    if yac_sel:
+        rma_f = rma_f[rma_f[col_yac].astype(str).isin(yac_sel)].copy()
+
+    with c3:
+        yacs_rma = sorted(rma_f[col_yac_rma].dropna().astype(str).unique())
+        yac_rma_sel = st.multiselect(
+            "Intervención",
+            yacs_rma,
+            default=yacs_rma,
+            key="rma_yac_rma"
+        )
+
+    if yac_rma_sel:
+        rma_f = rma_f[rma_f[col_yac_rma].astype(str).isin(yac_rma_sel)].copy()
+
+    with c4:
+        pozos = sorted(rma_f[COL_POZO].dropna().astype(str).unique())
+
+        pozos_sel_rma = st.multiselect(
+            "Terminación",
+            pozos,
+            default=pozos,
+            key="rma_pozos_sel"
+    )
+
+    if pozos_sel_rma:
+        rma_f = rma_f[rma_f[COL_POZO].astype(str).isin(pozos_sel_rma)].copy()
+
+    if rma_f.empty:
+        st.warning("No hay datos con los filtros seleccionados.")
+        return
+
+    # =========================
+    # MÉTRICAS
+    # =========================
+    m1, m2 = st.columns(2)
+
+    m1.metric("RMA analizadas", f"{rma_f[COL_POZO].nunique():,.0f}")
+    m2.metric("Qoi promedio", f"{rma_f[col_qoi].mean():,.1f} bpd")
+
+    rma_f = rma_f.sort_values([col_anio, COL_POZO])
+
+    rma_f["POZO_CAMP"] = (
+        rma_f[col_anio].astype(int).astype(str)
+        + " | "
+        + rma_f[COL_POZO].astype(str)
+    )
+
+    # =========================
+    # 1. QO PROG VS QOI
+    # =========================
+    fig1 = go.Figure()
+
+    #fig1.add_trace(go.Bar(
+    #    x=rma_f["POZO_CAMP"],
+    #    y=rma_f[col_qoi_prog],
+    #    name="Qo programa (bpd)",
+    #    marker=dict(
+    #        color="#1F4E79",
+    #        line=dict(color="#0B1F33", width=1.5)
+    #    ),
+    #    opacity=0.88,
+    #    text=rma_f[col_qoi_prog].round(1),
+    #    textposition="outside"
+    #))
+
+    fig1.add_trace(go.Bar(
+        x=rma_f["POZO_CAMP"],
+        y=rma_f[col_qoi],
+        name="Qoi real (bpd)",
+        marker=dict(
+            color="#00A65A",
+            line=dict(color="#006B3A", width=1.5)
+        ),
+        opacity=0.95,
+        text=rma_f[col_qoi].round(1),
+        textposition="outside"
+    ))
+
+    fig1.update_layout(
+        title="<b>RMA: Qoi(bpd)</b>",
+        xaxis=dict(
+            tickangle=-75,
+            categoryorder="array",
+            categoryarray=rma_f["POZO_CAMP"]
+        ),
+        yaxis_title="Qoi (bpd)",
+        barmode="group",
+        height=560,
+        template="plotly_white",
+        bargap=0.22,
+        bargroupgap=0.08,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.03,
+            xanchor="right",
+            x=1
+        ),
+        font=dict(size=14, color="black", family="Arial Black"),
+        plot_bgcolor="white",
+        paper_bgcolor="white"
+    )
+
+    fig1.update_xaxes(
+        title_text="Año | Terminación",
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(size=11, color="black", family="Tahoma")
+    )
+
+    fig1.update_yaxes(
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(size=12, color="black", family="Arial Black")
+    )
+
+    st.plotly_chart(fig1, use_container_width=True)
+
+    # =========================
+    # 2. QOI PROMEDIO POR AÑO
+    # =========================
+    resumen_anio = rma_f.groupby(col_anio, as_index=False).agg(
+        QOI_PROM=(col_qoi, "mean"),
+        POZOS=(COL_POZO, "nunique")
+    )
+
+    fig2 = make_subplots(specs=[[{"secondary_y": True}]])
+
+    fig2.add_trace(
+        go.Bar(
+            x=resumen_anio[col_anio],
+            y=resumen_anio["QOI_PROM"],
+            name="Qoi promedio",
+            marker=dict(
+                color="#14A1FF",
+                line=dict(color="#000000", width=1.5)
+            ),
+            text=resumen_anio["QOI_PROM"].round(1),
+            textposition="outside",
+            textfont=dict(size=13, color="#000000", family="Tahoma"),
+            opacity=0.65
+        ),
+        secondary_y=False
+    )
+
+    for x, y, p in zip(
+        resumen_anio[col_anio],
+        resumen_anio["QOI_PROM"],
+        resumen_anio["POZOS"]
+    ):
+        fig2.add_annotation(
+            x=x,
+            y=y * 0.05,
+            text=f"<b>{p} pozos</b>",
+            showarrow=False,
+            font=dict(size=12, color="black", family="Arial Black")
+        )
+
+    fig2.update_layout(
+        title="<b>RMA: Qoi promedio y pozos por año</b>",
+        height=520,
+        template="plotly_white",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.15,
+            xanchor="center",
+            x=0.5
+        ),
+        font=dict(size=14, color="black", family="Arial Black"),
+        plot_bgcolor="white",
+        paper_bgcolor="white"
+    )
+
+    fig2.update_xaxes(
+        title_text="Año",
+        dtick=1,
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(size=12, color="black", family="Arial Black")
+    )
+
+    fig2.update_yaxes(
+        title_text="Qoi promedio (bpd)",
+        secondary_y=False,
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(size=12, color="black", family="Arial Black")
+    )
+
+    fig2.update_yaxes(
+        title_text="Número de pozos",
+        secondary_y=True,
+        showgrid=False,
+        tickfont=dict(size=12, color="black", family="Arial Black")
+    )
+
+    # =========================
+    # BOXPLOT QOI + TOTAL FILTRO
+    # =========================
+
+    rma_box_qoi = rma_f.copy()
+
+    rma_box_qoi["ANIO_BOX"] = rma_box_qoi[col_anio].astype(int).astype(str)
+
+    rma_total_qoi = rma_f.copy()
+    rma_total_qoi["ANIO_BOX"] = "TOTAL"
+
+    rma_box_qoi = pd.concat(
+        [rma_box_qoi, rma_total_qoi],
+        ignore_index=True
+    )
+
+    orden_box_qoi = (
+        sorted(rma_f[col_anio].dropna().astype(int).astype(str).unique().tolist())
+        + ["TOTAL"]
+    )
+
+    fig3 = px.box(
+        rma_box_qoi,
+        x="ANIO_BOX",
+        y=col_qoi,
+        points="all",
+        hover_name=COL_POZO,
+        title="<b>RMA: Modelo estadístico Qoi</b>",
+        template="plotly_white",
+        category_orders={
+            "ANIO_BOX": orden_box_qoi
+        }
+    )
+    fig3.update_traces(
+        marker=dict(
+            color="#30E460",
+            size=7,
+            opacity=0.65,
+            line=dict(color="black", width=1)
+        ),
+        line=dict(color="#006B3A", width=1),
+        fillcolor="rgba(0,166,90,0.25)"
+    )
+
+    #medianas = rma_box_qoi.groupby(col_anio, as_index=False)[col_qoi].median()
+    medianas = rma_box_qoi.groupby("ANIO_BOX", as_index=False)[col_qoi].median()
+
+    fig3.add_trace(go.Scatter(
+        x=medianas["ANIO_BOX"],
+        y=medianas[col_qoi],
+        mode="text",
+        text=medianas[col_qoi].round(1),
+        textposition="top center",
+        textfont=dict(size=10, color="black"),
+        name="Mediana",
+        showlegend=False
+    ))
+
+    fig3.update_layout(
+        height=520,
+        xaxis_title="Año / Total filtrado",
+        #xaxis_title="Año",
+        yaxis_title="Qoi por RMA (bpd)",
+        xaxis=dict(
+        categoryorder="array",
+        categoryarray=orden_box_qoi
+        ),
+        font=dict(size=14, color="black", family="Arial Black"),
+        plot_bgcolor="white",
+        paper_bgcolor="white"
+    )
+
+    fig3.update_xaxes(
+        dtick=1,
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(size=12, color="black", family="Arial Black")
+    )
+
+    fig3.update_yaxes(
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(size=12, color="black", family="Arial Black")
+    )
+
+    colg1, colg2 = st.columns(2)
+
+    with colg1:
+        st.plotly_chart(fig2, use_container_width=True)
+
+    with colg2:
+        st.plotly_chart(fig3, use_container_width=True)
+
+    # 4. QOI VS NP DESDE TABLA RMA
+    # =========================
+    st.markdown("<div class='section-title'>RMA: Análisis de producción acumulada</div>", unsafe_allow_html=True)
+
+    rma_np = rma_f.copy()
+
+    rma_np["NP_FINAL"] = pd.to_numeric(
+        rma_np[col_np_rma],
+        errors="coerce"
+    ).fillna(0)
+
+    rma_np["MESES_ACTIVOS"] = pd.to_numeric(
+        rma_np[col_meses_activos],
+        errors="coerce"
+    ).fillna(0)
+
+    rma_np = rma_np.sort_values([col_anio, COL_POZO])
+
+    rma_np["POZO_CAMP"] = (
+        rma_np[col_anio].astype(int).astype(str)
+        + " | "
+        + rma_np[COL_POZO].astype(str)
+    )
+
+    fig4 = make_subplots(specs=[[{"secondary_y": True}]])
+
+    fig4.add_trace(
+        go.Bar(
+            x=rma_np["POZO_CAMP"],
+            y=rma_np[col_qoi],
+            name="Qoi (bpd)",
+            marker=dict(
+                color="#00A65A",
+                line=dict(color="#000000", width=1.5)
+            ),
+            text=rma_np[col_qoi].round(1),
+            textposition="outside",
+            textfont=dict(size=12, color="black", family="Tahoma"),
+            opacity=0.80
+        ),
+        secondary_y=False
+    )
+
+    fig4.add_trace(
+        go.Scatter(
+            x=rma_np["POZO_CAMP"],
+            y=rma_np["NP_FINAL"],
+            name="Np RMA (mb)",
+            mode="lines+markers+text",
+            line=dict(color="#1F4E79", width=3),
+            marker=dict(
+                size=9,
+                color="#1F4E79",
+                line=dict(color="white", width=1)
+            ),
+            text=rma_np["NP_FINAL"].round(1),
+            textposition="top center",
+            textfont=dict(size=11, color="black", family="Tahoma")
+        ),
+        secondary_y=True
+    )
+
+    fig4.update_layout(
+        title="<b>RMA: Qoi y Np RMA por pozo</b>",
+        xaxis=dict(
+            tickangle=-75,
+            categoryorder="array",
+            categoryarray=rma_np["POZO_CAMP"]
+        ),
+        height=650,
+        template="plotly_white",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.12,
+            xanchor="center",
+            x=0.5
+        ),
+        font=dict(size=14, color="black", family="Arial Black"),
+        plot_bgcolor="white",
+        paper_bgcolor="white"
+    )
+
+    fig4.update_xaxes(
+        title_text="Año | Terminación",
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(size=11, color="black", family="Tahoma")
+    )
+
+    fig4.update_yaxes(
+        title_text="Qoi (bpd)",
+        secondary_y=False,
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(size=12, color="black", family="Arial Black")
+    )
+
+    fig4.update_yaxes(
+        title_text="Np RMA (mb)",
+        secondary_y=True,
+        showgrid=False,
+        tickfont=dict(size=12, color="black", family="Arial Black")
+    )
+
+    st.plotly_chart(fig4, use_container_width=True)
+
+    # =========================
+    # 5. NP PROMEDIO
+    # =========================
+    #resumen_np = rma_np.groupby(col_anio, as_index=False).agg(
+    #    NP_PROM=("NP_FINAL", "mean"),
+    #    MESES_ACTIVOS_PROM=("MESES_ACTIVOS", "mean"),
+    #    POZOS=(COL_POZO, "nunique")
+    #)
+
+    fig5 = go.Figure()
+
+    # =========================
+# 5. BOXPLOT NP RMA
+# =========================
+
+    fig5 = px.box(
+        rma_np,
+        x=col_anio,
+        y="NP_FINAL",
+        points="all",
+        hover_name=COL_POZO,
+        title="<b>RMA: Modelo estadístico Np</b>",
+        template="plotly_white"
+    )
+
+    fig5.update_traces(
+        marker=dict(
+            color="#228B22",
+            size=7,
+            opacity=0.70,
+            line=dict(color="black", width=1)
+        ),
+        line=dict(color="#145A32", width=1.5),
+        fillcolor="rgba(34,139,34,0.25)"
+    )
+
+    medianas_np = rma_np.groupby(col_anio, as_index=False)["NP_FINAL"].median()
+
+    fig5.add_trace(go.Scatter(
+        x=medianas_np[col_anio],
+        y=medianas_np["NP_FINAL"],
+        mode="text",
+        text=medianas_np["NP_FINAL"].round(1),
+        textposition="top center",
+        textfont=dict(
+            size=10,
+            color="black",
+            family="Arial Black"
+        ),
+        name="Mediana Np",
+        showlegend=False
+    ))
+
+    fig5.update_layout(
+        height=520,
+        xaxis_title="Año",
+        yaxis_title="Np RMA (mb)",
+        font=dict(size=14, color="black", family="Arial Black"),
+        plot_bgcolor="white",
+        paper_bgcolor="white"
+    )
+
+    fig5.update_xaxes(
+        dtick=1,
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(size=12, color="black", family="Arial Black")
+    )
+
+    fig5.update_yaxes(
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(size=12, color="black", family="Arial Black")
+    )
+
+
+    # =========================
+    # 6. BOXPLOT MESES ACTIVOS
+    # =========================
+
+    fig6 = px.box(
+        rma_np,
+        x=col_anio,
+        y="MESES_ACTIVOS",
+        points="all",
+        hover_name=COL_POZO,
+        title="<b>RMA: Modelo estadístico meses activos</b>",
+        template="plotly_white"
+    )
+
+    fig6.update_traces(
+        marker=dict(
+            color="#FF4500",
+            size=7,
+            opacity=0.70,
+            line=dict(color="black", width=1)
+        ),
+        line=dict(color="#A93226", width=1.5),
+        fillcolor="rgba(255,69,0,0.25)"
+    )
+
+    medianas_meses = rma_np.groupby(col_anio, as_index=False)["MESES_ACTIVOS"].median()
+
+    fig6.add_trace(go.Scatter(
+        x=medianas_meses[col_anio],
+        y=medianas_meses["MESES_ACTIVOS"],
+        mode="text",
+        text=medianas_meses["MESES_ACTIVOS"].round(1),
+        textposition="top center",
+        textfont=dict(
+            size=10,
+            color="black",
+            family="Arial Black"
+        ),
+        name="Mediana meses activos",
+        showlegend=False
+    ))
+
+    fig6.update_layout(
+        height=520,
+        xaxis_title="Año",
+        yaxis_title="Meses activos",
+        font=dict(size=14, color="black", family="Arial Black"),
+        plot_bgcolor="white",
+        paper_bgcolor="white"
+    )
+
+    fig6.update_xaxes(
+        dtick=1,
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(size=12, color="black", family="Arial Black")
+    )
+
+    fig6.update_yaxes(
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        tickfont=dict(size=12, color="black", family="Arial Black")
+    )
+
+    colnp1, colnp2 = st.columns(2)
+
+    with colnp1:
+        st.plotly_chart(fig5, use_container_width=True)
+
+    with colnp2:
+        st.plotly_chart(fig6, use_container_width=True)
+
+
+     # =========================
+    # =========================
+    # MAPA DE BURBUJAS FILTRADO CON RMA
+    # =========================
+
+    pozos_rma = rma_f[COL_POZO].dropna().astype(str).unique().tolist()
+
+    df_mapa_rma = df.copy()
+    df_coord_rma = df_coord.copy()
+
+    if df_coord_rma.empty:
+        st.warning("Los pozos seleccionados en RMA no tienen coordenadas en Coord.")
+    else:
+        mapa_burbujas(df_mapa_rma, df_coord_rma, modo_mapa="RMA")
+        #mapa_burbujas(df_mapa_rma, df_coord_rma)
+
 # =========================================================
 # FILTROS
 # =========================================================
@@ -1730,7 +3015,7 @@ with f3:
 with f4:
     vista = st.radio(
         "Tipo de análisis",
-        ["Producción por pozo", "Comparativa por pozo", "Mapa de burbujas", "Campañas 2011-2020"],
+        ["Producción por pozo", "Comparativa por pozo", "Mapa de burbujas", "Campañas 2011-2020","RMA 2011-2020","Producción Campo",],
         horizontal=True
     )
     #vista = st.radio(
@@ -1794,15 +3079,88 @@ if vista == "Producción por pozo":
 
     k1, k2, k3, k4, k5, k6, k7, k8, k9 = st.columns(9)
 
-    k1.metric("Inicio producción", first_row[COL_FECHA].strftime("%d/%m/%Y"))
-    k2.metric("Última producción", last_row[COL_FECHA].strftime("%d/%m/%Y"))
-    k3.metric("Gasto Inicial", f"{first_row[COL_QO]:,.1f} bpd")
-    k4.metric("Último Gasto Aceite", f"{last_row[COL_QO]:,.1f} bpd")
-    k5.metric("Último Gasto Agua", f"{last_row[COL_QW]:,.1f} bpd")
-    k6.metric("Último Gasto Gas", f"{last_row[COL_QG]:,.1f} mpcd")
-    k7.metric("Acumulada Aceite", f"{dfp[COL_NP].iloc[-1]:,.2f} mbl")
-    k8.metric("Acumulada Agua", f"{dfp[COL_WP].iloc[-1]:,.2f} mbl")
-    k9.metric("Acumulada Gas", f"{dfp[COL_GP].iloc[-1]:,.2f} mmpc")
+    with k1:
+        kpi_card(
+            "Inicio producción",
+            first_row[COL_FECHA].strftime("%d/%m/%Y"),
+            "",
+            "#1F2937",
+        )
+
+    with k2:
+        kpi_card(
+            "Última producción",
+            last_row[COL_FECHA].strftime("%d/%m/%Y"),
+            "",
+            "#374151",
+        )
+
+    with k3:
+        kpi_card(
+            "Gasto inicial",
+            f"{first_row[COL_QO]:,.1f}",
+            "bpd",
+            "#1F2937",
+        )
+
+    with k4:
+        kpi_card(
+            "Último Gasto Aceite",
+            f"{last_row[COL_QO]:,.1f}",
+            "bpd",
+            "#1F2937",
+        )
+
+    with k5:
+        kpi_card(
+            "Última Gasto Agua",
+            f"{last_row[COL_QW]:,.1f}",
+            "bpd",
+            "#1F2937",
+        )
+
+    with k6:
+        kpi_card(
+            "Último Gasto Gas",
+            f"{last_row[COL_QG]:,.1f}",
+            "mpcd",
+            "#1F2937",
+        )
+
+    with k7:
+        kpi_card(
+            "Acumulada Aceite",
+            f"{dfp[COL_NP].iloc[-1]:,.2f}",
+            "mbl",
+            "#1F2937",
+        )
+
+    with k8:
+        kpi_card(
+            "Acumulada Agua",
+            f"{dfp[COL_WP].iloc[-1]:,.2f}",
+            "mbl",
+            "#1F2937",
+        )
+
+    with k9:
+        kpi_card(
+            "Acumulada Gas",
+            f"{dfp[COL_GP].iloc[-1]:,.2f}",
+            "mmpc",
+            "#1F2937",
+        )
+    #k1, k2, k3, k4, k5, k6, k7, k8, k9 = st.columns(9)
+
+    #k1.metric("Inicio producción", first_row[COL_FECHA].strftime("%d/%m/%Y"))
+    #k2.metric("Última producción", last_row[COL_FECHA].strftime("%d/%m/%Y"))
+    #k3.metric("Gasto Inicial", f"{first_row[COL_QO]:,.1f} bpd")
+    #k4.metric("Último Gasto Aceite", f"{last_row[COL_QO]:,.1f} bpd")
+    #k5.metric("Último Gasto Agua", f"{last_row[COL_QW]:,.1f} bpd")
+    #k6.metric("Último Gasto Gas", f"{last_row[COL_QG]:,.1f} mpcd")
+    #k7.metric("Acumulada Aceite", f"{dfp[COL_NP].iloc[-1]:,.2f} mbl")
+    #k8.metric("Acumulada Agua", f"{dfp[COL_WP].iloc[-1]:,.2f} mbl")
+    #k9.metric("Acumulada Gas", f"{dfp[COL_GP].iloc[-1]:,.2f} mmpc")
 
 # =========================================================
 # FUNCIÓN PARA GRÁFICAS COMPARATIVAS
@@ -1895,7 +3253,11 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
         template="plotly_white",
         hovermode="x unified",
         height=520,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,  font=dict(
+        size=14,
+        color="black",
+        family="Arial"
+        )),
         margin=dict(l=35, r=35, t=60, b=35),
         plot_bgcolor="white",
         paper_bgcolor="white",
@@ -2019,7 +3381,11 @@ if vista == "Producción por pozo":
         template="plotly_white",
         hovermode="x unified",
         height=520,
-        legend=dict(orientation="h", y=1.02),
+        legend=dict(orientation="h", y=1.02, font=dict(
+        size=14,
+        color="black",
+        family="Arial Black"
+        )),
         margin=dict(l=35, r=35, t=60, b=35)
     )
 
@@ -2087,7 +3453,11 @@ if vista == "Producción por pozo":
         template="plotly_white",
         hovermode="x unified",
         height=520,
-        legend=dict(orientation="h", y=1.02),
+        legend=dict(orientation="h", y=1.02,  font=dict(
+        size=14,
+        color="black",
+        family="Arial Black"
+        )),
         margin=dict(l=35, r=35, t=60, b=35)
     )
 
@@ -2153,7 +3523,11 @@ if vista == "Producción por pozo":
         template="plotly_white",
         hovermode="x unified",
         height=520,
-        legend=dict(orientation="h", y=1.02),
+        legend=dict(orientation="h", y=1.02,  font=dict(
+        size=14,
+        color="black",
+        family="Arial Black"
+        )),
         margin=dict(l=35, r=35, t=60, b=35)
     )
 
@@ -2183,6 +3557,69 @@ if vista == "Producción por pozo":
 
     st.plotly_chart(fig3, use_container_width=True)
 
+    # =====================================================
+# TABLA PRODUCCIÓN DEL POZO
+# =====================================================
+
+    st.markdown(
+        """
+        <div style="
+            background-color:#F8F9F9;
+            padding:10px;
+            border-radius:8px;
+            border:1px solid #D5D8DC;
+            margin-top:10px;
+        ">
+        <h4 style='color:#1F618D;'>
+        Tabla histórica de producción
+        </h4>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    cols_tabla = [
+        COL_FECHA,
+        COL_DIAS,
+        COL_QO,
+        COL_QW,
+        COL_QG,
+        COL_WC,
+        COL_RGA,
+        COL_NP,
+        COL_WP,
+        COL_GP
+    ]
+
+    # Solo columnas que existan
+    cols_tabla = [
+        c for c in cols_tabla
+        if c in dfp.columns
+    ]
+
+    tabla_pozo = (
+        dfp[cols_tabla]
+        .sort_values(COL_FECHA, ascending=False)
+        .copy()
+    )
+
+    # Formato numérico
+    tabla_pozo = tabla_pozo.style.format({
+        COL_QO: "{:,.1f}",
+        COL_QW: "{:,.1f}",
+        COL_QG: "{:,.1f}",
+        COL_WC: "{:,.1f}",
+        COL_RGA: "{:,.0f}",
+        COL_NP: "{:,.1f}",
+        COL_WP: "{:,.1f}",
+        COL_GP: "{:,.1f}",
+    })
+
+    st.dataframe(
+        tabla_pozo,
+        use_container_width=True,
+        height=350
+    )
     
 # VISTA COMPARATIVO
 # =========================================================
@@ -2305,5 +3742,9 @@ elif vista == "Mapa de burbujas":
     mapa_burbujas(df, df_coord)
 elif vista == "Campañas 2011-2020":
     analisis_term()
+elif vista == "RMA 2011-2020":
+    analisis_rma()
+elif vista == "Producción Campo":
+    produccion_total_campo()
 
 #st.caption("Desarrollado en Python + Streamlit.")
