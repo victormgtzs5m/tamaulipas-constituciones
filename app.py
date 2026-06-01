@@ -206,6 +206,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+def es_movil():
+    return st.session_state.get("mobile_view", False)
+
+st.toggle("Vista móvil", key="mobile_view")
+
 def kpi_card(titulo, valor, subtitulo="", color="#1F4E79"):
     components.html(
         f"""
@@ -1135,7 +1140,14 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         mapa["RADIO DRENE"] = np.nan
 
     # Filtros propios del mapa
-    c1, c2, c3, c4 = st.columns([1.3, 1.3, 1.3, 1.3])
+    if es_movil():
+        c1 = st.container()
+        c2 = st.container()
+        c3 = st.container()
+        c4 = st.container()
+    else:
+        c1, c2, c3, c4 = st.columns([1.3, 1.3, 1.3, 1.3])
+    #c1, c2, c3, c4 = st.columns([1.3, 1.3, 1.3, 1.3])
     #c1, c2, c3 = st.columns([1.4, 1.4, 1.4])
 
     with c1:
