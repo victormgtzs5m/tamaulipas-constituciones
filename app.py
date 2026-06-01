@@ -211,6 +211,8 @@ def es_movil():
 
 st.toggle("Vista móvil", key="mobile_view")
 
+alto_grafico = 420 if es_movil() else 600
+
 def kpi_card(titulo, valor, subtitulo="", color="#1F4E79"):
     components.html(
         f"""
@@ -481,8 +483,7 @@ def operacion_campo():
     ),
     secondary_y=True
 )
-    alto_grafico = 420 if es_movil() else 600
-    
+
     fig1.update_layout(
         title="<b>Producción de aceite y agua inyectada</b>",
         template="plotly_white",
