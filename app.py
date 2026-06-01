@@ -481,11 +481,12 @@ def operacion_campo():
     ),
     secondary_y=True
 )
-
+    alto_grafico = 420 if es_movil() else 600
+    
     fig1.update_layout(
         title="<b>Producción de aceite y agua inyectada</b>",
         template="plotly_white",
-        height=560,
+        height=alto_grafico,
         barmode="group",
         hovermode="x unified",
         legend=dict(
@@ -1688,8 +1689,9 @@ def analisis_term():
         text=term_f[col_qoi].round(1),
         textposition="outside"
     ))
-
+    
     fig1.update_layout(
+        height=alto_grafico,
         title="<b>Comparación Qoi programado vs Qoi real por pozo</b>",
         xaxis=dict(
         tickangle=-75,
@@ -1699,7 +1701,7 @@ def analisis_term():
         xaxis_title="Terminación",
         yaxis_title="Qoi (bpd)",
         barmode="group",
-        height=560,
+        #height=560,
         template="plotly_white",
         bargap=0.22,
         bargroupgap=0.08,
@@ -2677,7 +2679,8 @@ def produccion_total_campo():
     fig1.update_layout(
         title="<b>Producción de aceite, agua, gas y pozos activos</b>",
         template="plotly_white",
-        height=600,
+        height=alto_grafico,
+        #height=600,
         hovermode="x unified",
         legend=dict(
             orientation="h",
@@ -3015,7 +3018,8 @@ def analisis_rma():
         ),
         yaxis_title="Qoi (bpd)",
         barmode="group",
-        height=560,
+        #height=560,
+        height=alto_grafico,
         template="plotly_white",
         bargap=0.22,
         bargroupgap=0.08,
@@ -4459,7 +4463,8 @@ if vista == "Producción por pozo":
         title="Gasto de aceite, % Agua, Acumulada de aceite y Gasto de gas",
         template="plotly_white",
         hovermode="x unified",
-        height=520,
+        #height=520,
+        height=alto_grafico,
         legend=dict(orientation="h", y=1.02, font=dict(
         size=14,
         color="black",
