@@ -457,6 +457,9 @@ def operacion_campo():
             x=op["FECHA"],
             y=op["ACEITE (BLS)"],
             name="Aceite producido (bls)",
+            text=op["ACEITE (BLS)"].round(0),
+            textposition="outside",
+            textfont=dict(size=10,color="green"),
             marker=dict(
                 color="#00A65A",
                 line=dict(color="black", width=1)
@@ -470,7 +473,10 @@ def operacion_campo():
     go.Scatter(
         x=op["FECHA"],
         y=op["AGUA INYECTADA (BLS)"],
-        mode="lines+markers",
+        mode="lines+markers+text",
+        text=op["AGUA INYECTADA (BLS)"].round(0),
+        textposition="bottom center",
+        textfont=dict(size=10,color="blue"),
         name="Agua inyectada (bls)",
         line=dict(
             color="blue",
@@ -518,6 +524,7 @@ def operacion_campo():
         gridcolor="#EAECEE",
         showline=True,
         linewidth=1,
+        
         linecolor="black"
     )
 
@@ -527,6 +534,7 @@ def operacion_campo():
         showgrid=False,
         showline=True,
         linewidth=1,
+        rangemode="tozero",
         linecolor="black"
     )
 
@@ -543,6 +551,9 @@ def operacion_campo():
             x=op["FECHA"],
             y=op["GAS PRODUCIDO (MMPC)"],
             name="Gas producido",
+            text=op["GAS PRODUCIDO (MMPC)"].round(3),
+            textposition="outside",
+            textfont=dict(size=9),
             marker=dict(
                 color="#C0392B",
                 line=dict(color="black", width=1)
@@ -557,8 +568,11 @@ def operacion_campo():
         go.Scatter(
             x=op["FECHA"],
             y=op["GAS A CPG ARENQUE (MMPC)"],
-            mode="lines+markers",
+            mode="lines+markers+text",
             name="Gas a CPG Arenque",
+            text=op["GAS A CPG ARENQUE (MMPC)"].round(3),
+            textposition="bottom center",
+            textfont=dict(size=10,color="black"),
             line=dict(
                 color="#7B241C",
                 width=3
@@ -576,8 +590,11 @@ def operacion_campo():
         go.Scatter(
             x=op["FECHA"],
             y=op["GAS QUEMA (MMPC)"],
-            mode="lines+markers",
+            mode="lines+markers+text",
             name="Gas Quema",
+            text=op["GAS QUEMA (MMPC)"].round(3),
+            textfont=dict(size=10,color="black"),
+            textposition="top center",
             line=dict(
                 color="#FF0000",
                 width=3
@@ -671,6 +688,8 @@ def operacion_campo():
             x=op["FECHA"],
             y=op["VENTEO (MMPC)"],
             name="Venteo",
+            text=op["VENTEO (MMPC)"].round(1),
+            textposition="bottom center",
             marker=dict(
                 color="#C0392B",
                 line=dict(color="black", width=1)
@@ -687,6 +706,8 @@ def operacion_campo():
             y=op["AUTOCONSUMO (MMPC)"],
             mode="lines+markers",
             name="Autoconsumo",
+            text=op["AUTOCONSUMO (MMPC)"].round(1),
+            textposition="bottom center",
             line=dict(
                 color="#7B241C",
                 width=3
@@ -994,17 +1015,30 @@ def seleccionar_presiones_mapa(
     fecha_ref,
     modo_presion="Cercana a fecha",
     ventana_meses=24,
-    dias_promedio=30
+    dias_promedio=30,
+    ventana_anios_ultima=5
 ) -> pd.DataFrame:
 
     pres = pres.copy()
     fecha_ref = pd.to_datetime(fecha_ref).normalize()
 
-    pres["DIF_DIAS"] = (pres["FECHA"] - fecha_ref).abs().dt.days
+    if modo_presion == "Última disponible":
+        fecha_min = fecha_ref - pd.DateOffset(years=ventana_anios_ultima)
 
-    if modo_presion == "Cercana a fecha":
+        pres = pres[
+            (pres["FECHA"] <= fecha_ref) &
+            (pres["FECHA"] >= fecha_min)
+        ].copy()
+
+        pres["DIF_DIAS"] = (pres["FECHA"] - fecha_ref).abs().dt.days
+
+    else:
+        pres["DIF_DIAS"] = (pres["FECHA"] - fecha_ref).abs().dt.days
         max_dias = int(ventana_meses * 30.4375)
-        pres = pres[pres["DIF_DIAS"] <= max_dias].copy()
+
+        pres = pres[
+            pres["DIF_DIAS"] <= max_dias
+        ].copy()
 
     if pres.empty:
         return pd.DataFrame()
@@ -1379,10 +1413,13 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
    # =====================================================
     # PUNTOS POR ESTADO DEL POZO / SAP
     # =====================================================
-    color_estado = {
-        "OP": "#00A65A",   # verde
-        "NOP": "#000000",  # negro
-        "IA": "#0000FF",   # azul
+    color_estado =  {
+        "OPERANDO": "#000000",
+        "CCP": "#FFD700",
+        "CSP": "#DC143C",
+        "INY": "#0000FF",
+        "PROG. TAPONAMIENTO": "#BA55D3",
+        "TAPONADO": "#808080"
     }
 
     mapa["COLOR_ESTADO"] = (
@@ -1393,45 +1430,55 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         .fillna("#000000")
     )
 
-    fig.add_trace(go.Scatter(
-        x=mapa["CIMA X UTM"],
-        y=mapa["CIMA Y UTM"],
+    leyenda_estados = {
+        "OPERANDO": "#000000",
+        "CCP": "#FFD700",
+        "CSP": "#DC143C",
+        "INY": "#0000FF",
+        "PROG. TAPONAMIENTO": "#BA55D3",
+        "TAPONADO": "#808080"
+    }
 
-        mode="markers+text",
+    for estado, color in leyenda_estados.items():
 
-        text=mapa["POZO"],
-        textposition="bottom center",
+        tmp = mapa[
+            mapa["ESTADO"]
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            == estado
+        ].copy()
 
-        textfont=dict(
-            size=10,
-            color="black",
-            family="Arial"
-        ),
+        if tmp.empty:
+            continue
 
-        marker=dict(
-            size=6,          # aquí cambias el tamaño del círculo
-            symbol="circle",
-            color=mapa["COLOR_ESTADO"],
-            line=dict(
-                color="black",
-                width=1
-            ),
-            opacity=1
-        ),
-
-        name="Estado / SAP",
-
-        customdata=mapa[["POZO", "ESTADO", "SAP", COL_YAC]],
-
-        hovertemplate=
-            "<b>Pozo:</b> %{customdata[0]}<br>" +
-            "<b>Estado:</b> %{customdata[1]}<br>" +
-            "<b>SAP:</b> %{customdata[2]}<br>" +
-            "<b>Yacimiento:</b> %{customdata[3]}<br>" +
-            "<extra></extra>",
-
-        showlegend=True
-    ))
+        fig.add_trace(
+            go.Scatter(
+                x=tmp["CIMA X UTM"],
+                y=tmp["CIMA Y UTM"],
+                mode="markers+text",
+                text=tmp["POZO"],
+                textposition="top center",
+                textfont=dict(
+                    color="black",
+                    size=12,
+                    family="Arial"
+                ),
+                name=estado.title(),
+                marker=dict(
+                    size=7,   # tu tamaño actual de burbuja
+                    color=color,
+                    line=dict(
+                        color="black",
+                        width=1
+                    )
+                ),
+                hovertemplate=
+                    "<b>%{text}</b><br>" +
+                    "Estado: " + estado +
+                    "<extra></extra>"
+            )
+        )
 
     #mapa_term = mapa[mapa["PERFORADO_TERM"] == "Sí"].copy()
     if modo_mapa == "RMA":
@@ -1847,7 +1894,7 @@ def analisis_term():
 
     fig2.update_xaxes(
         title_text="Campaña",
-        dtick=1,
+        #dtick=1,
         showline=True,
         linewidth=1,
         linecolor="black",
@@ -2303,8 +2350,16 @@ def analisis_term():
     fig5 = go.Figure()
 
     # =========================
-    # 5. BOXPLOT NP RMA
+    # 5. BOXPLOT NP RMA ERROR
     # =========================
+
+    #medianas_np = term_np.groupby("ANIO_BOX", as_index=False)["NP_FINAL"].median()
+    medianas_np = term_np.groupby(col_anio, as_index=False)["NP_FINAL"].median()
+
+    resumen_np = term_np.groupby(col_anio, as_index=False).agg(
+    NP_PROM=("NP_FINAL", "mean"),
+    POZOS=(COL_POZO, "nunique")
+)
 
     fig5.add_trace(
         go.Bar(
@@ -3238,18 +3293,27 @@ def analisis_rma():
     # 4. QOI VS NP DESDE TABLA RMA
     # =========================
     st.markdown("<div class='section-title'>RMA: Análisis de producción acumulada</div>", unsafe_allow_html=True)
-
+    #rma_np["ANIO_BOX"] = rma_np[col_anio].astype(int).astype(str)
+    #rma_total_meses = rma_np.copy()
+    ####################################################
     rma_np = rma_f.copy()
 
     rma_np["NP_FINAL"] = pd.to_numeric(
         rma_np[col_np_rma],
         errors="coerce"
-    ).fillna(0)
+    )
 
     rma_np["MESES_ACTIVOS"] = pd.to_numeric(
         rma_np[col_meses_activos],
         errors="coerce"
-    ).fillna(0)
+    )
+
+    rma_np = rma_np[
+        (rma_np["NP_FINAL"].notna()) &
+        (rma_np["MESES_ACTIVOS"].notna()) &
+        (rma_np["NP_FINAL"] > 0) &
+        (rma_np["MESES_ACTIVOS"] > 0)
+    ].copy()
 
     rma_np = rma_np.sort_values([col_anio, COL_POZO])
 
@@ -3259,6 +3323,36 @@ def analisis_rma():
         + rma_np[COL_POZO].astype(str)
     )
 
+    rma_np["ANIO_BOX"] = rma_np[col_anio].astype(int).astype(str)
+
+    # TOTAL para Np
+    rma_total_np = rma_np.copy()
+    rma_total_np["ANIO_BOX"] = "TOTAL"
+
+    rma_box_np = pd.concat(
+        [rma_np, rma_total_np],
+        ignore_index=True
+    )
+
+    orden_box_np = (
+        sorted(rma_np["ANIO_BOX"].dropna().unique().tolist())
+        + ["TOTAL"]
+    )
+
+    # TOTAL para meses activos
+    rma_total_meses = rma_np.copy()
+    rma_total_meses["ANIO_BOX"] = "TOTAL"
+
+    rma_box_meses = pd.concat(
+        [rma_np, rma_total_meses],
+        ignore_index=True
+    )
+
+    orden_box_meses = (
+        sorted(rma_np["ANIO_BOX"].dropna().unique().tolist())
+        + ["TOTAL"]
+    )
+    #################################################################
     fig4 = make_subplots(specs=[[{"secondary_y": True}]])
 
     fig4.add_trace(
@@ -3360,16 +3454,21 @@ def analisis_rma():
     # =========================
 # 5. BOXPLOT NP RMA
 # =========================
+    
+    medianas_np = rma_box_np.groupby("ANIO_BOX", as_index=False)["NP_FINAL"].median()
 
     fig5 = px.box(
-        rma_np,
-        x=col_anio,
+        rma_box_np,
+        x="ANIO_BOX",
         y="NP_FINAL",
         points="all",
         hover_name=COL_POZO,
         title="<b>RMA: Modelo estadístico Np</b>",
-        template="plotly_white"
-    )
+        template="plotly_white",
+        category_orders={
+            "ANIO_BOX": orden_box_np
+        }
+)
 
     fig5.update_traces(
         marker=dict(
@@ -3382,10 +3481,10 @@ def analisis_rma():
         fillcolor="rgba(34,139,34,0.25)"
     )
 
-    medianas_np = rma_np.groupby(col_anio, as_index=False)["NP_FINAL"].median()
-
+    medianas_np = rma_box_np.groupby("ANIO_BOX", as_index=False)["NP_FINAL"].median()
+    
     fig5.add_trace(go.Scatter(
-        x=medianas_np[col_anio],
+        x=medianas_np["ANIO_BOX"],
         y=medianas_np["NP_FINAL"],
         mode="text",
         text=medianas_np["NP_FINAL"].round(1),
@@ -3401,15 +3500,23 @@ def analisis_rma():
 
     fig5.update_layout(
         height=520,
-        xaxis_title="Año",
+        xaxis_title="Año / Total filtrado",
         yaxis_title="Np RMA (mb)",
+        xaxis=dict(
+            categoryorder="array",
+            categoryarray=orden_box_np
+        ),
         font=dict(size=14, color="black", family="Arial Black"),
         plot_bgcolor="white",
         paper_bgcolor="white"
     )
 
+    anios_np_box = sorted(rma_np[col_anio].dropna().astype(int).unique())
+
     fig5.update_xaxes(
-        dtick=1,
+        type="category",
+        categoryorder="array",
+        categoryarray=orden_box_np,
         showline=True,
         linewidth=1,
         linecolor="black",
@@ -3429,15 +3536,21 @@ def analisis_rma():
     # =========================
     # 6. BOXPLOT MESES ACTIVOS
     # =========================
+    #rma_np["ANIO_BOX"] = rma_np[col_anio].astype(int).astype(str)
+    
+    medianas_meses = rma_box_meses.groupby("ANIO_BOX", as_index=False)["MESES_ACTIVOS"].median()
 
     fig6 = px.box(
-        rma_np,
-        x=col_anio,
+        rma_box_meses,
+        x="ANIO_BOX",
         y="MESES_ACTIVOS",
         points="all",
         hover_name=COL_POZO,
         title="<b>RMA: Modelo estadístico meses activos</b>",
-        template="plotly_white"
+        template="plotly_white",
+        category_orders={
+            "ANIO_BOX": orden_box_meses
+        }
     )
 
     fig6.update_traces(
@@ -3451,10 +3564,10 @@ def analisis_rma():
         fillcolor="rgba(255,69,0,0.25)"
     )
 
-    medianas_meses = rma_np.groupby(col_anio, as_index=False)["MESES_ACTIVOS"].median()
+    #medianas_meses = rma_np.groupby(col_anio, as_index=False)["MESES_ACTIVOS"].median()
 
     fig6.add_trace(go.Scatter(
-        x=medianas_meses[col_anio],
+        x=medianas_meses["ANIO_BOX"],
         y=medianas_meses["MESES_ACTIVOS"],
         mode="text",
         text=medianas_meses["MESES_ACTIVOS"].round(1),
@@ -3477,8 +3590,12 @@ def analisis_rma():
         paper_bgcolor="white"
     )
 
+    anios_meses_box = sorted(rma_np[col_anio].dropna().astype(int).unique())
+
     fig6.update_xaxes(
-        dtick=1,
+        type="category",
+        categoryorder="array",
+        categoryarray=orden_box_meses,
         showline=True,
         linewidth=1,
         linecolor="black",
@@ -3576,9 +3693,10 @@ def mapa_presion():
         pres,
         fecha_ref=fecha_ref,
         modo_presion=modo_presion,
-        ventana_meses=6,
-        dias_promedio=dias_promedio
-    )
+        ventana_meses=24,
+        dias_promedio=dias_promedio,
+        ventana_anios_ultima=5
+)
 
     if pres_mapa.empty:
         st.warning("No hay presiones cercanas a la fecha seleccionada. Cambia a 'Última disponible' o ajusta la fecha.")
@@ -3758,10 +3876,10 @@ def mapa_presion():
 
             OK = OrdinaryKriging(
                 x, y, z,
-                variogram_model="exponential",
+                variogram_model="spherical",
                 verbose=False,
                 enable_plotting=False,
-                nlags=6,
+                nlags=4,
                 weight=True,
             )
 
@@ -3776,12 +3894,13 @@ def mapa_presion():
 
             # Recortar fuera del contorno
             #zi_masked = np.where(mask, zi, np.nan)
-            p50 = np.nanpercentile(z, 50)
+            #p50 = np.nanpercentile(z, 50)
 
-            zi = np.where(np.isnan(zi), p50, zi)
+            #zi = np.where(np.isnan(zi), p50, zi)
 
             # Aquí se recorta al contorno
             zi_masked = np.where(mask, zi, np.nan)
+            #zi_masked = np.where(mask, zi, np.nan)
 
             fig.add_trace(go.Contour(
                 x=xi,
@@ -3940,10 +4059,12 @@ def mapa_presion():
     # ESTADO DE POZOS
     # =========================
     color_estado = {
-        "OP": "#00A65A",
-        "NOP": "#000000",
-        "IA": "#0000FF",
-        "SIN ESTADO": "#7F8C8D"
+        "OPERANDO": "#000000",
+        "CCP": "#FFD700",
+        "CSP": "#DC143C",
+        "INY": "#0000FF",
+        "PROG. TAPONAMIENTO": "#BA55D3",
+        "TAPONADO": "#808080"
     }
 
     pres_mapa["COLOR_ESTADO"] = (
@@ -3974,6 +4095,8 @@ def mapa_presion():
             "<extra></extra>",
         showlegend=True
     ))
+
+    
 
     # =========================
     # POZOS CAMPAÑAS 2011-2020
@@ -4260,6 +4383,9 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
         dfi = data[data[COL_POZO].astype(str) == str(pozo)].copy()
         dfi = dfi.sort_values(COL_FECHA).reset_index(drop=True)
 
+        dfi_plot = dfi.copy()
+        dfi_plot[y_col] = dfi_plot[y_col].replace(0, np.nan)
+
         if dfi.empty:
             continue
 
@@ -4284,7 +4410,7 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
             x_values = dfi[COL_FECHA]
             hover_x = "Fecha: %{x|%d/%m/%Y}"
 
-        y_values = dfi[y_col].copy()
+        y_values = dfi_plot[y_col].copy()
 
         if semilog:
             y_values = y_values.replace(0, np.nan)
