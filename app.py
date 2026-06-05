@@ -91,7 +91,7 @@ REQUIRED_COLS = [
 ]
 
 # Factores de conversión
-M3_A_BBL = 6.28981
+M3_A_BBL = 6.289810770
 M3_A_PC = 35.3147
 
 # =========================================================
@@ -196,7 +196,7 @@ def es_movil():
 
 st.toggle("Vista móvil", key="mobile_view")
 
-alto_grafico = 420 if es_movil() else 600
+alto_grafico = 420 if es_movil() else 650
 
 def alta_operacion():
 
@@ -1818,16 +1818,120 @@ def analisis_term():
         st.warning("No hay datos con los filtros seleccionados.")
         return
 
-    # =========================
+
+ # =========================
     # MÉTRICAS
     # =========================
-    #m1, m2, m3, m4 = st.columns(4)
-    m1, m2 = st.columns(2)
 
-    m1.metric("Pozos terminados", f"{term_f[COL_POZO].nunique():,.0f}")
-    #m2.metric("Qoi Prog prom.", f"{term_f[col_qoi_prog].mean():,.1f}")
-    m2.metric("Qoi promedio.", f"{term_f[col_qoi].mean():,.1f}")
-    #m4.metric("Cumplimiento prom.", f"{term_f['CUMPLIMIENTO_QOI_%'].mean():,.1f} %")
+    # Qoi válidos
+    qoi_validos = pd.to_numeric(
+        term_f[col_qoi],
+        errors="coerce"
+    )
+
+    qoi_exitosos = qoi_validos[qoi_validos > 0]
+
+    p50_qoi = (
+        np.nanpercentile(qoi_exitosos, 50)
+        if len(qoi_exitosos) > 0
+        else 0
+    )
+
+    pozos_sin_exito = (
+        term_f[qoi_validos.fillna(0) <= 0][COL_POZO]
+        .nunique()
+    )
+
+    # Calcular Np total para los pozos filtrados en TERM
+    df_prod_kpi = calcular_columnas_produccion(df.copy())
+
+    poz_term_f = term_f[COL_POZO].dropna().astype(str).unique().tolist()
+
+    np_kpi = (
+        df_prod_kpi[
+            df_prod_kpi[COL_POZO].astype(str).isin(poz_term_f)
+        ]
+        .sort_values([COL_POZO, COL_FECHA])
+        .groupby(COL_POZO, as_index=False)
+        .agg(NP_FINAL=(COL_NP, "last"))
+    )
+
+    np_validos = pd.to_numeric(
+        np_kpi["NP_FINAL"],
+        errors="coerce"
+    )
+
+    np_exitosos = np_validos[np_validos > 0]
+
+    p50_np = (
+        np.nanpercentile(np_exitosos, 50)
+        if len(np_exitosos) > 0
+        else 0
+    )
+
+    pozos_totales = term_f[COL_POZO].nunique()
+
+    fracaso_pct = (
+        100 * pozos_sin_exito / pozos_totales
+        if pozos_totales > 0
+        else 0
+    )
+
+    # =========================
+    # KPI CARDS
+    # =========================
+
+    st.markdown("""
+    <div style="
+    background-color:#F8F9FA;
+    border:1px solid #D6DBDF;
+    border-radius:10px;
+    padding:12px;
+    "
+    </div>
+    """, unsafe_allow_html=True)
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+
+    with m1:
+        kpi_card(
+            "Pozos terminados",
+            f"{pozos_totales:,.0f}",
+            "",
+            "#1F2937"
+        )
+
+    with m2:
+        kpi_card(
+            "Qoi promedio",
+            f"{qoi_validos.mean():,.1f}",
+            "bpd",
+            "#1F2937"
+        )
+
+    with m3:
+        kpi_card(
+            "P50 Qoi",
+            f"{p50_qoi:,.1f}",
+            "bpd",
+            "#1F2937"
+        )
+
+    with m4:
+        kpi_card(
+            "P50 Np",
+            f"{p50_np:,.1f}",
+            "mbl",
+            "#1F2937"
+        )
+
+    with m5:
+        kpi_card(
+            "Sin Éxito",
+            f"{fracaso_pct:.1f}",
+            f"% | {pozos_sin_exito} pozos",
+            "#B91C1C"
+        )
 
     term_f = term_f.sort_values([col_anio, COL_POZO])
 
@@ -1872,7 +1976,7 @@ def analisis_term():
     
     fig1.update_layout(
         height=alto_grafico,
-        title="<b>Comparación Qoi programado vs Qoi real por pozo</b>",
+        title="<b>Qoi por pozo (bpd)</b>",
         xaxis=dict(
         tickangle=-75,
         categoryorder="array",
@@ -2118,7 +2222,7 @@ def analisis_term():
             y=col_qoi,
             points="all",
             hover_name=COL_POZO,
-            title="<b>Modelo estadístico Qoi por campaña / total filtrado</b>",
+            title="<b>Modelo estadístico Qoi por campaña</b>",
             template="plotly_white",
             category_orders={
                 "ANIO_BOX": orden_box_qoi
@@ -3154,6 +3258,63 @@ def produccion_total_campo():
     total["GP_TOTAL"] = total["GAS_PC"].cumsum() / 1_000_000
 
     # =========================
+    # KPI CARDS PRODUCCIÓN CAMPO
+    # =========================
+
+    total_kpi = total.sort_values(COL_FECHA).copy()
+
+    # Último registro con producción real
+    prod_total_kpi = (
+        total_kpi["QO_TOTAL"].fillna(0) +
+        total_kpi["QW_TOTAL"].fillna(0) +
+        total_kpi["QG_TOTAL"].fillna(0)
+    )
+
+    total_kpi_prod = total_kpi[prod_total_kpi > 0].copy()
+
+    if total_kpi_prod.empty:
+        total_kpi_prod = total_kpi.copy()
+
+    last_campo = total_kpi_prod.iloc[-1]
+
+    st.markdown("""
+    <div style="
+    background-color:#F8F9FA;
+    border:1px solid #D6DBDF;
+    border-radius:10px;
+    </div>
+    """, unsafe_allow_html=True)
+
+    k1, k2, k3, k4, k5, k6, k7, k8, k9 = st.columns(9)
+
+    with k1:
+        kpi_card("Producción Aceite", f"{last_campo['QO_TOTAL']:,.1f}", "bpd", "#1F2937")
+
+    with k2:
+        kpi_card("Producción Agua", f"{last_campo['QW_TOTAL']:,.1f}", "bpd", "#1F2937")
+
+    with k3:
+        kpi_card("Producción Gas", f"{last_campo['QG_TOTAL']/1000:,.2f}", "mmpcd", "#1F2937")
+
+    with k4:
+        kpi_card("Pozos Activos", f"{last_campo['POZOS_ACTIVOS']:,.0f}", "", "#1F2937")
+
+    with k5:
+        kpi_card("RGA Actual", f"{last_campo['RGA_TOTAL']:,.0f}", "pc/bl", "#1F2937")
+
+    with k6:
+        kpi_card("% Agua Actual", f"{last_campo['WC_TOTAL']:,.1f}", "%", "#1F2937")
+
+    with k7:
+        kpi_card("Acumulada Aceite", f"{last_campo['NP_TOTAL']/1000:,.2f}", "mmb", "#1F2937")
+
+    with k8:
+        kpi_card("Acumulada Agua", f"{last_campo['WP_TOTAL']/1000:,.2f}", "mmb", "#1F2937")
+
+    with k9:
+        kpi_card("Acumulada Gas", f"{last_campo['GP_TOTAL']/1000:,.2f}", "mmmpc", "#1F2937")
+
+    # =========================
     # GRÁFICO 1: Qo, Qw, Qg y pozos activos
     # =========================
     fig1 = make_subplots(specs=[[{"secondary_y": True}]])
@@ -3203,6 +3364,11 @@ def produccion_total_campo():
             xanchor="center",
             x=0.5,
             font=dict(size=13, color="black", family="Arial Black")
+        ),
+        hoverlabel=dict(
+            bgcolor="white",
+            font_size=13,
+            font_family="Arial"
         ),
         font=dict(size=14, color="black", family="Arial Black"),
         plot_bgcolor="white",
@@ -3261,7 +3427,7 @@ def produccion_total_campo():
     fig2.update_layout(
         title="<b>RGA y corte de agua</b>",
         template="plotly_white",
-        height=560,
+        height=alto_grafico,
         hovermode="x unified",
         legend=dict(
             orientation="h",
@@ -3270,6 +3436,11 @@ def produccion_total_campo():
             xanchor="center",
             x=0.5,
             font=dict(size=13, color="black", family="Arial Black")
+        ),
+        hoverlabel=dict(
+            bgcolor="white",
+            font_size=13,
+            font_family="Arial"
         ),
         font=dict(size=14, color="black", family="Arial Black"),
         plot_bgcolor="white",
@@ -3336,15 +3507,20 @@ def produccion_total_campo():
     fig3.update_layout(
         title="<b>Producción acumulada de aceite, agua y gas</b>",
         template="plotly_white",
-        height=600,
+        height=alto_grafico,
         hovermode="x unified",
         legend=dict(
             orientation="h",
             yanchor="bottom",
             y=1.05,
             xanchor="center",
-            x=0.5,
+            x=0.3,
             font=dict(size=13, color="black", family="Arial Black")
+        ),
+        hoverlabel=dict(
+            bgcolor="white",
+            font_size=13,
+            font_family="Arial"
         ),
         font=dict(size=14, color="black", family="Arial Black"),
         plot_bgcolor="white",
@@ -4133,7 +4309,7 @@ def mapa_presion():
     with c3:
         modo_presion = st.selectbox(
             "Modo presión",
-            ["Cercana a fecha", "Última disponible"],
+            ["Última disponible"],
             key="modo_mapa_presion"
         )
 
@@ -4153,7 +4329,7 @@ def mapa_presion():
         modo_presion=modo_presion,
         ventana_meses=24,
         dias_promedio=dias_promedio,
-        ventana_anios_ultima=5
+        ventana_anios_ultima=7
 )
 
     if pres_mapa.empty:
