@@ -3401,7 +3401,7 @@ def produccion_total_campo():
         showgrid=False
     )
 
-    st.plotly_chart(fig1, use_container_width=True)
+    #st.plotly_chart(fig1, use_container_width=True)
 
     # =========================
     # GRÁFICO 2: RGA y % Agua
@@ -3473,7 +3473,7 @@ def produccion_total_campo():
         showgrid=False
     )
 
-    st.plotly_chart(fig2, use_container_width=True)
+    #st.plotly_chart(fig2, use_container_width=True)
 
     # =========================
     # GRÁFICO 3: Acumuladas Np, Wp, Gp
@@ -3546,7 +3546,199 @@ def produccion_total_campo():
         linecolor="black"
     )
 
-    st.plotly_chart(fig3, use_container_width=True)
+    #st.plotly_chart(fig3, use_container_width=True)
+
+    # =====================================================
+    # LAYOUT: 3 GRÁFICOS A LA IZQUIERDA + BURBUJAS A LA DERECHA
+    # =====================================================
+
+    col_graficas, col_burbujas = st.columns([4, 1.4], gap="small")
+
+    with col_graficas:
+
+        st.plotly_chart(
+            fig1,
+            use_container_width=True,
+            config={"displaylogo": False}
+        )
+
+        st.plotly_chart(
+            fig2,
+            use_container_width=True,
+            config={"displaylogo": False}
+        )
+
+        st.plotly_chart(
+            fig3,
+            use_container_width=True,
+            config={"displaylogo": False}
+        )
+
+
+    with col_burbujas:
+
+        st.markdown(
+            "<div class='section-title'>Acumuladas por yacimiento</div>",
+            unsafe_allow_html=True
+        )
+
+        variable_burbuja_yac = st.radio(
+            "Variable",
+            ["NP_TOTAL", "WP_TOTAL", "GP_TOTAL"],
+            format_func=lambda x: {
+                "NP_TOTAL": "Aceite",
+                "WP_TOTAL": "Agua",
+                "GP_TOTAL": "Gas"
+            }[x],
+            horizontal=True,
+            key="variable_burbuja_yac_prod_campo"
+        )
+
+        orden_final = ["KTS", "KTIA", "KTIB", "JSA", "JAR"]
+
+        yac_burb = (
+            yac.sort_values([COL_YAC, COL_FECHA])
+            .groupby(COL_YAC, as_index=False)
+            .tail(1)
+            .copy()
+        )
+
+        yac_burb["YAC_LABEL"] = (
+            yac_burb[COL_YAC]
+            .astype(str)
+            .str.upper()
+            .str.strip()
+            .replace({
+                "KTIAB": "KTIB",
+                "JURASICO ARENISCAS": "JAR",
+                "JURÁSICO ARENISCAS": "JAR",
+                "ARENISCA": "JAR",
+                "ARENISCAS": "JAR",
+                "JAR": "JAR"
+            })
+        )
+
+        yac_burb["ORDEN"] = yac_burb["YAC_LABEL"].apply(
+            lambda x: orden_final.index(x) if x in orden_final else 999
+        )
+
+        yac_burb = yac_burb.sort_values("ORDEN").copy()
+
+        max_val = yac_burb[variable_burbuja_yac].max()
+
+        if max_val > 0:
+            yac_burb["SIZE"] = 30 + (yac_burb[variable_burbuja_yac] / max_val) * 85
+        else:
+            yac_burb["SIZE"] = 30
+
+        if variable_burbuja_yac == "NP_TOTAL":
+            titulo_var = "Np"
+            unidad_var = "mbl"
+            color_burbuja = "#00A65A"
+
+        elif variable_burbuja_yac == "WP_TOTAL":
+            titulo_var = "Wp"
+            unidad_var = "mbl"
+            color_burbuja = "#1E88E5"
+
+        else:
+            titulo_var = "Gp"
+            unidad_var = "mmpc"
+            color_burbuja = "#E53935"
+
+        yac_burb["ETIQUETA"] = yac_burb[variable_burbuja_yac].map(
+            lambda x: f"{x:,.1f}"
+        )
+
+        fig4 = go.Figure()
+
+        fig4.add_trace(
+            go.Scatter(
+                x=[1] * len(yac_burb),
+                y=yac_burb["YAC_LABEL"],
+                mode="markers+text",
+                text=yac_burb["ETIQUETA"],
+                textposition="top center",
+                textfont=dict(
+                    color="black",
+                    size=11,
+                    family="Arial Black"
+                ),
+                marker=dict(
+                    size=yac_burb["SIZE"],
+                    sizemode="diameter",
+                    color=color_burbuja,
+                    opacity=0.85,
+                    line=dict(color="black", width=2)
+                ),
+                customdata=yac_burb[
+                    [
+                        COL_YAC,
+                        "QO_TOTAL",
+                        "QW_TOTAL",
+                        "QG_TOTAL",
+                        "POZOS_ACTIVOS",
+                        "RGA_TOTAL",
+                        "WC_TOTAL",
+                        "NP_TOTAL",
+                        "WP_TOTAL",
+                        "GP_TOTAL"
+                    ]
+                ],
+                hovertemplate=
+                    "<b>Yacimiento:</b> %{customdata[0]}<br>" +
+                    "<b>Qo:</b> %{customdata[1]:,.1f} bpd<br>" +
+                    "<b>Qw:</b> %{customdata[2]:,.1f} bpd<br>" +
+                    "<b>Qg:</b> %{customdata[3]:,.1f} mpcd<br>" +
+                    "<b>Pozos activos:</b> %{customdata[4]:,.0f}<br>" +
+                    "<b>RGA:</b> %{customdata[5]:,.0f} pc/bl<br>" +
+                    "<b>% Agua:</b> %{customdata[6]:,.1f}%<br>" +
+                    "<b>Np:</b> %{customdata[7]:,.1f} mbl<br>" +
+                    "<b>Wp:</b> %{customdata[8]:,.1f} mbl<br>" +
+                    "<b>Gp:</b> %{customdata[9]:,.1f} mmpc<br>" +
+                    "<extra></extra>",
+                name=titulo_var
+            )
+        )
+
+        fig4.update_layout(
+            title=f"<b>{titulo_var} por yacimiento</b>",
+            template="plotly_white",
+            height=alto_grafico * 3,
+            margin=dict(l=10, r=10, t=60, b=20),
+            showlegend=False,
+            font=dict(
+                size=12,
+                color="black",
+                family="Arial Black"
+            ),
+            plot_bgcolor="white",
+            paper_bgcolor="white"
+        )
+
+        fig4.update_xaxes(
+            visible=False,
+            range=[0.5, 1.5]
+        )
+
+        fig4.update_yaxes(
+            title_text="",
+            categoryorder="array",
+            categoryarray=list(reversed(orden_final)),
+            showline=False,
+            showgrid=False,
+            tickfont=dict(
+                size=13,
+                color="black",
+                family="Arial Black"
+            )
+        )
+
+        st.plotly_chart(
+            fig4,
+            use_container_width=True,
+            config={"displaylogo": False}
+        )
     
 #Análisis RMA
 def analisis_rma():
