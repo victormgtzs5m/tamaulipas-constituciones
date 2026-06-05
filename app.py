@@ -7,17 +7,16 @@ import sqlite3
 import plotly.express as px
 import streamlit.components.v1 as components
 
-
 # =========================================================
 # CONFIGURACIÓN GENERAL
 # =========================================================
 st.set_page_config(
-    page_title="Visualizador de Producción",
+    page_title="Campo Tamaulipas Constituciones",
     page_icon="🛢️",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
-st.cache_data.clear()
+#st.cache_data.clear()
 # =========================================================
 # RUTA DE LA BASE DE DATOS
 # Cambia esta ruta si tu archivo .db está en otra carpeta.
@@ -50,20 +49,6 @@ def load_table(tabla):
     conn.close()
 
     return df
-# Conexión
-#conn = sqlite3.connect(ruta_db)
-
-# Leer producción
-#df_prod = pd.read_sql(f"SELECT * FROM {TABLA_PROD}", conn)
-
-# Leer coordenadas
-#df_coord = pd.read_sql(f"SELECT * FROM {TABLA_COORD}", conn)
-
-#conn.close()
-#ruta_db = r"C:\Users\VMGS\OneDrive - CONSORCIO PETROLERO 5M DEL GOLFO\Escritorio\Resplado C5M\Web\prod.db"
-
-# Nombre de la tabla en SQLite
-#TABLA_PROD = "PROD"
 
 # =========================================================
 # COLUMNAS DE LA BASE NUEVA
@@ -213,6 +198,151 @@ st.toggle("Vista móvil", key="mobile_view")
 
 alto_grafico = 420 if es_movil() else 600
 
+def alta_operacion():
+
+    st.markdown("<div class='section-title'>Alta diaria de operación</div>", unsafe_allow_html=True)
+
+
+    with st.expander("➕ Alta diaria de operación", expanded=False):
+
+        with st.form("form_alta_operacion"):
+
+            fecha = st.date_input("Fecha de operación")
+
+            c1, c2, c3 = st.columns(3)
+
+            with c1:
+                aceite = st.number_input("Aceite (bls)", min_value=0.0, step=1.0)
+                agua_iny = st.number_input("Agua inyectada (bls)", min_value=0.0, step=1.0)
+                gas_prod = st.number_input("Gas producido (MMPC)", min_value=0.0, step=0.001, format="%.3f")
+
+            with c2:
+                gas_cpg = st.number_input("Gas a CPG Arenque (MMPC)", min_value=0.0, step=0.001, format="%.3f")
+                venteo = st.number_input("Venteo (MMPC)", min_value=0.0, step=0.001, format="%.3f")
+                autoconsumo = st.number_input("Autoconsumo (MMPC)", min_value=0.0, step=0.001, format="%.3f")
+
+            with c3:
+                quema_bat = st.number_input("Quema Batería TC", min_value=0.0, step=0.001, format="%.3f")
+                quema_ec = st.number_input("Quema EC T3", min_value=0.0, step=0.001, format="%.3f")
+                gas_quema = st.number_input("Gas Quema (MMPC)", min_value=0.0, step=0.001, format="%.3f")
+
+            guardar = st.form_submit_button("Guardar registro")
+
+        if guardar:
+
+            fecha_sql = pd.to_datetime(fecha).strftime("%Y-%m-%d")
+
+            nuevo = pd.DataFrame([{
+                "FECHA": fecha_sql,
+                "ACEITE (BLS)": aceite,
+                "AGUA INYECTADA (BLS)": agua_iny,
+                "GAS PRODUCIDO (MMPC)": gas_prod,
+                "GAS A CPG ARENQUE (MMPC)": gas_cpg,
+                "VENTEO (MMPC)": venteo,
+                "AUTOCONSUMO (MMPC)": autoconsumo,
+                "QUEMA BATERIA TC": quema_bat,
+                "QUEMA EC T3": quema_ec,
+                "GAS QUEMA (MMPC)": gas_quema
+            }])
+
+            with sqlite3.connect(ruta_db) as conn:
+
+                existe = pd.read_sql_query(
+                    f"""
+                    SELECT COUNT(*) AS n
+                    FROM "{TABLA_OPERACION}"
+                    WHERE FECHA = ?
+                    """,
+                    conn,
+                    params=[fecha_sql]
+                )["n"].iloc[0]
+
+                if existe > 0:
+                    st.warning("Ya existe un registro para esa fecha.")
+                else:
+                    nuevo.to_sql(
+                        TABLA_OPERACION,
+                        conn,
+                        if_exists="append",
+                        index=False
+                    )
+
+                    st.cache_data.clear()
+                    st.success("Registro guardado correctamente.")
+                    st.rerun()
+
+     # =====================================================
+    # ELIMINAR REGISTRO
+    # =====================================================
+
+    with st.expander("🗑️ Eliminar registro", expanded=False):
+
+        try:
+
+            with sqlite3.connect(ruta_db) as conn:
+
+                fechas = pd.read_sql_query(
+                f"""
+                SELECT Fecha
+                FROM "{TABLA_OPERACION}"
+                ORDER BY Fecha DESC
+                """,
+                conn
+            )["Fecha"].astype(str).tolist()
+
+            if len(fechas) > 0:
+
+                fecha_borrar = st.selectbox(
+                    "Fecha a eliminar",
+                    fechas,
+                    key="fecha_borrar_operacion"
+                )
+
+                confirmar = st.checkbox(
+                    "Confirmo eliminar este registro",
+                    key="confirmar_borrado_operacion"
+                )
+
+                if st.button(
+                    "Eliminar registro",
+                    key="btn_eliminar_operacion"
+                ):
+
+                    if confirmar:
+
+                        with sqlite3.connect(ruta_db) as conn:
+
+                            conn.execute(
+                            f"""
+                            DELETE FROM "{TABLA_OPERACION}"
+                            WHERE Fecha = ?
+                            """,
+                            [fecha_borrar]
+                        )
+
+                            conn.commit()
+
+                        st.success(
+                            f"Registro {fecha_borrar} eliminado correctamente."
+                        )
+
+                        st.cache_data.clear()
+                        st.rerun()
+
+                    else:
+
+                        st.warning(
+                            "Debe confirmar la eliminación."
+                        )
+
+            else:
+
+                st.info("No existen registros para eliminar.")
+
+        except Exception as e:
+
+            st.error(f"Error al eliminar: {e}")
+            
 def kpi_card(titulo, valor, subtitulo="", color="#1F4E79"):
     components.html(
         f"""
@@ -416,6 +546,8 @@ def operacion_campo():
         "<div class='section-title'>Operación del campo</div>",
         unsafe_allow_html=True
     )
+
+    alta_operacion()   
 
     op = load_operacion()
 
@@ -1016,7 +1148,7 @@ def seleccionar_presiones_mapa(
     modo_presion="Cercana a fecha",
     ventana_meses=24,
     dias_promedio=30,
-    ventana_anios_ultima=5
+    ventana_anios_ultima=7
 ) -> pd.DataFrame:
 
     pres = pres.copy()
@@ -1405,7 +1537,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             "<b>Meses operando:</b> %{customdata[6]:,.0f}<br>" +
             "<b>Np normalizada:</b> %{customdata[7]:,.2f} mb/mes<br>" +
             "<extra></extra>",
-        name="Burbuja acumulada (mb)",
+        name="Producción acumulada (mb)",
         legendgroup="burbujas",
         showlegend=True
     ))
@@ -1944,14 +2076,53 @@ def analisis_term():
         # =========================
         # 3. BOXPLOT QOI POR CAMPAÑA
         # =========================
+        # =========================
+        # 3. BOXPLOT QOI POR CAMPAÑA + TOTAL
+        # =========================
+
+        term_qoi_box = term_f.copy()
+
+        term_qoi_box[col_qoi] = pd.to_numeric(
+            term_qoi_box[col_qoi],
+            errors="coerce"
+        )
+
+        term_qoi_box = term_qoi_box[
+            term_qoi_box[col_qoi].notna() &
+            (term_qoi_box[col_qoi] > 0)
+        ].copy()
+
+        term_qoi_box["ANIO_BOX"] = term_qoi_box[col_anio].astype(int).astype(str)
+
+        term_qoi_total = term_qoi_box.copy()
+        term_qoi_total["ANIO_BOX"] = "TOTAL"
+
+        term_qoi_box = pd.concat(
+            [term_qoi_box, term_qoi_total],
+            ignore_index=True
+        )
+
+        orden_box_qoi = (
+            sorted(
+                term_qoi_box.loc[
+                    term_qoi_box["ANIO_BOX"] != "TOTAL",
+                    "ANIO_BOX"
+                ].dropna().astype(str).unique().tolist()
+            )
+            + ["TOTAL"]
+        )
+
         fig3 = px.box(
-            term_f,
-            x=col_anio,
+            term_qoi_box,
+            x="ANIO_BOX",
             y=col_qoi,
             points="all",
             hover_name=COL_POZO,
-            title="<b>Modelo estadístico</b>",
-            template="plotly_white"
+            title="<b>Modelo estadístico Qoi por campaña / total filtrado</b>",
+            template="plotly_white",
+            category_orders={
+                "ANIO_BOX": orden_box_qoi
+            }
         )
         
         #Color Cajas
@@ -1966,10 +2137,11 @@ def analisis_term():
             fillcolor="rgba(0,166,90,0.25)"
         )
 
-        medianas = term_f.groupby(col_anio, as_index=False)[col_qoi].median()
+        #medianas = term_f.groupby(col_anio, as_index=False)[col_qoi].median()
+        medianas = term_qoi_box.groupby("ANIO_BOX", as_index=False)[col_qoi].median()
 
         fig3.add_trace(go.Scatter(
-            x=medianas[col_anio],
+            x=medianas["ANIO_BOX"],
             y=medianas[col_qoi],
             mode="text",
             text=medianas[col_qoi].round(1),
@@ -2129,6 +2301,34 @@ def analisis_term():
         key="modo_fig4_np"
     )
 
+        # =====================================================
+    # POZOS ADICIONALES DESDE TABLA_PROD PARA SCATTER NP
+    # =====================================================
+
+    # Pozos de producción filtrados por el yacimiento seleccionado en TERM
+    df_prod_yac_extra = df_prod_term.copy()
+
+    if yac_sel:
+        df_prod_yac_extra = df_prod_yac_extra[
+            df_prod_yac_extra[COL_YAC].astype(str).isin(yac_sel)
+        ].copy()
+
+    pozos_term_actuales = term_f[COL_POZO].dropna().astype(str).unique().tolist()
+
+    pozos_prod_extra = sorted(
+        df_prod_yac_extra[COL_POZO]
+        .dropna()
+        .astype(str)
+        .unique()
+    )
+
+    pozos_extra_sel = st.multiselect(
+        "Agregar pozos adicionales desde producción",
+        options=[p for p in pozos_prod_extra if p not in pozos_term_actuales],
+        default=[],
+        key="pozos_extra_np_scatter_term"
+    )
+
     if modo_fig4 == "Qoi y Np en barras":
 
         fig4 = make_subplots(specs=[[{"secondary_y": True}]])
@@ -2258,34 +2458,73 @@ def analisis_term():
 
     else:
 
-        # Datos de Np por tiempo para los pozos filtrados en TERM
+        # Pozos TERM + pozos adicionales seleccionados desde producción
         pozos_term_np = term_np[COL_POZO].dropna().astype(str).unique().tolist()
 
+        pozos_scatter_np = list(
+            dict.fromkeys(
+                pozos_term_np + pozos_extra_sel
+            )
+        )
+
         df_scatter_np = df_prod_np[
-            df_prod_np[COL_POZO].astype(str).isin(pozos_term_np)
+            df_prod_np[COL_POZO].astype(str).isin(pozos_scatter_np)
         ].copy()
 
+
+        #################
+        # Agregar año/campaña para pozos TERM
         df_scatter_np = df_scatter_np.merge(
             term_np[[COL_POZO, col_anio]].drop_duplicates(),
             on=COL_POZO,
             how="left"
         )
 
+        # Los pozos adicionales no tienen campaña TERM
+        df_scatter_np[col_anio] = df_scatter_np[col_anio].fillna("Extra PROD")
+
+        df_scatter_np["TIPO_POZO"] = np.where(
+        df_scatter_np[col_anio] == "Extra PROD",
+        "Extra PROD",
+        "TERM"
+        )
+
+        df_scatter_np["POZO_LEYENDA"] = np.where(
+            df_scatter_np[col_anio].astype(str) == "Extra PROD",
+            df_scatter_np[COL_POZO].astype(str) + " | Extra PROD",
+            df_scatter_np[COL_POZO].astype(str) + " | " + df_scatter_np[col_anio].astype(str)
+        )
+
         fig4 = px.scatter(
             df_scatter_np,
             x="MES_PROD_TERM",
             y=COL_NP,
-            color=COL_POZO,
-            symbol=col_anio,
+            color="TIPO_POZO",
+            symbol=COL_POZO,
             hover_name=COL_POZO,
             hover_data={
                 col_anio: True,
                 "MES_PROD_TERM": True,
                 COL_NP: ":,.1f"
             },
+            color_discrete_map={
+                "TERM": "#1F77B4",       # azul
+                "Extra PROD": "#808080" # gris
+            },
             title=f"<b>Comportamiento de {nombre_np} por tiempo de producción</b>",
             template="plotly_white"
-        )
+        )   
+
+        for trace in fig4.data:
+
+            if "Extra PROD" in trace.name:
+
+                trace.line.color = "gray"
+                trace.marker.color = "gray"
+
+            else:
+
+                trace.line.width = 2
 
         fig4.update_traces(
             mode="lines+markers",
@@ -2361,60 +2600,221 @@ def analisis_term():
     POZOS=(COL_POZO, "nunique")
 )
 
-    fig5.add_trace(
-        go.Bar(
-            x=resumen_np[col_anio],
-            y=resumen_np["NP_PROM"],
-            name="Np promedio",
-            marker=dict(
-                color="#FFA500",
-                line=dict(color="#000000", width=1.5)
-            ),
-            text=resumen_np["NP_PROM"].round(1),
-            textposition="outside",
-            textfont=dict(
-                size=13,
-                color="black",
-                family="Tahoma"
-            ),
-            opacity=0.80
-        )
+    # =========================
+    # 4.2 MEJOR DISTRIBUCIÓN AJUSTADA NP - TODOS LOS POZOS
+    # =========================
+
+    term_np_dist = term_np.copy()
+
+    term_np_dist["NP_FINAL"] = pd.to_numeric(
+        term_np_dist["NP_FINAL"],
+        errors="coerce"
     )
 
-    for x, y, p in zip(
-        resumen_np[col_anio],
-        resumen_np["NP_PROM"],
-        resumen_np["POZOS"]
-    ):
-        fig5.add_annotation(
-            x=x,
-            y=y * 0.05,
-            text=f"<b>{p} pozos</b>",
-            showarrow=False,
-            font=dict(
-                size=12,
-                color="black",
-                family="Arial Black"
+    term_np_dist = term_np_dist[
+        term_np_dist["NP_FINAL"].notna() &
+        (term_np_dist["NP_FINAL"] > 0)
+    ].copy()
+
+    datos = term_np_dist["NP_FINAL"].dropna().values.astype(float)
+
+    fig5 = go.Figure()
+
+    if len(datos) >= 3:
+
+        try:
+            from scipy import stats
+
+            distribuciones = {
+                "Normal": stats.norm,
+                "Lognormal": stats.lognorm,
+                "Gamma": stats.gamma,
+                "Weibull": stats.weibull_min,
+                "Exponencial": stats.expon
+            }
+
+            resultados = []
+
+            for nombre, dist in distribuciones.items():
+
+                try:
+                    # Para distribuciones positivas se fija loc=0
+                    if nombre in ["Lognormal", "Gamma", "Weibull", "Exponencial"]:
+                        params = dist.fit(datos, floc=0)
+                    else:
+                        params = dist.fit(datos)
+
+                    pdf_vals = dist.pdf(datos, *params)
+                    pdf_vals = np.where(pdf_vals <= 0, 1e-12, pdf_vals)
+
+                    log_likelihood = np.sum(np.log(pdf_vals))
+                    k = len(params)
+                    n = len(datos)
+
+                    aic = 2 * k - 2 * log_likelihood
+                    bic = k * np.log(n) - 2 * log_likelihood
+
+                    ks_stat, ks_pvalue = stats.kstest(
+                        datos,
+                        dist.cdf,
+                        args=params
+                    )
+
+                    resultados.append({
+                        "Distribución": nombre,
+                        "Dist": dist,
+                        "Params": params,
+                        "AIC": aic,
+                        "BIC": bic,
+                        "KS": ks_stat,
+                        "PValue": ks_pvalue
+                    })
+
+                except Exception:
+                    continue
+
+            if len(resultados) == 0:
+                raise ValueError("No se pudo ajustar ninguna distribución.")
+
+            resultados_df = pd.DataFrame(resultados).sort_values("AIC")
+            mejor = resultados_df.iloc[0]
+
+            mejor_nombre = mejor["Distribución"]
+            mejor_dist = mejor["Dist"]
+            mejor_params = mejor["Params"]
+
+            # Histograma normalizado
+            fig5.add_trace(go.Histogram(
+                x=datos,
+                histnorm="probability density",
+                nbinsx=15,
+                name="Datos observados",
+                opacity=0.55,
+                marker=dict(
+                    color="#F4B183",
+                    line=dict(color="black", width=1)
+                )
+            ))
+
+            # Curva de mejor ajuste
+            x_grid = np.linspace(
+                datos.min() * 0.90,
+                datos.max() * 1.10,
+                400
             )
+
+            x_grid = x_grid[x_grid > 0]
+
+            y_fit = mejor_dist.pdf(x_grid, *mejor_params)
+
+            fig5.add_trace(go.Scatter(
+                x=x_grid,
+                y=y_fit,
+                mode="lines",
+                name=f"Mejor ajuste: {mejor_nombre}",
+                line=dict(
+                    color="#C55A11",
+                    width=4
+                )
+            ))
+
+            # Estadísticos
+            p10 = np.percentile(datos, 10)
+            p50 = np.percentile(datos, 50)
+            p90 = np.percentile(datos, 90)
+            media = np.mean(datos)
+
+            for valor, nombre_linea, color_linea in [
+                (p10, "P10", "#1F77B4"),
+                (p50, "P50", "#000000"),
+                (p90, "P90", "#2CA02C"),
+                #(media, "Media", "#D62728")
+            ]:
+                fig5.add_vline(
+                    x=valor,
+                    line_width=2,
+                    line_dash="dash",
+                    line_color=color_linea,
+                    annotation_text=f"{nombre_linea}: {valor:,.1f}",
+                    annotation_position="top"
+                )
+
+            fig5.update_layout(
+                title=(
+                    f"<b>Mejor distribución ajustada de {nombre_np}</b><br>"
+                    f"<sup>Distribución seleccionada: {mejor_nombre} | "
+                    f"AIC: {mejor['AIC']:.1f} | KS: {mejor['KS']:.3f}</sup>"
+                ),
+                height=520,
+                template="plotly_white",
+                xaxis_title=f"{nombre_np}",
+                yaxis_title="Densidad probabilística",
+                showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.05,
+                    xanchor="center",
+                    x=0.5
+                ),
+                font=dict(
+                    size=14,
+                    color="black",
+                    family="Arial Black"
+                ),
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                bargap=0.05
+            )
+
+        except Exception as e:
+
+            st.warning(f"No se pudo ajustar la distribución: {e}")
+
+            fig5.add_trace(go.Histogram(
+                x=datos,
+                nbinsx=15,
+                name="Datos observados",
+                marker=dict(
+                    color="#F4B183",
+                    line=dict(color="black", width=1)
+                )
+            ))
+
+            fig5.update_layout(
+                title=f"<b>Histograma de {nombre_np}</b>",
+                height=520,
+                template="plotly_white",
+                xaxis_title=f"{nombre_np}",
+                yaxis_title="Frecuencia de pozos",
+                font=dict(
+                    size=14,
+                    color="black",
+                    family="Arial Black"
+                ),
+                plot_bgcolor="white",
+                paper_bgcolor="white"
+            )
+
+    else:
+
+        fig5.add_annotation(
+            text="No hay suficientes datos para ajustar una distribución.",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+            xref="paper",
+            yref="paper",
+            font=dict(size=16, color="black")
         )
 
-    fig5.update_layout(
-        title=f"<b>{nombre_np} promedio y pozos por campaña</b>",
-        #title="<b>Np promedio y pozos por campaña</b>",
-        height=520,
-        template="plotly_white",
-        font=dict(
-            size=14,
-            color="black",
-            family="Arial Black"
-        ),
-        plot_bgcolor="white",
-        paper_bgcolor="white"
-    )
+        fig5.update_layout(
+            title=f"<b>Distribución de {nombre_np}</b>",
+            height=520,
+            template="plotly_white"
+        )
 
     fig5.update_xaxes(
-        title_text="Campaña",
-        dtick=1,
         showline=True,
         linewidth=1,
         linecolor="black",
@@ -2426,8 +2826,6 @@ def analisis_term():
     )
 
     fig5.update_yaxes(
-        title_text=f"{nombre_np}",
-        #title_text="Np promedio (mbl)",
         showgrid=True,
         gridcolor="#EAECEE",
         showline=True,
@@ -2439,21 +2837,80 @@ def analisis_term():
             family="Arial Black"
         )
     )
-
     # =========================
     # 4.3 BOXPLOT NP POR CAMPAÑA
     # =========================
 
+    # =====================================================
+    # AGREGAR POZOS EXTRA PROD SOLO AL BOXPLOT / VIOLIN NP
+    # =====================================================
+    extra_np_box = np_pozo[
+        np_pozo[COL_POZO].astype(str).isin(pozos_extra_sel)
+    ].copy()
+
+    extra_np_box[col_anio] = "Extra PROD"
+    extra_np_box[col_qoi] = np.nan
+
+    extra_np_box = extra_np_box.rename(
+        columns={
+            "NP_FINAL": "NP_FINAL"
+        }
+    )
+
+    # Base original: campañas + pozos extra
+    term_np_box = pd.concat(
+        [
+            term_np[[COL_POZO, col_anio, "NP_FINAL"]],
+            extra_np_box[[COL_POZO, col_anio, "NP_FINAL"]]
+        ],
+        ignore_index=True
+    )
+
+    term_np_box["NP_FINAL"] = pd.to_numeric(
+        term_np_box["NP_FINAL"],
+        errors="coerce"
+    )
+
+    term_np_box = term_np_box[
+        term_np_box["NP_FINAL"].notna() &
+        (term_np_box["NP_FINAL"] > 0)
+    ].copy()
+
+    # Convertir año a texto
+    term_np_box["ANIO_BOX"] = term_np_box[col_anio].astype(str)
+
+    # Crear TOTAL con todas las muestras filtradas
+    term_np_total = term_np_box.copy()
+    term_np_total["ANIO_BOX"] = "TOTAL"
+
+    # Unir campañas + TOTAL
+    term_np_box = pd.concat(
+        [term_np_box, term_np_total],
+        ignore_index=True
+    )
+
+    orden_box_np = (
+        sorted(
+            term_np_box.loc[
+                term_np_box["ANIO_BOX"] != "TOTAL",
+                "ANIO_BOX"
+            ].dropna().astype(str).unique().tolist()
+        )
+        + ["TOTAL"]
+    )
+
     fig6 = px.box(
-        term_np,
-        x=col_anio,
+        term_np_box,
+        x="ANIO_BOX",
         y="NP_FINAL",
         points="all",
         hover_name=COL_POZO,
-        title="<b>Modelo estadístico Np por campaña</b>",
-        #title="<b>Modelo estadístico Np por campaña</b>",
-        template="plotly_white"
-    )
+        title="<b>Modelo estadístico Np por campaña / total filtrado</b>",
+        template="plotly_white",
+        category_orders={
+            "ANIO_BOX": orden_box_np
+        }
+)
 
     fig6.update_traces(
         marker=dict(
@@ -2466,10 +2923,11 @@ def analisis_term():
         fillcolor="rgba(244,177,131,0.35)"
     )
 
-    medianas_np = term_np.groupby(col_anio, as_index=False)["NP_FINAL"].median()
+    #medianas_np = term_np.groupby(col_anio, as_index=False)["NP_FINAL"].median()
+    medianas_np = term_np_box.groupby("ANIO_BOX", as_index=False)["NP_FINAL"].median()
 
     fig6.add_trace(go.Scatter(
-        x=medianas_np[col_anio],
+        x=medianas_np["ANIO_BOX"],
         y=medianas_np["NP_FINAL"],
         mode="text",
         text=medianas_np["NP_FINAL"].round(1),
@@ -4178,98 +4636,115 @@ def mapa_presion():
             height=350
         )
 # =========================================================
-# FILTROS
+# SELECTOR GENERAL DE MÓDULO
 # =========================================================
-st.markdown("<div class='filter-box'>", unsafe_allow_html=True)
 
-# No se usa filtro de CONTA.
-# No se completan fechas.
-# Se grafica solamente lo que existe en la base.
-f1, f2, f3, f4 = st.columns([1.7, 2.3, 2.3, 2.2])
+vista = st.radio(
+    "Seleccionar opción",
+    [
+        "Producción por pozo",
+        "Comparativa por pozo",
+        "Mapa de burbujas",
+        "Campañas 2011-2020",
+        "RMA 2011-2020",
+        "Operación Campo",
+        "Producción Campo",
+        "Presiones"
+    ],
+    horizontal=True,
+    key="vista_principal"
+)
 
-with f1:
-    yacs = sorted(df[COL_YAC].dropna().astype(str).unique())
-    yac_sel = st.multiselect("Filtro por Yacimiento", yacs, default=yacs)
+# =========================================================
+# FILTROS SOLO PARA PRODUCCIÓN POR POZO Y COMPARATIVA
+# =========================================================
+if vista in ["Producción por pozo", "Comparativa por pozo"]:
 
-# El filtro de Yacimiento solo se usa para listar/seleccionar pozos.
-df_base_filtro = df[df[COL_YAC].astype(str).isin(yac_sel)].copy() if yac_sel else df.copy()
+    st.markdown("<div class='filter-box'>", unsafe_allow_html=True)
 
-with f2:
-    pozos = sorted(df_base_filtro[COL_POZO].dropna().astype(str).unique())
+    f1, f2, f3 = st.columns([1.7, 2.3, 2.3])
 
-    if not pozos:
-        st.warning("No hay pozos para el yacimiento seleccionado.")
-        st.stop()
+    with f1:
+        yacs = sorted(df[COL_YAC].dropna().astype(str).unique())
+        yac_sel = st.multiselect(
+            "Filtro por Yacimiento",
+            yacs,
+            default=yacs,
+            key="prod_yac_sel"
+        )
 
-    pozo_sel = st.selectbox("Pozo / Terminación", pozos)
+    # El filtro de Yacimiento solo se usa para listar/seleccionar pozos.
+    df_base_filtro = df[df[COL_YAC].astype(str).isin(yac_sel)].copy() if yac_sel else df.copy()
 
-# Base real del pozo seleccionado.
-# Se toma desde df completo para no truncar la historia real del pozo.
-df_pozo_raw = df[df[COL_POZO].astype(str) == str(pozo_sel)].copy()
+    with f2:
+        pozos = sorted(df_base_filtro[COL_POZO].dropna().astype(str).unique())
 
-with f3:
-    min_date = df_pozo_raw[COL_FECHA_FILTRO].min().date()
-    max_date = df_pozo_raw[COL_FECHA_FILTRO].max().date()
+        if not pozos:
+            st.warning("No hay pozos para el yacimiento seleccionado.")
+            st.stop()
 
-    date_range = st.date_input(
-        "Rango de fechas",
-        value=(min_date, max_date),
-        min_value=min_date,
-        max_value=max_date
-    )
+        pozo_sel = st.selectbox(
+            "Pozo / Terminación",
+            pozos,
+            key="prod_pozo_sel"
+        )
 
-with f4:
-    vista = st.radio(
-        "Tipo de análisis",
-        ["Producción por pozo", "Comparativa por pozo", "Mapa de burbujas", 
-        "Campañas 2011-2020","RMA 2011-2020","Operación Campo","Producción Campo","Presiones"],
-        horizontal=True
-    )
-    #vista = st.radio(
-     #   "Tipo de análisis",
-      #  ["Producción por pozo", "Comparativa por pozo", "Mapa de burbujas"],
-       # horizontal=True
-    #)
+    # Base real del pozo seleccionado.
+    # Se toma desde df completo para no truncar la historia real del pozo.
+    df_pozo_raw = df[df[COL_POZO].astype(str) == str(pozo_sel)].copy()
 
-st.markdown("</div>", unsafe_allow_html=True)
+    with f3:
+        min_date = df_pozo_raw[COL_FECHA_FILTRO].min().date()
+        max_date = df_pozo_raw[COL_FECHA_FILTRO].max().date()
+
+        date_range = st.date_input(
+            "Rango de fechas",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date,
+            key="prod_date_range"
+        )
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================================================
 # FILTRO DE FECHAS SIN ACOMPLETAR CALENDARIO
+# Solo aplica para Producción por pozo y Comparativa
 # =========================================================
-if isinstance(date_range, tuple) and len(date_range) == 2:
-    f_ini = pd.to_datetime(date_range[0]).normalize()
-    f_fin = pd.to_datetime(date_range[1]).normalize()
-else:
-    f_ini = df_pozo_raw[COL_FECHA_FILTRO].min()
-    f_fin = df_pozo_raw[COL_FECHA_FILTRO].max()
+if vista in ["Producción por pozo", "Comparativa por pozo"]:
 
-# Cambio clave:
-# Se calculan columnas directamente sobre la base real del pozo.
-# Ya no se llama completar_fechas_por_pozo().
-#dfp_full = calcular_columnas_produccion(df_pozo_raw)
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        f_ini = pd.to_datetime(date_range[0]).normalize()
+        f_fin = pd.to_datetime(date_range[1]).normalize()
+    else:
+        f_ini = df_pozo_raw[COL_FECHA_FILTRO].min()
+        f_fin = df_pozo_raw[COL_FECHA_FILTRO].max()
 
-df_pozo_completo = completar_fechas_pozo(df_pozo_raw)
-dfp_full = calcular_columnas_produccion(df_pozo_completo)
+    # Se completan fechas solo para el pozo seleccionado,
+    # porque estas variables se usan en Producción por pozo.
+    df_pozo_completo = completar_fechas_pozo(df_pozo_raw)
+    dfp_full = calcular_columnas_produccion(df_pozo_completo)
 
-dfp = dfp_full[
-    (dfp_full[COL_FECHA_FILTRO] >= f_ini) &
-    (dfp_full[COL_FECHA_FILTRO] <= f_fin)
-].copy()
+    dfp = dfp_full[
+        (dfp_full[COL_FECHA_FILTRO] >= f_ini) &
+        (dfp_full[COL_FECHA_FILTRO] <= f_fin)
+    ].copy()
 
-dfp = dfp.sort_values(COL_FECHA).reset_index(drop=True)
+    dfp = dfp.sort_values(COL_FECHA).reset_index(drop=True)
 
-if dfp.empty:
-    st.warning("No hay datos para los filtros seleccionados.")
-    st.stop()
+    if dfp.empty:
+        st.warning("No hay datos para los filtros seleccionados.")
+        st.stop()
 
-# Primer y último registro con producción real para KPIs
-prod_total = dfp[[COL_ACEITE_BBL, COL_AGUA_BBL, COL_GAS_PC]].fillna(0).sum(axis=1)
-df_prod = dfp[prod_total > 0].copy()
-if df_prod.empty:
-    df_prod = dfp.copy()
+    # Primer y último registro con producción real para KPIs
+    prod_total = dfp[[COL_ACEITE_BBL, COL_AGUA_BBL, COL_GAS_PC]].fillna(0).sum(axis=1)
+    df_prod = dfp[prod_total > 0].copy()
 
-first_row = df_prod.iloc[0]
-last_row = df_prod.iloc[-1]
+    if df_prod.empty:
+        df_prod = dfp.copy()
+
+    first_row = df_prod.iloc[0]
+    last_row = df_prod.iloc[-1]
 
 # =========================================================
 # KPIs
