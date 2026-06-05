@@ -3586,9 +3586,9 @@ def produccion_total_campo():
             "Variable",
             ["NP_TOTAL", "WP_TOTAL", "GP_TOTAL"],
             format_func=lambda x: {
-                "NP_TOTAL": "Aceite",
-                "WP_TOTAL": "Agua",
-                "GP_TOTAL": "Gas"
+                "NP_TOTAL": "Aceite (mmb)",
+                "WP_TOTAL": "Agua (mmb)",
+                "GP_TOTAL": "Gas (mmmpc)"
             }[x],
             horizontal=True,
             key="variable_burbuja_yac_prod_campo"
@@ -3647,7 +3647,7 @@ def produccion_total_campo():
             color_burbuja = "#E53935"
 
         yac_burb["ETIQUETA"] = yac_burb[variable_burbuja_yac].map(
-            lambda x: f"{x:,.1f}"
+            lambda x: f"{x/1000:,.3f}"
         )
 
         fig4 = go.Figure()
