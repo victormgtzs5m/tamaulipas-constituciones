@@ -35,6 +35,7 @@ TABLA_RMA = "RMA"
 TABLA_ESTADO_POZOS = "Estado"
 TABLA_PRESIONES = "Presiones"
 TABLA_OPERACION = "Operacion"
+TABLA_EVENTOS = "Eventos"
 
 @st.cache_data(show_spinner=False)
 def load_table(tabla):
@@ -53,7 +54,7 @@ def load_table(tabla):
 # =========================================================
 # COLUMNAS DE LA BASE NUEVA
 # La base solo debe traer estas columnas:
-# Terminacion, Fecha, Yacimiento, Conta, Dias, Aceite, Gas, Agua
+# Terminacion, Fecha, Yacimiento, Conta, Dias, Aceite, Gas, Agua, Iny
 # =========================================================
 COL_POZO = "TERMINACION"
 COL_FECHA = "FECHA"
@@ -63,19 +64,23 @@ COL_DIAS = "DIAS"
 COL_ACEITE = "ACEITE"
 COL_GAS = "GAS"
 COL_AGUA = "AGUA"
+COL_INY = "INJ"
 
 # Columnas calculadas para el visualizador
 COL_ACEITE_BBL = "Aceite (bl)"
 COL_AGUA_BBL = "Agua (bl)"
 COL_GAS_PC = "Gas (pc)"
+COL_INY_BBL = "Agua inyectada (bl)"
 
 COL_QO = "Qo (bpd)"
 COL_QW = "Qw (bpd)"
+COL_QIN = "Qiny (bpd)"
 COL_QG = "Qg (mpcd)"
 COL_QG_PCD = "Qg (pcd)"
 
 COL_NP = "Np (mbl)"
 COL_WP = "Wp (mbl)"
+COL_WINJ = "Winj (mbl)"
 COL_GP = "Gp (mmpc)"
 
 COL_WC = "%Agua"
@@ -87,7 +92,7 @@ COL_TIEMPO_NORM = "Tiempo normalizado"
 
 REQUIRED_COLS = [
     COL_POZO, COL_FECHA, COL_YAC, COL_CONTA,
-    COL_DIAS, COL_ACEITE, COL_GAS, COL_AGUA
+    COL_DIAS, COL_ACEITE, COL_GAS, COL_AGUA, COL_INY
 ]
 
 # Factores de conversión
@@ -191,12 +196,13 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
 def es_movil():
     return st.session_state.get("mobile_view", False)
 
-st.toggle("Vista móvil", key="mobile_view")
+    st.toggle("Vista móvil", key="mobile_view")
 
-alto_grafico = 420 if es_movil() else 650
+    alto_grafico = 420 if es_movil() else 650
 
 def alta_operacion():
 
@@ -453,7 +459,7 @@ def completar_fechas_pozo(df_pozo: pd.DataFrame) -> pd.DataFrame:
     # Solo pone 0 días en meses inventados sin producción.
     df_out[COL_DIAS] = df_out[COL_DIAS].fillna(0)
 
-    for col in [COL_ACEITE, COL_GAS, COL_AGUA]:
+    for col in [COL_ACEITE, COL_GAS, COL_AGUA, COL_INY]:
         df_out[col] = df_out[col].fillna(0)
 
     df_out[COL_FECHA_FILTRO] = df_out[COL_FECHA]
@@ -476,21 +482,24 @@ def calcular_columnas_produccion(df: pd.DataFrame) -> pd.DataFrame:
     df[COL_ACEITE_BBL] = df[COL_ACEITE] * M3_A_BBL
     df[COL_AGUA_BBL] = df[COL_AGUA] * M3_A_BBL
     df[COL_GAS_PC] = df[COL_GAS] * M3_A_PC
+    df[COL_INY_BBL] = df[COL_INY] * M3_A_BBL
 
     # Gastos promedio diarios
     dias_validos = df[COL_DIAS].replace(0, np.nan)
     df[COL_QO] = df[COL_ACEITE_BBL] / dias_validos
+    df[COL_QIN] = df[COL_INY_BBL] / dias_validos
     df[COL_QW] = df[COL_AGUA_BBL] / dias_validos
     df[COL_QG_PCD] = df[COL_GAS_PC] / dias_validos
     df[COL_QG] = df[COL_QG_PCD] / 1000.0
 
-    for col in [COL_QO, COL_QW, COL_QG_PCD, COL_QG]:
+    for col in [COL_QO, COL_QIN, COL_QW, COL_QG_PCD, COL_QG]:
         df[col] = df[col].replace([np.inf, -np.inf], np.nan).fillna(0)
 
     # Acumuladas por pozo usando únicamente registros reales de la base
     df[COL_NP] = df.groupby(COL_POZO)[COL_ACEITE_BBL].cumsum() / 1000.0
     df[COL_WP] = df.groupby(COL_POZO)[COL_AGUA_BBL].cumsum() / 1000.0
     df[COL_GP] = df.groupby(COL_POZO)[COL_GAS_PC].cumsum() / 1_000_000.0
+    df[COL_WINJ] = df.groupby(COL_POZO)[COL_INY_BBL].cumsum() / 1000.0
 
     # RGA y corte de agua
     df[COL_RGA] = np.where(df[COL_QO] > 0, df[COL_QG_PCD] / df[COL_QO], 0)
@@ -620,12 +629,12 @@ def operacion_campo():
         )
     ),
     secondary_y=True
-)
+    )
 
     fig1.update_layout(
         title="<b>Producción de aceite y agua inyectada</b>",
         template="plotly_white",
-        height=alto_grafico,
+        height=600,
         barmode="group",
         hovermode="x unified",
         legend=dict(
@@ -866,7 +875,7 @@ def operacion_campo():
         ),
         opacity=0.8
     )
-)
+    )
 
     #Quema EC
     fig3.add_trace(
@@ -994,7 +1003,7 @@ def load_data() -> pd.DataFrame:
     df[COL_FECHA] = df[COL_FECHA].dt.normalize()
     df[COL_FECHA_FILTRO] = df[COL_FECHA]
 
-    for col in [COL_DIAS, COL_ACEITE, COL_GAS, COL_AGUA]:
+    for col in [COL_DIAS, COL_ACEITE, COL_GAS, COL_AGUA, COL_INY]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     # No se completa ni se inventa ninguna fecha.
@@ -1149,7 +1158,7 @@ def seleccionar_presiones_mapa(
     ventana_meses=24,
     dias_promedio=30,
     ventana_anios_ultima=7
-) -> pd.DataFrame:
+    ) -> pd.DataFrame:
 
     pres = pres.copy()
     fecha_ref = pd.to_datetime(fecha_ref).normalize()
@@ -1227,6 +1236,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             NP_BLS=(COL_ACEITE_BBL, "sum"),
             WP_BLS=(COL_AGUA_BBL, "sum"),
             GP_PC=(COL_GAS_PC, "sum"),
+            WINJ_BLS=(COL_INY_BBL, "sum"),
             MESES_OPERANDO=("MES_OPERANDO", "sum")
         )
     )
@@ -1298,8 +1308,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
         #mapa[["NP_BLS", "WP_BLS", "GP_PC"]] = mapa[["NP_BLS", "WP_BLS", "GP_PC"]].fillna(0)
 
-        mapa[["NP_BLS", "WP_BLS", "GP_PC", "MESES_OPERANDO", "NP_NORM_MB"]] = (
-        mapa[["NP_BLS", "WP_BLS", "GP_PC", "MESES_OPERANDO", "NP_NORM_MB"]]
+        mapa[["NP_BLS", "WP_BLS", "GP_PC", "WINJ_BLS", "MESES_OPERANDO", "NP_NORM_MB"]] = (
+        mapa[["NP_BLS", "WP_BLS", "GP_PC", "WINJ_BLS", "MESES_OPERANDO", "NP_NORM_MB"]]
         .fillna(0)
     )
     if "RADIO DRENE" in mapa.columns:
@@ -1336,11 +1346,12 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     with c2:
         variable = st.selectbox(
             "Variable de burbuja",
-            ["NP_BLS", "WP_BLS", "GP_PC","ULTIMO_WC", "NP_NORM_MB"],
+            ["NP_BLS", "WP_BLS", "WINJ_BLS", "GP_PC","ULTIMO_WC", "NP_NORM_MB"],
             format_func=lambda x: {
-                "NP_BLS": "Aceite acumulado, Np [bls]",
-                "WP_BLS": "Agua acumulada, Wp [bls]",
-                "GP_PC": "Gas acumulado, Gp [pc]",
+                "NP_BLS": "Aceite acumulado, Np [mb]",
+                "WP_BLS": "Agua acumulada, Wp [mb]",
+                "WINJ_BLS": "Agua inyectada acumulada, Winj [mb]",
+                "GP_PC": "Gas acumulado, Gp [mpc]",
                 "ULTIMO_WC": "Último % Agua [%]",
                 "NP_NORM_MB": "Producción Acumulada Normalizada [mb/mes]"
             }[x],
@@ -1400,6 +1411,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     color_variable = {
         "NP_BLS": "green",
         "WP_BLS": "blue",
+        "WINJ_BLS": "cyan",
         "GP_PC": "red",
         "ULTIMO_WC": "deepskyblue",
         "NP_NORM_MB": "orange"
@@ -1490,7 +1502,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 x=x0 + radio * np.cos(theta),
                 y=y0 + radio * np.sin(theta),
                 mode="lines",
-                line=dict(width=2, color="black"),
+                line=dict(width=2, color="black", dash="dash"),
                 name="Radio de drene (m)",
                 legendgroup="radios",
                 #mode="text",
@@ -1517,21 +1529,29 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         mode="markers+text",
         text=mapa_burb["ETIQUETA_MAPA"],
         textposition="top center",
-        textfont=dict(size=13, color="blue"),
+        textfont=dict(
+                        size=15,
+                        color="green",
+                        family="Arial Black"
+                    ),
         marker=dict(
             size=mapa_burb["SIZE"],
             sizemode="diameter",
-            opacity=0.65,
-            color=color_variable[variable],
-            line=dict(width=2, color="rgba(0,0,0,0.55)")
+            #opacity=0.65,
+            color="rgba(0, 180, 0, 0.20)",
+            line=dict(
+                color="green",
+                width=1
+                        )
         ),
-        customdata=mapa_burb[["POZO", COL_YAC, "NP_BLS", "WP_BLS", "GP_PC", "RADIO DRENE",
+        customdata=mapa_burb[["POZO", COL_YAC, "NP_BLS", "WP_BLS", "WINJ_BLS", "GP_PC", "RADIO DRENE",
          "MESES_OPERANDO", "NP_NORM_MB"]],
         hovertemplate=
             "<b>Pozo:</b> %{customdata[0]}<br>" +
             "<b>Yacimiento:</b> %{customdata[1]}<br>" +
             "<b>Np:</b> %{customdata[2]:,.0f} bls<br>" +
             "<b>Wp:</b> %{customdata[3]:,.0f} bls<br>" +
+            "<b>Winj:</b> %{customdata[4]:,.0f} bls<br>" +
             "<b>Gp:</b> %{customdata[4]:,.0f} pc<br>" +
             "<b>Radio drene:</b> %{customdata[5]:,.0f} m<br>" +
             "<b>Meses operando:</b> %{customdata[6]:,.0f}<br>" +
@@ -1541,7 +1561,69 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         legendgroup="burbujas",
         showlegend=True
     ))
-   
+    
+    # =====================================================
+    # BURBUJAS DE INYECCIÓN CUANDO SE SELECCIONA ACEITE
+    # =====================================================
+
+    if variable == "NP_BLS" and "WINJ_BLS" in mapa.columns:
+
+        mapa_iny = mapa[
+            mapa["WINJ_BLS"].fillna(0) > 0
+        ].copy()
+
+        max_iny = mapa_iny["WINJ_BLS"].max()
+
+        if max_iny > 0:
+
+            mapa_iny["SIZE_INY"] = 18 + (
+                mapa_iny["WINJ_BLS"] / max_iny
+            ) * 80
+
+            fig.add_trace(
+                go.Scatter(
+                    x=mapa_iny["CIMA X UTM"],
+                    y=mapa_iny["CIMA Y UTM"],
+                    mode="markers+text",
+                    text=mapa_iny["WINJ_BLS"].map(lambda x: f"{x/1000:,.1f}"),
+                    textposition="bottom center",
+                    textfont=dict(
+                        size=15,
+                        color="blue",
+                        family="Arial Black"
+                    ),
+                    marker=dict(
+                        size=mapa_iny["SIZE_INY"],
+                        sizemode="diameter",
+                        color="rgba(0, 120, 255, 0.20)",
+                        line=dict(
+                            color="blue",
+                            width=1
+                        )
+                    ),
+                    customdata=mapa_iny[
+                        [
+                            "POZO",
+                            COL_YAC,
+                            "WINJ_BLS",
+                            "NP_BLS",
+                            "WP_BLS",
+                            "GP_PC"
+                        ]
+                    ],
+                    hovertemplate=
+                        "<b>Pozo:</b> %{customdata[0]}<br>" +
+                        "<b>Yacimiento:</b> %{customdata[1]}<br>" +
+                        "<b>Winj:</b> %{customdata[2]:,.0f} bls<br>" +
+                        "<b>Np:</b> %{customdata[3]:,.0f} bls<br>" +
+                        "<b>Wp:</b> %{customdata[4]:,.0f} bls<br>" +
+                        "<b>Gp:</b> %{customdata[5]:,.0f} pc<br>" +
+                        "<extra></extra>",
+                    name="Agua inyectada acumulada (mb)",
+                    legendgroup="iny",
+                    showlegend=True
+                )
+            )
    # =====================================================
     # PUNTOS POR ESTADO DEL POZO / SAP
     # =====================================================
@@ -1819,7 +1901,7 @@ def analisis_term():
         return
 
 
- # =========================
+    # =========================
     # MÉTRICAS
     # =========================
 
@@ -1975,7 +2057,7 @@ def analisis_term():
     ))
     
     fig1.update_layout(
-        height=alto_grafico,
+        height=600,
         title="<b>Qoi por pozo (bpd)</b>",
         xaxis=dict(
         tickangle=-75,
@@ -2392,8 +2474,8 @@ def analisis_term():
 
     # =========================
 
-# 4.1 GASTO INICIAL Y NP POR POZO / TIEMPO
-# =========================
+    # 4.1 GASTO INICIAL Y NP POR POZO / TIEMPO
+    # =========================
 
     modo_fig4 = st.radio(
         "Vista gráfico Qoi / Np",
@@ -2702,7 +2784,7 @@ def analisis_term():
     resumen_np = term_np.groupby(col_anio, as_index=False).agg(
     NP_PROM=("NP_FINAL", "mean"),
     POZOS=(COL_POZO, "nunique")
-)
+    )
 
     # =========================
     # 4.2 MEJOR DISTRIBUCIÓN AJUSTADA NP - TODOS LOS POZOS
@@ -3014,7 +3096,7 @@ def analisis_term():
         category_orders={
             "ANIO_BOX": orden_box_np
         }
-)
+    )
 
     fig6.update_traces(
         marker=dict(
@@ -3354,8 +3436,8 @@ def produccion_total_campo():
     fig1.update_layout(
         title="<b>Producción de aceite, agua, gas y pozos activos</b>",
         template="plotly_white",
-        height=alto_grafico,
-        #height=600,
+        #height=alto_grafico,
+        height=600,
         hovermode="x unified",
         legend=dict(
             orientation="h",
@@ -3427,7 +3509,7 @@ def produccion_total_campo():
     fig2.update_layout(
         title="<b>RGA y corte de agua</b>",
         template="plotly_white",
-        height=alto_grafico,
+        height=600,
         hovermode="x unified",
         legend=dict(
             orientation="h",
@@ -3507,7 +3589,7 @@ def produccion_total_campo():
     fig3.update_layout(
         title="<b>Producción acumulada de aceite, agua y gas</b>",
         template="plotly_white",
-        height=alto_grafico,
+        height=600,
         hovermode="x unified",
         legend=dict(
             orientation="h",
@@ -3704,7 +3786,7 @@ def produccion_total_campo():
         fig4.update_layout(
             title=f"<b>{titulo_var} por yacimiento</b>",
             template="plotly_white",
-            height=alto_grafico * 3,
+            height=600 * 3,
             margin=dict(l=10, r=10, t=60, b=20),
             showlegend=False,
             font=dict(
@@ -3901,7 +3983,7 @@ def analisis_rma():
         yaxis_title="Qoi (bpd)",
         barmode="group",
         #height=560,
-        height=alto_grafico,
+        height=560,
         template="plotly_white",
         bargap=0.22,
         bargroupgap=0.08,
@@ -4278,8 +4360,8 @@ def analisis_rma():
     fig5 = go.Figure()
 
     # =========================
-# 5. BOXPLOT NP RMA
-# =========================
+    # 5. BOXPLOT NP RMA
+    # =========================
     
     medianas_np = rma_box_np.groupby("ANIO_BOX", as_index=False)["NP_FINAL"].median()
 
@@ -4294,7 +4376,7 @@ def analisis_rma():
         category_orders={
             "ANIO_BOX": orden_box_np
         }
-)
+    )
 
     fig5.update_traces(
         marker=dict(
@@ -4522,7 +4604,7 @@ def mapa_presion():
         ventana_meses=24,
         dias_promedio=dias_promedio,
         ventana_anios_ultima=7
-)
+    )
 
     if pres_mapa.empty:
         st.warning("No hay presiones cercanas a la fecha seleccionada. Cambia a 'Última disponible' o ajusta la fecha.")
@@ -4547,7 +4629,7 @@ def mapa_presion():
         coord_merge,
         on=["TERMINACION", "POZO"],
         how="left"
-)
+    )
 
     pres_mapa = pres_mapa.dropna(
         subset=["CIMA X UTM", "CIMA Y UTM", "PRESION_MAPA"]
@@ -4923,7 +5005,6 @@ def mapa_presion():
     ))
 
     
-
     # =========================
     # POZOS CAMPAÑAS 2011-2020
     # =========================
@@ -5021,7 +5102,7 @@ vista = st.radio(
     ],
     horizontal=True,
     key="vista_principal"
-)
+    )
 
 # =========================================================
 # FILTROS SOLO PARA PRODUCCIÓN POR POZO Y COMPARATIVA
@@ -5030,7 +5111,7 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
 
     st.markdown("<div class='filter-box'>", unsafe_allow_html=True)
 
-    f1, f2, f3 = st.columns([1.7, 2.3, 2.3])
+    f1, f2 = st.columns([1.7, 2.3])
 
     with f1:
         yacs = sorted(df[COL_YAC].dropna().astype(str).unique())
@@ -5041,8 +5122,10 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
             key="prod_yac_sel"
         )
 
-    # El filtro de Yacimiento solo se usa para listar/seleccionar pozos.
-    df_base_filtro = df[df[COL_YAC].astype(str).isin(yac_sel)].copy() if yac_sel else df.copy()
+    df_base_filtro = (
+        df[df[COL_YAC].astype(str).isin(yac_sel)].copy()
+        if yac_sel else df.copy()
+    )
 
     with f2:
         pozos = sorted(df_base_filtro[COL_POZO].dropna().astype(str).unique())
@@ -5058,54 +5141,37 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
         )
 
     # Base real del pozo seleccionado.
-    # Se toma desde df completo para no truncar la historia real del pozo.
-    df_pozo_raw = df[df[COL_POZO].astype(str) == str(pozo_sel)].copy()
-
-    with f3:
-        min_date = df_pozo_raw[COL_FECHA_FILTRO].min().date()
-        max_date = df_pozo_raw[COL_FECHA_FILTRO].max().date()
-
-        date_range = st.date_input(
-            "Rango de fechas",
-            value=(min_date, max_date),
-            min_value=min_date,
-            max_value=max_date,
-            key="prod_date_range"
-        )
+    df_pozo_raw = df[
+        df[COL_POZO].astype(str) == str(pozo_sel)
+    ].copy()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================================================
-# FILTRO DE FECHAS SIN ACOMPLETAR CALENDARIO
+# BASE DE PRODUCCIÓN SIN FILTRO DE FECHAS
 # Solo aplica para Producción por pozo y Comparativa
 # =========================================================
 if vista in ["Producción por pozo", "Comparativa por pozo"]:
 
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        f_ini = pd.to_datetime(date_range[0]).normalize()
-        f_fin = pd.to_datetime(date_range[1]).normalize()
-    else:
-        f_ini = df_pozo_raw[COL_FECHA_FILTRO].min()
-        f_fin = df_pozo_raw[COL_FECHA_FILTRO].max()
-
-    # Se completan fechas solo para el pozo seleccionado,
-    # porque estas variables se usan en Producción por pozo.
     df_pozo_completo = completar_fechas_pozo(df_pozo_raw)
     dfp_full = calcular_columnas_produccion(df_pozo_completo)
 
-    dfp = dfp_full[
-        (dfp_full[COL_FECHA_FILTRO] >= f_ini) &
-        (dfp_full[COL_FECHA_FILTRO] <= f_fin)
-    ].copy()
+    # Ya no se filtra por rango de fechas.
+    # Se usa toda la historia disponible del pozo.
+    dfp = dfp_full.copy()
 
     dfp = dfp.sort_values(COL_FECHA).reset_index(drop=True)
 
     if dfp.empty:
-        st.warning("No hay datos para los filtros seleccionados.")
+        st.warning("No hay datos para el pozo seleccionado.")
         st.stop()
 
-    # Primer y último registro con producción real para KPIs
-    prod_total = dfp[[COL_ACEITE_BBL, COL_AGUA_BBL, COL_GAS_PC]].fillna(0).sum(axis=1)
+    prod_total = (
+        dfp[[COL_ACEITE_BBL, COL_AGUA_BBL, COL_GAS_PC, COL_INY_BBL]]
+        .fillna(0)
+        .sum(axis=1)
+    )
+
     df_prod = dfp[prod_total > 0].copy()
 
     if df_prod.empty:
@@ -5113,7 +5179,6 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
 
     first_row = df_prod.iloc[0]
     last_row = df_prod.iloc[-1]
-
 # =========================================================
 # KPIs
 # =========================================================
@@ -5127,7 +5192,7 @@ if vista == "Producción por pozo":
         unsafe_allow_html=True
     )
 
-    k1, k2, k3, k4, k5, k6, k7, k8, k9 = st.columns(9)
+    k1, k2, k3, k4, k5, k6, k7, k8, k9, k10, k11 = st.columns(11)
 
     with k1:
         kpi_card(
@@ -5137,10 +5202,26 @@ if vista == "Producción por pozo":
             "#1F2937",
         )
 
+    qo_validos = dfp[dfp[COL_QO] > 0]
+
+    if not qo_validos.empty:
+        ultimo_qo = qo_validos[COL_QO].iloc[-1]
+        fecha_ultimo_qo = qo_validos[COL_FECHA].iloc[-1]
+    else:
+        ultimo_qo = 0
+        fecha_ultimo_qo = None
+
     with k2:
+
+        fecha_txt = (
+            fecha_ultimo_qo.strftime("%d/%m/%Y")
+            if fecha_ultimo_qo is not None
+            else "-"
+        )
+
         kpi_card(
             "Última producción",
-            last_row[COL_FECHA].strftime("%d/%m/%Y"),
+            fecha_txt,
             "",
             "#374151",
         )
@@ -5153,31 +5234,77 @@ if vista == "Producción por pozo":
             "#1F2937",
         )
 
+    # Último Qo mayor que cero
+    qo_validos = dfp[dfp[COL_QO] > 0]
+    qw_validos = dfp[dfp[COL_QW] > 0]
+    qg_validos = dfp[dfp[COL_QG] > 0]
+    aguaporc_validos = dfp[dfp[COL_WC] > 0]
+
+    ultimo_qo = (
+        qo_validos[COL_QO].iloc[-1]
+        if not qo_validos.empty
+        else 0
+    )
+
+    ultimo_qw = (
+        qw_validos[COL_QW].iloc[-1]
+        if not qw_validos.empty
+        else 0
+    )
+
+    ultimo_qg = (
+        qg_validos[COL_QG].iloc[-1]
+        if not qg_validos.empty
+        else 0
+    )
+
+    ultimo_wcp = (
+        aguaporc_validos[COL_WC].iloc[-1]
+        if not aguaporc_validos.empty
+        else 0
+    )
+
     with k4:
         kpi_card(
             "Último Gasto Aceite",
-            f"{last_row[COL_QO]:,.1f}",
+            f"{ultimo_qo:,.2f}",
             "bpd",
             "#1F2937",
         )
 
     with k5:
         kpi_card(
-            "Última Gasto Agua",
-            f"{last_row[COL_QW]:,.1f}",
+            "Último Gasto Agua",
+            f"{ultimo_qw:,.2f}",
             "bpd",
             "#1F2937",
         )
 
     with k6:
         kpi_card(
-            "Último Gasto Gas",
-            f"{last_row[COL_QG]:,.1f}",
-            "mpcd",
+            "% Agua",
+            f"{ultimo_wcp:,.2f}",
+            "%",
             "#1F2937",
         )
 
     with k7:
+        kpi_card(
+            "Último Gasto Gas",
+            f"{ultimo_qg:,.2f}",
+            "mpcd",
+            "#1F2937",
+        )
+
+    with k8:
+        kpi_card(
+            "Último Gasto Gas",
+            f"{ultimo_qg:,.2f}",
+            "mpcd",
+            "#1F2937",
+        )
+
+    with k9:
         kpi_card(
             "Acumulada Aceite",
             f"{dfp[COL_NP].iloc[-1]:,.2f}",
@@ -5185,7 +5312,7 @@ if vista == "Producción por pozo":
             "#1F2937",
         )
 
-    with k8:
+    with k10:
         kpi_card(
             "Acumulada Agua",
             f"{dfp[COL_WP].iloc[-1]:,.2f}",
@@ -5193,24 +5320,13 @@ if vista == "Producción por pozo":
             "#1F2937",
         )
 
-    with k9:
+    with k11:
         kpi_card(
             "Acumulada Gas",
             f"{dfp[COL_GP].iloc[-1]:,.2f}",
             "mmpc",
             "#1F2937",
         )
-    #k1, k2, k3, k4, k5, k6, k7, k8, k9 = st.columns(9)
-
-    #k1.metric("Inicio producción", first_row[COL_FECHA].strftime("%d/%m/%Y"))
-    #k2.metric("Última producción", last_row[COL_FECHA].strftime("%d/%m/%Y"))
-    #k3.metric("Gasto Inicial", f"{first_row[COL_QO]:,.1f} bpd")
-    #k4.metric("Último Gasto Aceite", f"{last_row[COL_QO]:,.1f} bpd")
-    #k5.metric("Último Gasto Agua", f"{last_row[COL_QW]:,.1f} bpd")
-    #k6.metric("Último Gasto Gas", f"{last_row[COL_QG]:,.1f} mpcd")
-    #k7.metric("Acumulada Aceite", f"{dfp[COL_NP].iloc[-1]:,.2f} mbl")
-    #k8.metric("Acumulada Agua", f"{dfp[COL_WP].iloc[-1]:,.2f} mbl")
-    #k9.metric("Acumulada Gas", f"{dfp[COL_GP].iloc[-1]:,.2f} mmpc")
 
 # =========================================================
 # FUNCIÓN PARA GRÁFICAS COMPARATIVAS
@@ -5434,7 +5550,7 @@ if vista == "Producción por pozo":
         template="plotly_white",
         hovermode="x unified",
         #height=520,
-        height=alto_grafico,
+        height=500,
         legend=dict(orientation="h", y=1.02, font=dict(
         size=14,
         color="black",
@@ -5481,6 +5597,21 @@ if vista == "Producción por pozo":
             mode="lines+markers",
             name="Qw (bpd)",
             line=dict(width=3, color="#3498DB"),
+            marker=dict(size=3),
+            fill="tozeroy",
+            fillcolor="rgba(52,152,219,0.20)",
+            connectgaps=False
+        ),
+        secondary_y=False
+    )
+
+    fig2.add_trace(
+        go.Scatter(
+            x=dfp[COL_FECHA],
+            y=dfp[COL_QIN],
+            mode="lines+markers",
+            name="Qiny (bpd)",
+            line=dict(width=3, color="cyan"),
             marker=dict(size=3),
             fill="tozeroy",
             fillcolor="rgba(52,152,219,0.20)",
@@ -5770,18 +5901,213 @@ elif vista == "Comparativa por pozo":
                 use_container_width=True
             )
 
-            st.plotly_chart(
-                comparative_plot(
-                    df_comp,
-                    COL_WC,
-                    "Comparativo de corte de agua por pozo",
-                    "% Agua",
-                    pozos_sel_comp,
-                    #semilog=usar_semilog,
-                    normalizar_tiempo=normalizar_tiempo
+            # =========================
+            # =========================
+            # 3. COMPARATIVO Qw + %Agua
+            # =========================
+            fig_agua = make_subplots(specs=[[{"secondary_y": True}]])
+
+            for pozo in pozos_sel_comp:
+
+                dfi = df_comp[
+                    df_comp[COL_POZO].astype(str).str.strip() == str(pozo).strip()
+                ].copy()
+
+                dfi = dfi.sort_values(COL_FECHA).reset_index(drop=True)
+
+                if dfi.empty:
+                    continue
+
+                dfi[COL_TIEMPO_NORM] = range(len(dfi))
+
+                if normalizar_tiempo:
+                    x_values = dfi[COL_TIEMPO_NORM]
+                    hover_x = "Mes normalizado: %{x}"
+                    x_title = "Tiempo normalizado, meses"
+                else:
+                    x_values = dfi[COL_FECHA]
+                    hover_x = "Fecha: %{x|%d/%m/%Y}"
+                    x_title = "Fecha"
+
+                #fig_agua.add_trace(
+                #    go.Scatter(
+                #        x=x_values,
+                #        y=dfi[COL_QW].replace(0, np.nan),
+                #        mode="lines+markers",
+                #        name=f"{pozo} | Qw",
+                #        line=dict(width=3),
+                #        marker=dict(size=4),
+                #        connectgaps=False,
+                #        hovertemplate=
+                #            f"<b>Pozo: {pozo}</b><br>" +
+                #            hover_x + "<br>" +
+                #            "Qw: %{y:,.2f} bpd<extra></extra>"
+                #    ),
+                #    secondary_y=False
+                #)
+
+                fig_agua.add_trace(
+                    go.Scatter(
+                        x=x_values,
+                        y=dfi[COL_WC].replace(0, np.nan),
+                        mode="lines+markers",
+                        name=f"{pozo} | % Agua",
+                        line=dict(width=3),
+                        marker=dict(size=4),
+                        connectgaps=False,
+                        hovertemplate=
+                            f"<b>Pozo: {pozo}</b><br>" +
+                            hover_x + "<br>" +
+                            "% Agua: %{y:,.1f}%<extra></extra>"
+                    ),
+                    secondary_y=False
+                )
+
+            fig_agua.update_layout(
+                title="<b>Comparativo de agua producida y corte de agua por pozo</b>",
+                template="plotly_white",
+                hovermode="x unified",
+                height=520,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1,
+                    font=dict(size=14, color="black", family="Arial")
                 ),
-                use_container_width=True
+                margin=dict(l=35, r=35, t=60, b=35),
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                font=dict(family="Tahoma", size=16, color="black")
             )
+
+            fig_agua.update_xaxes(
+                title_text=f"<b>{x_title}</b>",
+                tickformat="%d/%m/%Y" if not normalizar_tiempo else None,
+                showgrid=True,
+                gridcolor="#EAECEE",
+                zeroline=False,
+                tickfont=dict(size=18, color="black"),
+                showline=True,
+                linewidth=0.5,
+                linecolor="black"
+            )
+
+            fig_agua.update_yaxes(
+                title_text="<b>Agua producida, Qw (bpd)</b>",
+                secondary_y=False,
+                showgrid=True,
+                gridcolor="#EAECEE",
+                zeroline=False,
+                separatethousands=True,
+                tickfont=dict(size=18, color="black"),
+                showline=True,
+                linewidth=0.5,
+                linecolor="black"
+            )
+
+            fig_agua.update_yaxes(
+                title_text="<b>Corte de agua (%)</b>",
+                secondary_y=True,
+                range=[0, 100],
+                showgrid=False,
+                zeroline=False,
+                tickfont=dict(size=18, color="black"),
+                showline=True,
+                linewidth=0.5,
+                linecolor="black"
+            )
+
+            st.plotly_chart(fig_agua, use_container_width=True)
+
+            # =========================
+            # 4. COMPARATIVO AGUA DE INYECCIÓN
+            # =========================
+            fig_iny = go.Figure()
+
+            for pozo in pozos_sel_comp:
+
+                dfi = df_comp[
+                    df_comp[COL_POZO].astype(str).str.strip() == str(pozo).strip()
+                ].copy()
+
+                dfi = dfi.sort_values(COL_FECHA).reset_index(drop=True)
+
+                if dfi.empty:
+                    continue
+
+                dfi[COL_TIEMPO_NORM] = range(len(dfi))
+
+                if normalizar_tiempo:
+                    x_values = dfi[COL_TIEMPO_NORM]
+                    hover_x = "Mes normalizado: %{x}"
+                    x_title = "Tiempo normalizado, meses"
+                else:
+                    x_values = dfi[COL_FECHA]
+                    hover_x = "Fecha: %{x|%d/%m/%Y}"
+                    x_title = "Fecha"
+
+                fig_iny.add_trace(
+                    go.Scatter(
+                        x=x_values,
+                        y=dfi[COL_QIN].replace(0, np.nan),
+                        mode="lines+markers",
+                        name=f"{pozo} | Qiny",
+                        line=dict(width=3),
+                        marker=dict(size=4),
+                        connectgaps=False,
+                        hovertemplate=
+                            f"<b>Pozo: {pozo}</b><br>" +
+                            hover_x + "<br>" +
+                            "Qiny: %{y:,.2f} bpd<extra></extra>"
+                    )
+                )
+
+            fig_iny.update_layout(
+                title="<b>Comparativo de agua de inyección por pozo</b>",
+                template="plotly_white",
+                hovermode="x unified",
+                height=520,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1,
+                    font=dict(size=14, color="black", family="Arial")
+                ),
+                margin=dict(l=35, r=35, t=60, b=35),
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                font=dict(family="Tahoma", size=16, color="black")
+            )
+
+            fig_iny.update_xaxes(
+                title_text=f"<b>{x_title}</b>",
+                tickformat="%d/%m/%Y" if not normalizar_tiempo else None,
+                showgrid=True,
+                gridcolor="#EAECEE",
+                zeroline=False,
+                tickfont=dict(size=18, color="black"),
+                showline=True,
+                linewidth=0.5,
+                linecolor="black"
+            )
+
+            fig_iny.update_yaxes(
+                title_text="<b>Agua inyectada, Qiny (bpd)</b>",
+                showgrid=True,
+                gridcolor="#EAECEE",
+                zeroline=False,
+                separatethousands=True,
+                tickfont=dict(size=18, color="black"),
+                showline=True,
+                linewidth=0.5,
+                linecolor="black"
+            )
+
+            st.plotly_chart(fig_iny, use_container_width=True)
 
         else:
             st.warning("No hay datos disponibles para los pozos seleccionados.")
