@@ -18,7 +18,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed"
 )
-#st.cache_data.clear()
+st.cache_data.clear()
 # =========================================================
 # RUTA DE LA BASE DE DATOS
 # Cambia esta ruta si tu archivo .db está en otra carpeta.
@@ -202,10 +202,6 @@ st.markdown("""
 
 def es_movil():
     return st.session_state.get("mobile_view", False)
-
-    st.toggle("Vista móvil", key="mobile_view")
-
-    alto_grafico = 420 if es_movil() else 650
 
 def alta_operacion():
 
@@ -513,6 +509,7 @@ def calcular_columnas_produccion(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     return df.replace([np.inf, -np.inf], 0).fillna(0)
+
 
 #Operacion Campo
 @st.cache_data(show_spinner="Cargando datos de operación...")
@@ -972,7 +969,55 @@ def operacion_campo():
 
     st.plotly_chart(fig3, use_container_width=True)
 
-    
+@st.cache_data(show_spinner="Calculando producción...")
+def load_prod_calc():
+    df_base = load_data()
+    return calcular_columnas_produccion(df_base.copy())
+
+
+@st.cache_data(show_spinner="Preparando acumuladas para mapa...")
+def preparar_acumuladas_mapa():
+
+    prod = load_prod_calc().copy()
+
+    prod["MES_OPERANDO"] = np.where(
+        (prod[COL_QO] > 0) | (prod[COL_QW] > 0) | (prod[COL_QG] > 0),
+        1,
+        0
+    )
+
+    acum = (
+        prod.groupby(COL_POZO, as_index=False)
+        .agg(
+            NP_BLS=(COL_ACEITE_BBL, "sum"),
+            WP_BLS=(COL_AGUA_BBL, "sum"),
+            GP_PC=(COL_GAS_PC, "sum"),
+            WINJ_BLS=(COL_INY_BBL, "sum"),
+            MESES_OPERANDO=("MES_OPERANDO", "sum")
+        )
+    )
+
+    acum["NP_NORM_MB"] = np.where(
+        acum["MESES_OPERANDO"] > 0,
+        (acum["NP_BLS"] / 1000) / acum["MESES_OPERANDO"],
+        0
+    )
+
+    return acum
+
+@st.cache_data(show_spinner=False)
+def load_contorno_asignacion():
+
+    contorno = load_table(TABLA_CONTORNO)
+    asignacion = load_table(TABLA_ASIGNACION)
+
+    contorno = contorno.loc[:, ~contorno.columns.astype(str).str.startswith("Unnamed")]
+    asignacion = asignacion.loc[:, ~asignacion.columns.astype(str).str.startswith("Unnamed")]
+
+    contorno = normalizar_columnas(contorno)
+    asignacion = normalizar_columnas(asignacion)
+
+    return contorno, asignacion
 
 @st.cache_data(show_spinner="Cargando base de datos...")
 def load_data() -> pd.DataFrame:
@@ -1013,7 +1058,6 @@ def load_data() -> pd.DataFrame:
     df = df.sort_values([COL_POZO, COL_FECHA]).reset_index(drop=True)
 
     return df
-
 
 @st.cache_data(show_spinner="Cargando coordenadas...")
 def load_coord() -> pd.DataFrame:
@@ -1161,7 +1205,8 @@ def estadistica():
         unsafe_allow_html=True
     )
 
-    prod = calcular_columnas_produccion(df.copy())
+    prod = load_prod_calc().copy()
+    #prod = calcular_columnas_produccion(df.copy())
     prod = prod.sort_values([COL_YAC, COL_POZO, COL_FECHA]).copy()
 
     prod["MES_CON_PROD"] = np.where(
@@ -1671,6 +1716,97 @@ def load_operativas():
 
     return op
 
+def crear_heatmap_kriging_burbujas(
+        mapa,
+        contorno,
+        x_col,
+        y_col,
+        variable,
+        grid_n=350
+    ):
+
+        try:
+            from pykrige.ok import OrdinaryKriging
+            from matplotlib.path import Path as MplPath
+
+            datos = mapa.copy()
+            contorno = normalizar_columnas(contorno.copy())
+
+            if "ORDEN" in contorno.columns:
+                contorno = contorno.sort_values("ORDEN")
+
+            datos[x_col] = pd.to_numeric(datos[x_col], errors="coerce")
+            datos[y_col] = pd.to_numeric(datos[y_col], errors="coerce")
+            datos[variable] = pd.to_numeric(datos[variable], errors="coerce")
+
+            contorno["X"] = pd.to_numeric(contorno["X"], errors="coerce")
+            contorno["Y"] = pd.to_numeric(contorno["Y"], errors="coerce")
+
+            datos = datos.dropna(subset=[x_col, y_col, variable]).copy()
+            contorno = contorno.dropna(subset=["X", "Y"]).copy()
+
+            datos = datos[datos[variable] > 0].copy()
+
+            if variable in ["NP_BLS", "WP_BLS", "WINJ_BLS"]:
+                datos["VALOR_KRIGING"] = datos[variable] / 1000
+                unidad = "mbl"
+
+            elif variable == "GP_PC":
+                datos["VALOR_KRIGING"] = datos[variable] / 1_000_000
+                unidad = "mmpc"
+
+            else:
+                datos["VALOR_KRIGING"] = datos[variable]
+                unidad = ""
+
+            if len(datos) < 4:
+                st.warning(f"No hay suficientes pozos para interpolar. Pozos con dato: {len(datos)}")
+                return None
+
+            if datos["VALOR_KRIGING"].nunique() < 2:
+                st.warning("La variable tiene muy poca variación; por eso el mapa se ve de un solo color.")
+                return None
+
+            x = datos[x_col].values.astype(float)
+            y = datos[y_col].values.astype(float)
+            z = datos["VALOR_KRIGING"].values.astype(float)
+
+            xi = np.linspace(contorno["X"].min(), contorno["X"].max(), grid_n)
+            yi = np.linspace(contorno["Y"].min(), contorno["Y"].max(), grid_n)
+
+            OK = OrdinaryKriging(
+                x,
+                y,
+                z,
+                variogram_model="spherical",
+                verbose=False,
+                enable_plotting=False,
+                nlags=6,
+                weight=True
+            )
+
+            zi, ss = OK.execute("grid", xi, yi)
+            zi = np.array(zi, dtype=float)
+
+            XI, YI = np.meshgrid(xi, yi)
+
+            poly = MplPath(contorno[["X", "Y"]].values)
+            puntos_grid = np.vstack((XI.ravel(), YI.ravel())).T
+            mask = poly.contains_points(puntos_grid).reshape(XI.shape)
+
+            zi_masked = np.where(mask, zi, np.nan)
+
+            
+            zmin = np.nanpercentile(z, 5)
+            zmax = np.nanpercentile(z, 95)
+
+            #zi_masked = np.clip(zi_masked, zmin, zmax)
+
+            return xi, yi, zi_masked, datos, zmin, zmax, unidad
+
+        except Exception as e:
+            st.warning(f"No se pudo generar el heatmap con Kriging: {e}")
+            return None
 
 def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM", pozos_destacados=None):
     """Mapa de burbujas con opción Todos desde Operativas y mapas por yacimiento sin modificar."""
@@ -1681,33 +1817,10 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     )
 
     coord = df_coord.copy()
-    prod = calcular_columnas_produccion(df_base.copy())
 
-    contorno = load_table(TABLA_CONTORNO)
-    asignacion = load_table(TABLA_ASIGNACION)
+    contorno, asignacion = load_contorno_asignacion()
 
-    prod["MES_OPERANDO"] = np.where(
-        (prod[COL_QO] > 0) | (prod[COL_QW] > 0) | (prod[COL_QG] > 0),
-        1,
-        0
-    )
-
-    acum = (
-        prod.groupby(COL_POZO, as_index=False)
-        .agg(
-            NP_BLS=(COL_ACEITE_BBL, "sum"),
-            WP_BLS=(COL_AGUA_BBL, "sum"),
-            GP_PC=(COL_GAS_PC, "sum"),
-            WINJ_BLS=(COL_INY_BBL, "sum"),
-            MESES_OPERANDO=("MES_OPERANDO", "sum")
-        )
-    )
-
-    acum["NP_NORM_MB"] = np.where(
-        acum["MESES_OPERANDO"] > 0,
-        (acum["NP_BLS"] / 1000) / acum["MESES_OPERANDO"],
-        0
-    )
+    acum = preparar_acumuladas_mapa()
 
     mapa = coord.merge(acum, on=COL_POZO, how="left")
 
@@ -2045,12 +2158,19 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         )
 
     with c6:
+
+        opciones_tipo_mapa = ["Mapa UTM", "Mapa GIS"]
+
+        if not ver_todos_campo:
+            opciones_tipo_mapa.append("Heatmap")
+
         tipo_mapa = st.radio(
             "Tipo de mapa",
-            ["Mapa UTM", "Mapa GIS"],
+            opciones_tipo_mapa,
             horizontal=True,
             key=f"tipo_mapa_burbujas_{modo_mapa}_{yac_mapa}"
         )
+        
 
     # =====================================================
     # KPI CARDS SOLO PARA TODOS
@@ -2316,9 +2436,228 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     # =====================================================
     fig = go.Figure()
 
+    # =====================================================
+    # HEATMAP KRIGING
+    # =====================================================
+    if tipo_mapa == "Heatmap":
+
+        resultado_heatmap = crear_heatmap_kriging_burbujas(
+            mapa=mapa,
+            contorno=contorno,
+            x_col=x_col,
+            y_col=y_col,
+            variable=variable,
+            grid_n=180
+        )
+
+        if resultado_heatmap is None:
+            return
+
+        xi, yi, zi_masked, datos_heat, zmin, zmax, unidad = resultado_heatmap
+        #xi, yi, zi_masked, datos_heat = resultado_heatmap
+
+        nombre_variable = {
+            "NP_BLS": "Aceite acumulado Np",
+            "WP_BLS": "Agua acumulada Wp",
+            "WINJ_BLS": "Agua inyectada acumulada Winj",
+            "GP_PC": "Gas acumulado Gp",
+            "ULTIMO_WC": "% Agua",
+            "NP_NORM_MB": "Np normalizada"
+        }.get(variable, variable)
+
+        fig_heat = go.Figure()
+
+        # Contorno y asignación
+        try:
+            contorno_h = normalizar_columnas(contorno.copy())
+            asignacion_h = normalizar_columnas(asignacion.copy())
+
+            if "ORDEN" in contorno_h.columns:
+                contorno_h = contorno_h.sort_values("ORDEN")
+
+            if "ORDEN" in asignacion_h.columns:
+                asignacion_h = asignacion_h.sort_values("ORDEN")
+
+            contorno_h["X"] = pd.to_numeric(contorno_h["X"], errors="coerce")
+            contorno_h["Y"] = pd.to_numeric(contorno_h["Y"], errors="coerce")
+
+            asignacion_h["X"] = pd.to_numeric(asignacion_h["X"], errors="coerce")
+            asignacion_h["Y"] = pd.to_numeric(asignacion_h["Y"], errors="coerce")
+
+            contorno_h = contorno_h.dropna(subset=["X", "Y"])
+            asignacion_h = asignacion_h.dropna(subset=["X", "Y"])
+
+            contorno_plot = pd.concat(
+                [contorno_h, contorno_h.iloc[[0]]],
+                ignore_index=True
+            )
+
+            asignacion_plot = pd.concat(
+                [asignacion_h, asignacion_h.iloc[[0]]],
+                ignore_index=True
+            )
+
+        except Exception:
+            contorno_plot = pd.DataFrame()
+            asignacion_plot = pd.DataFrame()
+
+        # Heatmap
+        fig_heat.add_trace(
+            go.Contour(
+                x=xi,
+                y=yi,
+                z=zi_masked,
+                zmin=zmin,
+                zmax=zmax,
+                colorscale="Turbo",
+                opacity=0.80,
+                contours=dict(
+                    coloring="heatmap",
+                    showlines=False,
+                    showlabels=False
+                ),
+                line=dict(width=0),
+                colorbar=dict(
+                    title=f"{nombre_variable} {unidad}"
+                ),
+                name=f"Heatmap {nombre_variable}",
+                hovertemplate=
+                    f"<b>{nombre_variable}:</b> " +
+                    "%{z:,.2f} " + unidad +
+                    "<extra></extra>"
+            )
+        )
+        
+
+        # Contorno encima
+        if not contorno_plot.empty:
+            fig_heat.add_trace(go.Scatter(
+                x=contorno_plot["X"],
+                y=contorno_plot["Y"],
+                mode="lines",
+                name="Campo",
+                line=dict(color="black", width=3),
+                hoverinfo="skip"
+            ))
+
+        if not asignacion_plot.empty:
+            fig_heat.add_trace(go.Scatter(
+                x=asignacion_plot["X"],
+                y=asignacion_plot["Y"],
+                mode="lines",
+                name="Asignación",
+                line=dict(color="red", width=3, dash="dash"),
+                hoverinfo="skip"
+            ))
+
+        # Puntos usados para interpolar
+        fig_heat.add_trace(go.Scatter(
+            x=datos_heat[x_col],
+            y=datos_heat[y_col],
+            mode="markers+text",
+            text=datos_heat["POZO"] if mostrar_nombres else None,
+            textposition="top center",
+            textfont=dict(
+                size=10,
+                color="black",
+                family="Arial"
+            ),
+            marker=dict(
+                size=8,
+                color="white",
+                line=dict(color="black", width=1.5)
+            ),
+            name="Pozos usados",
+            customdata=datos_heat[["POZO", COL_YAC, "VALOR_KRIGING"]],
+            #customdata=datos_heat[["POZO", COL_YAC, variable]],
+            hovertemplate=
+                "<b>Pozo:</b> %{customdata[0]}<br>" +
+                "<b>Yacimiento:</b> %{customdata[1]}<br>" +
+                f"<b>{nombre_variable}:</b> " + "%{customdata[2]:,.2f}<br>" +
+                "<extra></extra>"
+        ))
+
+        fig_heat.update_layout(
+            title=f"<b>Heatmap Kriging - {nombre_variable} - {yac_mapa}</b>",
+            template="plotly_white",
+            height=950,
+            margin=dict(l=20, r=20, t=70, b=20),
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            )
+        )
+
+        fig_heat.update_xaxes(
+            title_text="UTM X",
+            showgrid=True,
+            gridcolor="#EAECEE",
+            showline=True,
+            linewidth=1,
+            linecolor="black"
+        )
+
+        fig_heat.update_yaxes(
+            title_text="UTM Y",
+            scaleanchor="x",
+            scaleratio=1,
+            showgrid=True,
+            gridcolor="#EAECEE",
+            showline=True,
+            linewidth=1,
+            linecolor="black"
+        )
+
+        if pozo_zoom != "Todos" and "POZO" in datos_heat.columns:
+
+            row_zoom = datos_heat[datos_heat["POZO"].astype(str) == str(pozo_zoom)]
+
+            if not row_zoom.empty:
+                x0 = row_zoom[x_col].iloc[0]
+                y0 = row_zoom[y_col].iloc[0]
+
+                radio_zoom = 1000
+
+                fig_heat.update_xaxes(range=[x0 - radio_zoom, x0 + radio_zoom])
+                fig_heat.update_yaxes(range=[y0 - radio_zoom, y0 + radio_zoom])
+
+        st.plotly_chart(
+            fig_heat,
+            use_container_width=True,
+            config={
+                "scrollZoom": True,
+                "displaylogo": False,
+                "modeBarButtonsToRemove": ["lasso2d", "select2d"]
+            }
+        )
+
+        return
+
     try:
-        contorno = contorno.sort_values("Orden")
-        asignacion = asignacion.sort_values("Orden")
+        contorno = contorno.copy()
+        asignacion = asignacion.copy()
+
+        contorno = normalizar_columnas(contorno)
+        asignacion = normalizar_columnas(asignacion)
+
+        if "ORDEN" in contorno.columns:
+            contorno = contorno.sort_values("ORDEN")
+
+        if "ORDEN" in asignacion.columns:
+            asignacion = asignacion.sort_values("ORDEN")
+
+        contorno["X"] = pd.to_numeric(contorno["X"], errors="coerce")
+        contorno["Y"] = pd.to_numeric(contorno["Y"], errors="coerce")
+
+        asignacion["X"] = pd.to_numeric(asignacion["X"], errors="coerce")
+        asignacion["Y"] = pd.to_numeric(asignacion["Y"], errors="coerce")
+
+        contorno = contorno.dropna(subset=["X", "Y"])
+        asignacion = asignacion.dropna(subset=["X", "Y"])
 
         contorno_plot = pd.concat(
             [contorno, contorno.iloc[[0]]],
@@ -2348,8 +2687,9 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             hoverinfo="skip"
         ))
 
-    except Exception:
-        pass
+    except Exception as e:
+        st.warning(f"No se pudo graficar contorno/asignación: {e}")
+
 
     if not ver_todos_campo:
 
@@ -2818,7 +3158,8 @@ def analisis_term():
     )
 
     # Calcular Np total para los pozos filtrados en TERM
-    df_prod_kpi = calcular_columnas_produccion(df.copy())
+    df_prod_kpi = load_prod_calc().copy()
+    #df_prod_kpi = calcular_columnas_produccion(df.copy())
 
     poz_term_f = term_f[COL_POZO].dropna().astype(str).unique().tolist()
 
@@ -3287,7 +3628,8 @@ def analisis_term():
     st.markdown("<div class='section-title'>Análisis de producción acumulada por campaña</div>", unsafe_allow_html=True)
 
     # Base de producción con acumuladas calculadas
-    df_prod_term = calcular_columnas_produccion(df.copy())
+    #df_prod_term = calcular_columnas_produccion(df.copy())
+    df_prod_term = prod = load_prod_calc().copy()
 
     # =========================
     # FILTRO DE TIEMPO PARA NP
@@ -4746,7 +5088,108 @@ def produccion_total_campo():
             use_container_width=True,
             config={"displaylogo": False}
         )
-    
+
+            # =====================================================
+        # TABLAS DE DATOS USADOS EN LAS GRÁFICAS
+        # =====================================================
+
+        st.markdown(
+            "<div class='section-title'>Datos usados para las gráficas</div>",
+            unsafe_allow_html=True
+        )
+
+        total_export = total.copy()
+        yac_export = yac.copy()
+
+        total_export["FECHA"] = pd.to_datetime(total_export[COL_FECHA]).dt.strftime("%d/%m/%Y")
+        yac_export["FECHA"] = pd.to_datetime(yac_export[COL_FECHA]).dt.strftime("%d/%m/%Y")
+
+        total_export = total_export.rename(columns={
+            "QO_TOTAL": "Qo total (bpd)",
+            "QW_TOTAL": "Qw total (bpd)",
+            "QG_TOTAL": "Qg total (mpcd)",
+            "POZOS_ACTIVOS": "Pozos activos",
+            "RGA_TOTAL": "RGA (pc/bl)",
+            "WC_TOTAL": "% Agua",
+            "NP_TOTAL": "Np (mbl)",
+            "WP_TOTAL": "Wp (mbl)",
+            "GP_TOTAL": "Gp (mmpc)"
+        })
+
+        yac_export = yac_export.rename(columns={
+            COL_YAC: "Yacimiento",
+            "QO_TOTAL": "Qo total (bpd)",
+            "QW_TOTAL": "Qw total (bpd)",
+            "QG_TOTAL": "Qg total (mpcd)",
+            "POZOS_ACTIVOS": "Pozos activos",
+            "RGA_TOTAL": "RGA (pc/bl)",
+            "WC_TOTAL": "% Agua",
+            "NP_TOTAL": "Np (mbl)",
+            "WP_TOTAL": "Wp (mbl)",
+            "GP_TOTAL": "Gp (mmpc)"
+        })
+
+        cols_total = [
+            "FECHA",
+            "Qo total (bpd)",
+            "Qw total (bpd)",
+            "Qg total (mpcd)",
+            "Pozos activos",
+            "RGA (pc/bl)",
+            "% Agua",
+            "Np (mbl)",
+            "Wp (mbl)",
+            "Gp (mmpc)"
+        ]
+
+        cols_yac = [
+            "FECHA",
+            "Yacimiento",
+            "Qo total (bpd)",
+            "Qw total (bpd)",
+            "Qg total (mpcd)",
+            "Pozos activos",
+            "RGA (pc/bl)",
+            "% Agua",
+            "Np (mbl)",
+            "Wp (mbl)",
+            "Gp (mmpc)"
+        ]
+
+        total_export = total_export[[c for c in cols_total if c in total_export.columns]]
+        yac_export = yac_export[[c for c in cols_yac if c in yac_export.columns]]
+
+        tab1, tab2 = st.tabs(["Total campo", "Por yacimiento"])
+
+        with tab1:
+            st.dataframe(
+                total_export,
+                use_container_width=True,
+                height=420
+            )
+
+            st.download_button(
+                label="Descargar datos total campo CSV",
+                data=total_export.to_csv(index=False).encode("utf-8-sig"),
+                file_name="datos_produccion_total_campo.csv",
+                mime="text/csv"
+            )
+
+        with tab2:
+            st.dataframe(
+                yac_export,
+                use_container_width=True,
+                height=420
+            )
+
+            st.download_button(
+                label="Descargar datos por yacimiento CSV",
+                data=yac_export.to_csv(index=False).encode("utf-8-sig"),
+                file_name="datos_produccion_por_yacimiento.csv",
+                mime="text/csv"
+            )
+
+
 #Análisis RMA
 def analisis_rma():
     st.markdown("<div class='section-title'>Análisis estadístico de reparaciones mayores RMA</div>", unsafe_allow_html=True)
@@ -5630,7 +6073,8 @@ def mapa_presion():
     # =========================
     # BASE TODOS LOS POZOS + ACUMULADAS
     # =========================
-    prod_calc = calcular_columnas_produccion(df.copy())
+    #prod_calc = calcular_columnas_produccion(df.copy())
+    prod_calc = load_prod_calc().copy()
 
     acum_pozos = (
         prod_calc.groupby(COL_POZO, as_index=False)
