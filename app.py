@@ -4895,6 +4895,106 @@ def produccion_total_campo():
         linecolor="black"
     )
 
+                # =====================================================
+    # TABLAS DE DATOS USADOS EN LAS GRÁFICAS
+    # =====================================================
+
+    st.markdown(
+        "<div class='section-title'>Datos usados para las gráficas</div>",
+        unsafe_allow_html=True
+    )
+
+    total_export = total.copy()
+    yac_export = yac.copy()
+
+    total_export["FECHA"] = pd.to_datetime(total_export[COL_FECHA]).dt.strftime("%d/%m/%Y")
+    yac_export["FECHA"] = pd.to_datetime(yac_export[COL_FECHA]).dt.strftime("%d/%m/%Y")
+
+    total_export = total_export.rename(columns={
+        "QO_TOTAL": "Qo total (bpd)",
+        "QW_TOTAL": "Qw total (bpd)",
+        "QG_TOTAL": "Qg total (mpcd)",
+        "POZOS_ACTIVOS": "Pozos activos",
+        "RGA_TOTAL": "RGA (pc/bl)",
+        "WC_TOTAL": "% Agua",
+        "NP_TOTAL": "Np (mbl)",
+        "WP_TOTAL": "Wp (mbl)",
+        "GP_TOTAL": "Gp (mmpc)"
+    })
+
+    yac_export = yac_export.rename(columns={
+        COL_YAC: "Yacimiento",
+        "QO_TOTAL": "Qo total (bpd)",
+        "QW_TOTAL": "Qw total (bpd)",
+        "QG_TOTAL": "Qg total (mpcd)",
+        "POZOS_ACTIVOS": "Pozos activos",
+        "RGA_TOTAL": "RGA (pc/bl)",
+        "WC_TOTAL": "% Agua",
+        "NP_TOTAL": "Np (mbl)",
+        "WP_TOTAL": "Wp (mbl)",
+        "GP_TOTAL": "Gp (mmpc)"
+    })
+
+    cols_total = [
+        "FECHA",
+        "Qo total (bpd)",
+        "Qw total (bpd)",
+        "Qg total (mpcd)",
+        "Pozos activos",
+        "RGA (pc/bl)",
+        "% Agua",
+        "Np (mbl)",
+        "Wp (mbl)",
+        "Gp (mmpc)"
+    ]
+
+    cols_yac = [
+        "FECHA",
+        "Yacimiento",
+        "Qo total (bpd)",
+        "Qw total (bpd)",
+        "Qg total (mpcd)",
+        "Pozos activos",
+        "RGA (pc/bl)",
+        "% Agua",
+        "Np (mbl)",
+        "Wp (mbl)",
+        "Gp (mmpc)"
+    ]
+
+    total_export = total_export[[c for c in cols_total if c in total_export.columns]]
+    yac_export = yac_export[[c for c in cols_yac if c in yac_export.columns]]
+
+    tab1, tab2 = st.tabs(["Total campo", "Por yacimiento"])
+
+    with tab1:
+        st.dataframe(
+            total_export,
+            use_container_width=True,
+            height=420
+        )
+
+        st.download_button(
+            label="Descargar datos total campo CSV",
+            data=total_export.to_csv(index=False).encode("utf-8-sig"),
+            file_name="datos_produccion_total_campo.csv",
+            mime="text/csv"
+        )
+
+    with tab2:
+        st.dataframe(
+            yac_export,
+            use_container_width=True,
+            height=420
+        )
+
+        st.download_button(
+            label="Descargar datos por yacimiento CSV",
+            data=yac_export.to_csv(index=False).encode("utf-8-sig"),
+            file_name="datos_produccion_por_yacimiento.csv",
+            mime="text/csv"
+        )
+
     #st.plotly_chart(fig3, use_container_width=True)
 
     # =====================================================
@@ -5089,105 +5189,7 @@ def produccion_total_campo():
             config={"displaylogo": False}
         )
 
-            # =====================================================
-        # TABLAS DE DATOS USADOS EN LAS GRÁFICAS
-        # =====================================================
 
-        st.markdown(
-            "<div class='section-title'>Datos usados para las gráficas</div>",
-            unsafe_allow_html=True
-        )
-
-        total_export = total.copy()
-        yac_export = yac.copy()
-
-        total_export["FECHA"] = pd.to_datetime(total_export[COL_FECHA]).dt.strftime("%d/%m/%Y")
-        yac_export["FECHA"] = pd.to_datetime(yac_export[COL_FECHA]).dt.strftime("%d/%m/%Y")
-
-        total_export = total_export.rename(columns={
-            "QO_TOTAL": "Qo total (bpd)",
-            "QW_TOTAL": "Qw total (bpd)",
-            "QG_TOTAL": "Qg total (mpcd)",
-            "POZOS_ACTIVOS": "Pozos activos",
-            "RGA_TOTAL": "RGA (pc/bl)",
-            "WC_TOTAL": "% Agua",
-            "NP_TOTAL": "Np (mbl)",
-            "WP_TOTAL": "Wp (mbl)",
-            "GP_TOTAL": "Gp (mmpc)"
-        })
-
-        yac_export = yac_export.rename(columns={
-            COL_YAC: "Yacimiento",
-            "QO_TOTAL": "Qo total (bpd)",
-            "QW_TOTAL": "Qw total (bpd)",
-            "QG_TOTAL": "Qg total (mpcd)",
-            "POZOS_ACTIVOS": "Pozos activos",
-            "RGA_TOTAL": "RGA (pc/bl)",
-            "WC_TOTAL": "% Agua",
-            "NP_TOTAL": "Np (mbl)",
-            "WP_TOTAL": "Wp (mbl)",
-            "GP_TOTAL": "Gp (mmpc)"
-        })
-
-        cols_total = [
-            "FECHA",
-            "Qo total (bpd)",
-            "Qw total (bpd)",
-            "Qg total (mpcd)",
-            "Pozos activos",
-            "RGA (pc/bl)",
-            "% Agua",
-            "Np (mbl)",
-            "Wp (mbl)",
-            "Gp (mmpc)"
-        ]
-
-        cols_yac = [
-            "FECHA",
-            "Yacimiento",
-            "Qo total (bpd)",
-            "Qw total (bpd)",
-            "Qg total (mpcd)",
-            "Pozos activos",
-            "RGA (pc/bl)",
-            "% Agua",
-            "Np (mbl)",
-            "Wp (mbl)",
-            "Gp (mmpc)"
-        ]
-
-        total_export = total_export[[c for c in cols_total if c in total_export.columns]]
-        yac_export = yac_export[[c for c in cols_yac if c in yac_export.columns]]
-
-        tab1, tab2 = st.tabs(["Total campo", "Por yacimiento"])
-
-        with tab1:
-            st.dataframe(
-                total_export,
-                use_container_width=True,
-                height=420
-            )
-
-            st.download_button(
-                label="Descargar datos total campo CSV",
-                data=total_export.to_csv(index=False).encode("utf-8-sig"),
-                file_name="datos_produccion_total_campo.csv",
-                mime="text/csv"
-            )
-
-        with tab2:
-            st.dataframe(
-                yac_export,
-                use_container_width=True,
-                height=420
-            )
-
-            st.download_button(
-                label="Descargar datos por yacimiento CSV",
-                data=yac_export.to_csv(index=False).encode("utf-8-sig"),
-                file_name="datos_produccion_por_yacimiento.csv",
-                mime="text/csv"
-            )
 
 
 #Análisis RMA
