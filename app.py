@@ -9,6 +9,7 @@ import streamlit.components.v1 as components
 from pathlib import Path
 import os
 
+
 # =========================================================
 # CONFIGURACIÓN GENERAL
 # =========================================================
@@ -37,6 +38,7 @@ TABLA_RMA = "RMA"
 TABLA_ESTADO_POZOS = "Estado"
 TABLA_PRESIONES = "Presiones"
 TABLA_OPERACION = "Operacion"
+TABLA_INYECTORES = "Inyectores"
 TABLA_EVENTOS = "Eventos"
 
 #Leer archivo db
@@ -202,6 +204,246 @@ st.markdown("""
 
 def es_movil():
     return st.session_state.get("mobile_view", False)
+
+def cargar_inyectores():
+    df = load_table(TABLA_INYECTORES)
+
+    if df.empty:
+        return df
+
+    df.columns = df.columns.str.strip()
+
+    # Homologar columnas
+    df["Pozo"] = df["Pozo"].astype(str).str.strip()
+    df["TERMINACION"] = df["TERMINACION"].astype(str).str.strip()
+    df["Yacimiento"] = df["Yacimiento"].astype(str).str.strip()
+
+    # Vi en m3 a bls
+    df["Vi"] = pd.to_numeric(df["Vi"], errors="coerce").fillna(0)
+    df["VI_BLS"] = df["Vi"] * 6.28981
+
+    return df
+
+def inyeccion():
+    st.markdown(
+        "<div class='section-title'>Mapa de inyección de agua</div>",
+        unsafe_allow_html=True
+    )
+
+    df_iny = cargar_inyectores()
+    df_coord = load_table(TABLA_COORD)
+    contorno, asignacion = load_contorno_asignacion()
+
+    if df_iny.empty:
+        st.warning("No existe información en la tabla Inyectores.")
+        return
+
+    if df_coord.empty:
+        st.warning("No existe información en la tabla Coord.")
+        return
+
+    df_coord.columns = df_coord.columns.str.strip()
+
+    df_iny["Pozo"] = df_iny["Pozo"].astype(str).str.strip()
+    df_coord["Pozo"] = df_coord["Pozo"].astype(str).str.strip()
+
+    coord_pozo = (
+        df_coord
+        .dropna(subset=["Fondo X UTM", "Fondo Y UTM"])
+        .drop_duplicates(subset=["Pozo"], keep="first")
+        [["Pozo", "Fondo X UTM", "Fondo Y UTM"]]
+    )
+
+    df_mapa = df_iny.merge(
+        coord_pozo,
+        on="Pozo",
+        how="left"
+    )
+
+    df_mapa["Fondo X UTM"] = pd.to_numeric(df_mapa["Fondo X UTM"], errors="coerce")
+    df_mapa["Fondo Y UTM"] = pd.to_numeric(df_mapa["Fondo Y UTM"], errors="coerce")
+    df_mapa["VI_BLS"] = pd.to_numeric(df_mapa["VI_BLS"], errors="coerce").fillna(0)
+
+    df_mapa = df_mapa.dropna(subset=["Fondo X UTM", "Fondo Y UTM"])
+
+    if df_mapa.empty:
+        st.warning("No hay pozos inyectores con coordenadas de fondo disponibles.")
+        return
+
+    c1, c2 = st.columns([1, 1])
+
+    with c1:
+        yacimientos = ["Todos"] + sorted(df_mapa["Yacimiento"].dropna().astype(str).unique())
+        yacimiento_sel = st.selectbox(
+            "Yacimiento",
+            yacimientos,
+            key="yac_inyeccion"
+        )
+
+    with c2:
+        filtro_estado = st.radio(
+            "Filtro de pozos",
+            ["Todos", "Recibidos", "Funcionales", "Operando"],
+            horizontal=True,
+            key="filtro_estado_inyeccion"
+        )
+
+    df_plot = df_mapa.copy()
+
+    if yacimiento_sel != "Todos":
+        df_plot = df_plot[df_plot["Yacimiento"].astype(str) == str(yacimiento_sel)]
+
+    if filtro_estado in ["Recibidos", "Funcionales", "Operando"]:
+        df_plot[filtro_estado] = df_plot[filtro_estado].fillna("").astype(str).str.strip()
+        df_plot = df_plot[df_plot[filtro_estado] != ""]
+
+    if df_plot.empty:
+        st.warning("No hay pozos para mostrar con los filtros seleccionados.")
+        return
+
+    k1, k2, k3 = st.columns(3)
+
+    with k1:
+        kpi_card("Pozos mostrados", f"{df_plot['Pozo'].nunique():,.0f}", "pozos", "#1F77B4")
+
+    with k2:
+        kpi_card("Volumen inyectado mm m³", f"{df_plot['Vi'].sum()/1_000_000:,.2f}", "m³", "#1F77B4")
+
+    with k3:
+        kpi_card("Volumen inyectado mmb", f"{df_plot['VI_BLS'].sum()/1_000_000:,.2f}", "bls", "#1F77B4")
+
+    fig = go.Figure()
+
+    if not contorno.empty:
+        fig.add_trace(go.Scatter(
+            x=contorno["X"],
+            y=contorno["Y"],
+            mode="lines",
+            name="Contorno",
+            line=dict(color="black", width=2)
+        ))
+
+    if not asignacion.empty:
+        if "ASIGNACION" in asignacion.columns:
+            grupos_asig = asignacion.groupby("ASIGNACION")
+        else:
+            grupos_asig = [("Asignación", asignacion)]
+
+        for nombre, grupo in grupos_asig:
+            fig.add_trace(go.Scatter(
+                x=grupo["X"],
+                y=grupo["Y"],
+                mode="lines",
+                name=f"Asignación {nombre}",
+                line=dict(width=2, dash="dot", color="red"),
+                #opacity=1
+            ))
+
+    max_vi = df_plot["VI_BLS"].max()
+
+    if max_vi > 0:
+        size_burbuja = np.where(
+            df_plot["VI_BLS"] > 0,
+            12 + (df_plot["VI_BLS"] / max_vi) * 45,
+            10
+        )
+    else:
+        size_burbuja = 10
+
+    fig.add_trace(go.Scatter(
+        x=df_plot["Fondo X UTM"],
+        y=df_plot["Fondo Y UTM"],
+        mode="markers+text",
+        text=df_plot["Pozo"],
+        textposition="top center",
+        textfont=dict(
+            size=12,
+            color="blue",
+            family="Arial Black"
+        ),
+        marker=dict(
+            size=size_burbuja,
+            sizemode="diameter",
+            color="cyan",
+            opacity=0.35,
+            line=dict(
+                color="black",
+                width=1.5
+            )
+        ),
+        customdata=np.stack([
+            df_plot["TERMINACION"],
+            df_plot["Yacimiento"],
+            df_plot["Vi"],
+            df_plot["VI_BLS"],
+            df_plot["Estado"],
+            df_plot["Estatus"]
+        ], axis=-1),
+        hovertemplate=
+            "<b>%{text}</b><br>" +
+            "Terminación: %{customdata[0]}<br>" +
+            "Yacimiento: %{customdata[1]}<br>" +
+            "Vi: %{customdata[2]:,.0f} m³<br>" +
+            "Vi: %{customdata[3]:,.0f} bls<br>" +
+            "Estado: %{customdata[4]}<br>" +
+            "Estatus: %{customdata[5]}<br>" +
+            "<extra></extra>",
+        name="Agua inyectada"
+    ))
+ 
+
+    fig.update_layout(
+        title="<b>Pozos inyectores</b>",
+        height=750,
+        xaxis_title="Fondo X UTM",
+        yaxis_title="Fondo Y UTM",
+        template="plotly_white",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5
+        ),
+        font=dict(size=13, color="black", family="Arial Black"),
+        margin=dict(l=10, r=10, t=70, b=10)
+    )
+
+    fig.update_yaxes(scaleanchor="x", scaleratio=1)
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={
+            "scrollZoom": True,
+            "displaylogo": False,
+            "responsive": True,
+            "modeBarButtonsToRemove": [
+                "lasso2d",
+                "select2d"
+            ]
+        }
+    )
+
+    st.subheader("Tabla de pozos inyectores mostrados")
+
+    st.dataframe(
+        df_plot[[
+            "Pozo",
+            "TERMINACION",
+            "Yacimiento",
+            "Vi",
+            "VI_BLS",
+            "Estado",
+            "Estatus",
+            "Recibidos",
+            "Funcionales",
+            "Operando",
+            "Fondo X UTM",
+            "Fondo Y UTM"
+        ]].sort_values("VI_BLS", ascending=False),
+        use_container_width=True
+    )
 
 def alta_operacion():
 
@@ -1068,7 +1310,15 @@ def load_coord() -> pd.DataFrame:
     coord = coord.loc[:, ~coord.columns.astype(str).str.startswith("Unnamed")]
     coord = normalizar_columnas(coord)
 
-    for c in ["CIMA X UTM", "CIMA Y UTM", "RADIO DRENE"]:
+    #for c in ["CIMA X UTM", "CIMA Y UTM", "RADIO DRENE"]:
+    #    if c in coord.columns:
+    #        coord[c] = pd.to_numeric(coord[c], errors="coerce")
+
+    for c in [
+        "CIMA X UTM", "CIMA Y UTM",
+        "FONDO X UTM", "FONDO Y UTM",
+        "RADIO DRENE"
+    ]:
         if c in coord.columns:
             coord[c] = pd.to_numeric(coord[c], errors="coerce")
 
@@ -1646,9 +1896,15 @@ def convertir_utm_a_latlon(df_mapa, x_col, y_col):
 
     df_mapa = df_mapa.copy()
 
+    #transformer = Transformer.from_crs(
+    #    "EPSG:32614",   # UTM zona 14N WGS84
+    #    "EPSG:4326",    # Lat/Lon
+    #    always_xy=True
+    #)
+
     transformer = Transformer.from_crs(
-        "EPSG:32614",   # UTM zona 14N WGS84
-        "EPSG:4326",    # Lat/Lon
+        "EPSG:26714",   # NAD27 / UTM zona 14N
+        "EPSG:4326",    # Lat/Lon WGS84
         always_xy=True
     )
 
@@ -1781,7 +2037,7 @@ def crear_heatmap_kriging_burbujas(
                 variogram_model="spherical",
                 verbose=False,
                 enable_plotting=False,
-                nlags=6,
+                nlags=4,
                 weight=True
             )
 
@@ -1800,7 +2056,10 @@ def crear_heatmap_kriging_burbujas(
             zmin = np.nanpercentile(z, 5)
             zmax = np.nanpercentile(z, 95)
 
-            #zi_masked = np.clip(zi_masked, zmin, zmax)
+            #zmin = np.nanmin(z)
+            #zmax = np.nanmax(z)
+
+            zi_masked = np.clip(zi_masked, zmin, zmax)
 
             return xi, yi, zi_masked, datos, zmin, zmax, unidad
 
@@ -2046,13 +2305,43 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             st.error("No existen las columnas SUP X UTM y SUP Y UTM para el mapa Todos.")
             return
 
-    else:
-        x_col = "CIMA X UTM"
-        y_col = "CIMA Y UTM"
+    #else:
+    #    x_col = "CIMA X UTM"
+    #    y_col = "CIMA Y UTM"
+    #
+    #    if x_col not in mapa.columns or y_col not in mapa.columns:
+    #        st.error("No existen las columnas CIMA X UTM y CIMA Y UTM en la tabla Coord.")
+    #        return
+    #
+    #mapa[x_col] = pd.to_numeric(mapa[x_col], errors="coerce")
+    #mapa[y_col] = pd.to_numeric(mapa[y_col], errors="coerce")
+    #mapa = mapa.dropna(subset=[x_col, y_col]).copy()
 
-        if x_col not in mapa.columns or y_col not in mapa.columns:
-            st.error("No existen las columnas CIMA X UTM y CIMA Y UTM en la tabla Coord.")
+    else:
+        cols_req = ["CIMA X UTM", "CIMA Y UTM", "FONDO X UTM", "FONDO Y UTM"]
+        faltan = [c for c in cols_req if c not in mapa.columns]
+
+        if faltan:
+            st.error(f"Faltan columnas de coordenadas en Coord: {faltan}")
+            st.write(mapa.columns.tolist())
             return
+
+        for c in cols_req:
+            mapa[c] = pd.to_numeric(mapa[c], errors="coerce")
+
+        # Coordenada final para graficar:
+        # Usa CIMA si existe; si no existe, usa FONDO.
+        mapa["X_MAPA"] = mapa["CIMA X UTM"].fillna(mapa["FONDO X UTM"])
+        mapa["Y_MAPA"] = mapa["CIMA Y UTM"].fillna(mapa["FONDO Y UTM"])
+
+        mapa["ORIGEN_COORD"] = np.where(
+            mapa["CIMA X UTM"].notna() & mapa["CIMA Y UTM"].notna(),
+            "CIMA",
+            "FONDO"
+        )
+
+        x_col = "X_MAPA"
+        y_col = "Y_MAPA"
 
     mapa[x_col] = pd.to_numeric(mapa[x_col], errors="coerce")
     mapa[y_col] = pd.to_numeric(mapa[y_col], errors="coerce")
@@ -3033,7 +3322,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             "modeBarButtonsToRemove": ["lasso2d", "select2d"]
         }
     )
-
+####Termina Mapa Burbujas
 
 try:
     df = load_data()
@@ -6225,7 +6514,7 @@ def mapa_presion():
                 variogram_model="spherical",
                 verbose=False,
                 enable_plotting=False,
-                nlags=4,
+                nlags=2,
                 weight=True,
             )
 
@@ -6359,12 +6648,12 @@ def mapa_presion():
         text=pres_mapa["POZO"],
         textposition="bottom center",
         textfont=dict(
-            size=12,
+            size=8,
             color="black",
             family="Arial Black"
         ),
         marker=dict(
-            size=14,
+            size=9,
             color=pres_mapa["PRESION_MAPA"],
             colorscale="Turbo",
             showscale=False,
@@ -6537,7 +6826,8 @@ vista = st.radio(
         "Operación Campo",
         "Producción Campo",
         "Presiones",
-        "Estadística"
+        "Estadística",
+        "Inyección"
     ],
     horizontal=True,
     key="vista_principal"
@@ -7621,5 +7911,7 @@ elif vista == "Operación Campo":
     operacion_campo()
 elif vista == "Estadística":
     estadistica()
+elif vista == "Inyección":
+    inyeccion()
 
 #st.caption("Desarrollado en Python + Streamlit.")
