@@ -9,7 +9,6 @@ import streamlit.components.v1 as components
 from pathlib import Path
 import os
 
-
 # =========================================================
 # CONFIGURACIÓN GENERAL
 # =========================================================
@@ -62,6 +61,7 @@ def load_table(tabla):
 # Terminacion, Fecha, Yacimiento, Conta, Dias, Aceite, Gas, Agua, Iny
 # =========================================================
 COL_POZO = "TERMINACION"
+COL_POZO_FISICO = "POZO"
 COL_FECHA = "FECHA"
 COL_YAC = "YACIMIENTO"
 COL_CONTA = "CONTA"
@@ -98,6 +98,10 @@ COL_TIEMPO_NORM = "Tiempo normalizado"
 REQUIRED_COLS = [
     COL_POZO, COL_FECHA, COL_YAC, COL_CONTA,
     COL_DIAS, COL_ACEITE, COL_GAS, COL_AGUA, COL_INY
+]
+
+OPTIONAL_COLS = [
+    COL_POZO_FISICO
 ]
 
 # Factores de conversión
@@ -270,7 +274,7 @@ def inyeccion():
         st.warning("No hay pozos inyectores con coordenadas de fondo disponibles.")
         return
 
-    c1, c2 = st.columns([1, 1])
+    c1, c2, c_zoom = st.columns([1.2, 1.8, 1.2])
 
     with c1:
         yacimientos = ["Todos"] + sorted(df_mapa["Yacimiento"].dropna().astype(str).unique())
@@ -301,16 +305,49 @@ def inyeccion():
         st.warning("No hay pozos para mostrar con los filtros seleccionados.")
         return
 
-    k1, k2, k3 = st.columns(3)
+    with c_zoom:
+        pozos_zoom_iny = sorted(df_plot["Pozo"].dropna().astype(str).unique())
+        pozo_zoom_iny = st.selectbox(
+            "Zoom a pozo",
+            options=["Todos"] + pozos_zoom_iny,
+            key=f"zoom_pozo_inyeccion_{yacimiento_sel}_{filtro_estado}"
+        )
 
-    with k1:
-        kpi_card("Pozos mostrados", f"{df_plot['Pozo'].nunique():,.0f}", "pozos", "#1F77B4")
+    c3, c4 = st.columns([1, 3])
 
-    with k2:
-        kpi_card("Volumen inyectado mm m³", f"{df_plot['Vi'].sum()/1_000_000:,.2f}", "m³", "#1F77B4")
+    with c3:
+        mostrar_nombres_iny = st.checkbox(
+            "Mostrar nombres de pozos",
+            value=True,
+            key=f"mostrar_nombres_inyeccion_{yacimiento_sel}_{filtro_estado}"
+        )
 
-    with k3:
-        kpi_card("Volumen inyectado mmb", f"{df_plot['VI_BLS'].sum()/1_000_000:,.2f}", "bls", "#1F77B4")
+    with c4:
+        c4_pozos, c4_m3, c4_bls = st.columns(3)
+
+        with c4_pozos:
+            st.caption("Pozos mostrados")
+            st.markdown(
+                f"<b style='color:#4B5563'>{df_plot['Pozo'].nunique():,.0f}</b> "
+                "<span style='color:#6B7280'>pozos</span>",
+                unsafe_allow_html=True
+            )
+
+        with c4_m3:
+            st.caption("Volumen inyectado")
+            st.markdown(
+                f"<b style='color:#4B5563'>{df_plot['Vi'].sum()/1_000_000:,.2f}</b> "
+                "<span style='color:#6B7280'>millones de m3</span>",
+                unsafe_allow_html=True
+            )
+
+        with c4_bls:
+            st.caption("Volumen inyectado")
+            st.markdown(
+                f"<b style='color:#4B5563'>{df_plot['VI_BLS'].sum()/1_000_000:,.2f}</b> "
+                "<span style='color:#6B7280'>mmb</span>",
+                unsafe_allow_html=True
+            )
 
     fig = go.Figure()
 
@@ -353,25 +390,26 @@ def inyeccion():
     fig.add_trace(go.Scatter(
         x=df_plot["Fondo X UTM"],
         y=df_plot["Fondo Y UTM"],
-        mode="markers+text",
-        text=df_plot["Pozo"],
+        mode="markers+text" if mostrar_nombres_iny else "markers",
+        text=df_plot["Pozo"] if mostrar_nombres_iny else None,
         textposition="top center",
         textfont=dict(
             size=12,
-            color="blue",
+            color="#1E88E5",
             family="Arial Black"
         ),
         marker=dict(
             size=size_burbuja,
             sizemode="diameter",
-            color="cyan",
+            color="#00ACC1",
             opacity=0.35,
             line=dict(
-                color="black",
+                color="#1E88E5",
                 width=1.5
             )
         ),
         customdata=np.stack([
+            df_plot["Pozo"],
             df_plot["TERMINACION"],
             df_plot["Yacimiento"],
             df_plot["Vi"],
@@ -380,36 +418,92 @@ def inyeccion():
             df_plot["Estatus"]
         ], axis=-1),
         hovertemplate=
-            "<b>%{text}</b><br>" +
-            "Terminación: %{customdata[0]}<br>" +
-            "Yacimiento: %{customdata[1]}<br>" +
-            "Vi: %{customdata[2]:,.0f} m³<br>" +
-            "Vi: %{customdata[3]:,.0f} bls<br>" +
-            "Estado: %{customdata[4]}<br>" +
-            "Estatus: %{customdata[5]}<br>" +
+            "<b>%{customdata[0]}</b><br>" +
+            "Terminación: %{customdata[1]}<br>" +
+            "Yacimiento: %{customdata[2]}<br>" +
+            "Vi: %{customdata[3]:,.0f} m³<br>" +
+            "Vi: %{customdata[4]:,.0f} bls<br>" +
+            "Estado: %{customdata[5]}<br>" +
+            "Estatus: %{customdata[6]}<br>" +
             "<extra></extra>",
         name="Agua inyectada"
     ))
+
+    if pozo_zoom_iny != "Todos":
+        row_zoom_iny = df_plot[df_plot["Pozo"].astype(str) == str(pozo_zoom_iny)]
+
+        if not row_zoom_iny.empty:
+            x0 = row_zoom_iny["Fondo X UTM"].iloc[0]
+            y0 = row_zoom_iny["Fondo Y UTM"].iloc[0]
+            radio_zoom = 1000
+
+            fig.update_xaxes(range=[x0 - radio_zoom, x0 + radio_zoom])
+            fig.update_yaxes(range=[y0 - radio_zoom, y0 + radio_zoom])
+
+            fig.add_trace(go.Scatter(
+                x=[x0],
+                y=[y0],
+                mode="markers+text",
+                text=[str(pozo_zoom_iny)],
+                textposition="top center",
+                textfont=dict(
+                    size=16,
+                    color="#D35400",
+                    family="Arial Black"
+                ),
+                marker=dict(
+                    size=22,
+                    symbol="star",
+                    color="#FFD700",
+                    line=dict(color="black", width=2)
+                ),
+                name=f"Pozo: {pozo_zoom_iny}",
+                hovertemplate=
+                    "<b>Pozo:</b> %{text}<br>" +
+                    "<extra></extra>",
+                showlegend=True
+            ))
  
 
     fig.update_layout(
-        title="<b>Pozos inyectores</b>",
-        height=750,
-        xaxis_title="Fondo X UTM",
-        yaxis_title="Fondo Y UTM",
+        title=(
+            "<b>Mapa de inyección - Campo completo</b>"
+            if yacimiento_sel == "Todos"
+            else f"<b>Mapa de inyección - {yacimiento_sel}</b>"
+        ),
+        height=850,
+        xaxis_title="UTM X",
+        yaxis_title="UTM Y",
         template="plotly_white",
+        showlegend=True,
         legend=dict(
             orientation="h",
             yanchor="bottom",
             y=1.02,
-            xanchor="center",
-            x=0.5
+            xanchor="right",
+            x=1,
+            groupclick="togglegroup"
         ),
-        font=dict(size=13, color="black", family="Arial Black"),
-        margin=dict(l=10, r=10, t=70, b=10)
+        margin=dict(l=20, r=20, t=70, b=20)
     )
 
-    fig.update_yaxes(scaleanchor="x", scaleratio=1)
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black"
+    )
+
+    fig.update_yaxes(
+        scaleanchor="x",
+        scaleratio=1,
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black"
+    )
 
     st.plotly_chart(
         fig,
@@ -425,7 +519,11 @@ def inyeccion():
         }
     )
 
-    st.subheader("Tabla de pozos inyectores mostrados")
+    st.markdown(
+        "<div class='section-title'>Pozos inyectores mostrados en el mapa</div>",
+        unsafe_allow_html=True
+    )
+    st.caption(f"Total de pozos en la tabla: {df_plot['Pozo'].nunique():,.0f}")
 
     st.dataframe(
         df_plot[[
@@ -442,7 +540,9 @@ def inyeccion():
             "Fondo X UTM",
             "Fondo Y UTM"
         ]].sort_values("VI_BLS", ascending=False),
-        use_container_width=True
+        use_container_width=True,
+        hide_index=True,
+        height=360
     )
 
 def alta_operacion():
@@ -751,6 +851,208 @@ def calcular_columnas_produccion(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     return df.replace([np.inf, -np.inf], 0).fillna(0)
+
+
+def agregar_pozo_fisico(df_base: pd.DataFrame, coord_base: pd.DataFrame) -> pd.DataFrame:
+    """Agrega el nombre del pozo fisico, usando Produccion.POZO y Coord como respaldo."""
+    df_out = df_base.copy()
+
+    if COL_POZO_FISICO in df_out.columns:
+        df_out["POZO_FISICO"] = df_out[COL_POZO_FISICO].astype(str).str.strip()
+        sin_pozo = df_out["POZO_FISICO"].isna() | df_out["POZO_FISICO"].str.upper().isin(["", "NAN", "NONE"])
+        df_out.loc[sin_pozo, "POZO_FISICO"] = df_out.loc[sin_pozo, COL_POZO].astype(str).str.strip()
+    else:
+        df_out["POZO_FISICO"] = df_out[COL_POZO].astype(str).str.strip()
+
+    if coord_base.empty or COL_POZO not in coord_base.columns or COL_POZO_FISICO not in coord_base.columns:
+        return df_out
+
+    coord_pozo = (
+        coord_base[[COL_POZO, COL_POZO_FISICO]]
+        .dropna(subset=[COL_POZO])
+        .copy()
+    )
+    coord_pozo[COL_POZO] = coord_pozo[COL_POZO].astype(str).str.strip()
+    coord_pozo[COL_POZO_FISICO] = coord_pozo[COL_POZO_FISICO].astype(str).str.strip()
+    coord_pozo = coord_pozo.drop_duplicates(subset=[COL_POZO])
+
+    df_out = df_out.merge(
+        coord_pozo,
+        on=COL_POZO,
+        how="left",
+        suffixes=("", "_COORD")
+    )
+
+    col_coord = f"{COL_POZO_FISICO}_COORD" if COL_POZO_FISICO in df_base.columns else COL_POZO_FISICO
+    if col_coord in df_out.columns:
+        sin_pozo = df_out["POZO_FISICO"].isna() | df_out["POZO_FISICO"].astype(str).str.upper().isin(["", "NAN", "NONE"])
+        df_out.loc[sin_pozo, "POZO_FISICO"] = df_out.loc[sin_pozo, col_coord]
+        df_out = df_out.drop(columns=[col_coord])
+
+    df_out["POZO_FISICO"] = df_out["POZO_FISICO"].fillna(df_out[COL_POZO]).astype(str).str.strip()
+
+    return df_out
+
+
+def preparar_historia_pozo_fisico(df_pozo_raw: pd.DataFrame):
+    """Agrupa todas las terminaciones de un pozo fisico y calcula su historia total."""
+    df_base = df_pozo_raw.copy().sort_values(COL_FECHA)
+
+    if df_base.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    pozo_fisico = (
+        df_base["POZO_FISICO"].iloc[0]
+        if "POZO_FISICO" in df_base.columns
+        else df_base[COL_POZO].iloc[0]
+    )
+
+    df_base["VOL_PROD_YAC"] = (
+        df_base[COL_ACEITE].fillna(0) +
+        df_base[COL_AGUA].fillna(0) +
+        df_base[COL_GAS].fillna(0)
+    )
+    df_base["VOL_INY_YAC"] = df_base[COL_INY].fillna(0)
+
+    eventos_prod = (
+        df_base[df_base["VOL_PROD_YAC"] > 0]
+        .groupby(COL_YAC, as_index=False)
+        .agg(
+            FECHA_INICIO=(COL_FECHA, "min"),
+            TERMINACIONES=(COL_POZO, lambda s: ", ".join(sorted(s.dropna().astype(str).unique())))
+        )
+    )
+    eventos_prod["TIPO_EVENTO"] = "Producción"
+
+    eventos_iny = (
+        df_base[df_base["VOL_INY_YAC"] > 0]
+        .groupby(COL_YAC, as_index=False)
+        .agg(
+            FECHA_INICIO=(COL_FECHA, "min"),
+            TERMINACIONES=(COL_POZO, lambda s: ", ".join(sorted(s.dropna().astype(str).unique())))
+        )
+    )
+    eventos_iny["TIPO_EVENTO"] = "Inyección"
+
+    eventos_yac = (
+        pd.concat([eventos_prod, eventos_iny], ignore_index=True)
+        .sort_values(["FECHA_INICIO", "TIPO_EVENTO", COL_YAC])
+        .reset_index(drop=True)
+    )
+
+    df_calc = calcular_columnas_produccion(df_base)
+
+    def unir_unicos(serie):
+        vals = [v for v in serie.dropna().astype(str).str.strip().unique() if v and v.upper() != "NAN"]
+        return ", ".join(sorted(vals))
+
+    df_hist = (
+        df_calc
+        .groupby(COL_FECHA, as_index=False)
+        .agg(
+            **{
+                COL_DIAS: (COL_DIAS, "sum"),
+                COL_ACEITE_BBL: (COL_ACEITE_BBL, "sum"),
+                COL_AGUA_BBL: (COL_AGUA_BBL, "sum"),
+                COL_GAS_PC: (COL_GAS_PC, "sum"),
+                COL_INY_BBL: (COL_INY_BBL, "sum"),
+                COL_QO: (COL_QO, "sum"),
+                COL_QW: (COL_QW, "sum"),
+                COL_QIN: (COL_QIN, "sum"),
+                COL_QG_PCD: (COL_QG_PCD, "sum"),
+                COL_QG: (COL_QG, "sum"),
+                COL_YAC: (COL_YAC, unir_unicos),
+                COL_POZO: (COL_POZO, unir_unicos),
+                COL_CONTA: (COL_CONTA, unir_unicos),
+            }
+        )
+        .sort_values(COL_FECHA)
+    )
+
+    fechas_completas = pd.DataFrame({
+        COL_FECHA: pd.date_range(
+            start=df_hist[COL_FECHA].min(),
+            end=df_hist[COL_FECHA].max(),
+            freq="MS"
+        )
+    })
+    df_hist = fechas_completas.merge(df_hist, on=COL_FECHA, how="left")
+
+    for col in [
+        COL_DIAS, COL_ACEITE_BBL, COL_AGUA_BBL, COL_GAS_PC, COL_INY_BBL,
+        COL_QO, COL_QW, COL_QIN, COL_QG_PCD, COL_QG
+    ]:
+        df_hist[col] = df_hist[col].fillna(0)
+
+    for col in [COL_YAC, COL_POZO, COL_CONTA]:
+        df_hist[col] = df_hist[col].fillna("")
+
+    df_hist[COL_NP] = df_hist[COL_ACEITE_BBL].cumsum() / 1000.0
+    df_hist[COL_WP] = df_hist[COL_AGUA_BBL].cumsum() / 1000.0
+    df_hist[COL_GP] = df_hist[COL_GAS_PC].cumsum() / 1_000_000.0
+    df_hist[COL_WINJ] = df_hist[COL_INY_BBL].cumsum() / 1000.0
+    df_hist[COL_RGA] = np.where(df_hist[COL_QO] > 0, df_hist[COL_QG_PCD] / df_hist[COL_QO], 0)
+    df_hist[COL_WC] = np.where(
+        (df_hist[COL_QO] + df_hist[COL_QW]) > 0,
+        (df_hist[COL_QW] / (df_hist[COL_QO] + df_hist[COL_QW])) * 100,
+        0
+    )
+    df_hist[COL_FECHA_FILTRO] = df_hist[COL_FECHA]
+    df_hist["POZO_FISICO"] = pozo_fisico
+
+    return df_hist.replace([np.inf, -np.inf], 0).fillna(0), eventos_yac
+
+
+def preparar_inyeccion_por_yacimiento(df_pozo_raw: pd.DataFrame) -> pd.DataFrame:
+    """Calcula Qiny y Winj por yacimiento para el pozo/terminacion seleccionado."""
+    if df_pozo_raw.empty:
+        return pd.DataFrame()
+
+    df_base = df_pozo_raw.copy().sort_values([COL_YAC, COL_FECHA])
+    df_base[COL_INY] = pd.to_numeric(df_base[COL_INY], errors="coerce").fillna(0)
+    df_base[COL_DIAS] = pd.to_numeric(df_base[COL_DIAS], errors="coerce").fillna(0)
+    df_iny = df_base[df_base[COL_INY] > 0].copy()
+
+    if df_iny.empty:
+        return pd.DataFrame()
+
+    df_iny[COL_INY_BBL] = df_iny[COL_INY] * M3_A_BBL
+    dias_validos = df_iny[COL_DIAS].replace(0, np.nan)
+    df_iny[COL_QIN] = (df_iny[COL_INY_BBL] / dias_validos).replace([np.inf, -np.inf], np.nan).fillna(0)
+
+    df_iny_yac = (
+        df_iny
+        .groupby([COL_YAC, COL_FECHA], as_index=False)
+        .agg(
+            **{
+                COL_INY_BBL: (COL_INY_BBL, "sum"),
+                COL_QIN: (COL_QIN, "sum")
+            }
+        )
+        .sort_values([COL_YAC, COL_FECHA])
+    )
+    df_iny_yac[COL_WINJ] = df_iny_yac.groupby(COL_YAC)[COL_INY_BBL].cumsum() / 1000.0
+
+    fechas_completas = pd.DataFrame({
+        COL_FECHA: pd.date_range(
+            start=df_base[COL_FECHA].min(),
+            end=df_base[COL_FECHA].max(),
+            freq="MS"
+        )
+    })
+
+    salida = []
+    for yac, datos_yac in df_iny_yac.groupby(COL_YAC):
+        datos_yac = datos_yac.sort_values(COL_FECHA).copy()
+        completo_yac = fechas_completas.merge(datos_yac, on=COL_FECHA, how="left")
+        completo_yac[COL_YAC] = yac
+        completo_yac[COL_INY_BBL] = completo_yac[COL_INY_BBL].fillna(0)
+        completo_yac[COL_WINJ] = completo_yac[COL_INY_BBL].cumsum() / 1000.0
+        completo_yac.loc[completo_yac[COL_WINJ] <= 0, COL_WINJ] = np.nan
+        completo_yac.loc[completo_yac[COL_INY_BBL] <= 0, COL_QIN] = np.nan
+        salida.append(completo_yac)
+
+    return pd.concat(salida, ignore_index=True)
 
 
 #Operacion Campo
@@ -1280,10 +1582,13 @@ def load_data() -> pd.DataFrame:
             f"{missing}. La tabla debe tener: Terminacion, Fecha, Yacimiento, Conta, Dias, Aceite, Gas, Agua."
         )
 
-    df = df[REQUIRED_COLS].copy()
+    cols_carga = REQUIRED_COLS + [c for c in OPTIONAL_COLS if c in df.columns]
+    df = df[cols_carga].copy()
 
     # Limpieza básica
     df[COL_POZO] = df[COL_POZO].astype(str).str.strip()
+    if COL_POZO_FISICO in df.columns:
+        df[COL_POZO_FISICO] = df[COL_POZO_FISICO].astype(str).str.strip()
     df[COL_YAC] = df[COL_YAC].astype(str).str.strip()
     df[COL_CONTA] = df[COL_CONTA].astype(str).str.strip()
 
@@ -2347,6 +2652,64 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     mapa[y_col] = pd.to_numeric(mapa[y_col], errors="coerce")
     mapa = mapa.dropna(subset=[x_col, y_col]).copy()
 
+    def preparar_inyectores_operando_burbujas():
+        iny = cargar_inyectores()
+
+        if iny.empty or "Operando" not in iny.columns:
+            return pd.DataFrame()
+
+        iny = iny.copy()
+        iny["Operando"] = iny["Operando"].fillna("").astype(str).str.strip()
+        iny = iny[iny["Operando"] != ""].copy()
+
+        if iny.empty:
+            return pd.DataFrame()
+
+        if not ver_todos_campo:
+            iny = iny[
+                iny["Yacimiento"].astype(str).str.upper() == str(yac_mapa).upper()
+            ].copy()
+
+        if iny.empty:
+            return pd.DataFrame()
+
+        coord_iny = coord.copy()
+        coord_iny = coord_iny.loc[
+            :,
+            ~coord_iny.columns.astype(str).str.startswith("Unnamed")
+        ]
+        coord_iny = normalizar_columnas(coord_iny)
+
+        cols_coord_iny = ["TERMINACION", "POZO", "CIMA X UTM", "CIMA Y UTM"]
+
+        if any(c not in coord_iny.columns for c in cols_coord_iny) or "TERMINACION" not in iny.columns:
+            return pd.DataFrame()
+
+        iny["TERMINACION"] = iny["TERMINACION"].astype(str).str.strip()
+        coord_iny["TERMINACION"] = coord_iny["TERMINACION"].astype(str).str.strip()
+        coord_iny["POZO"] = coord_iny["POZO"].astype(str).str.strip()
+        coord_iny = coord_iny[cols_coord_iny].drop_duplicates(subset=["TERMINACION"]).copy()
+
+        coord_iny[x_col] = pd.to_numeric(coord_iny["CIMA X UTM"], errors="coerce")
+        coord_iny[y_col] = pd.to_numeric(coord_iny["CIMA Y UTM"], errors="coerce")
+
+        iny["POZO"] = iny["Pozo"].astype(str).str.strip()
+        iny[COL_YAC] = iny["Yacimiento"]
+
+        iny_mapa = iny.merge(
+            coord_iny[["TERMINACION", "POZO", x_col, y_col]],
+            on="TERMINACION",
+            how="left"
+        )
+        iny_mapa["POZO"] = iny_mapa["POZO_y"].fillna(iny_mapa["POZO_x"])
+        iny_mapa = iny_mapa.drop(columns=[c for c in ["POZO_x", "POZO_y"] if c in iny_mapa.columns])
+        iny_mapa[x_col] = pd.to_numeric(iny_mapa[x_col], errors="coerce")
+        iny_mapa[y_col] = pd.to_numeric(iny_mapa[y_col], errors="coerce")
+
+        return iny_mapa.dropna(subset=[x_col, y_col]).copy()
+
+    inyectores_operando_mapa = preparar_inyectores_operando_burbujas()
+
     with c2:
 
         if ver_todos_campo:
@@ -2445,21 +2808,76 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             value=True,
             key=f"mostrar_nombres_mapa_{modo_mapa}_{yac_mapa}"
         )
+        solo_pozos_con_acum = st.checkbox(
+            "Solo pozos con aceite o inyeccion",
+            value=False,
+            key=f"solo_pozos_con_acum_mapa_{modo_mapa}_{yac_mapa}"
+        )
+        mostrar_etiquetas_burbujas = st.checkbox(
+            "Mostrar valores de burbujas",
+            value=False,
+            disabled=ver_todos_campo,
+            key=f"mostrar_valores_burbujas_{modo_mapa}_{yac_mapa}"
+        )
+
+    if solo_pozos_con_acum and {"NP_BLS", "WINJ_BLS"}.issubset(mapa.columns):
+        mapa = mapa[
+            (pd.to_numeric(mapa["NP_BLS"], errors="coerce").fillna(0) > 0) |
+            (pd.to_numeric(mapa["WINJ_BLS"], errors="coerce").fillna(0) > 0)
+        ].copy()
+    elif solo_pozos_con_acum:
+        st.warning("No se encontraron columnas NP_BLS y WINJ_BLS para aplicar el filtro de acumuladas.")
+
+    if "NP_BLS" in mapa.columns:
+        pozos_np_mapa = mapa.loc[
+            pd.to_numeric(mapa["NP_BLS"], errors="coerce").fillna(0) > 0,
+            "POZO"
+        ].dropna().astype(str).nunique()
+    else:
+        pozos_np_mapa = 0
+
+    if "WINJ_BLS" in mapa.columns:
+        pozos_iny_mapa = mapa.loc[
+            pd.to_numeric(mapa["WINJ_BLS"], errors="coerce").fillna(0) > 0,
+            "POZO"
+        ].dropna().astype(str).nunique()
+    else:
+        pozos_iny_mapa = 0
 
     with c6:
+        c6_tipo, c6_np, c6_iny = st.columns([2.4, 1, 1])
 
-        opciones_tipo_mapa = ["Mapa UTM", "Mapa GIS"]
+        with c6_tipo:
+            opciones_tipo_mapa = (
+                ["Mapa GIS"]
+                if ver_todos_campo
+                else ["Mapa Burbujas", "Mapa GIS"]
+            )
 
-        if not ver_todos_campo:
-            opciones_tipo_mapa.append("Heatmap")
+            tipo_mapa = st.radio(
+                "Tipo de mapa",
+                opciones_tipo_mapa,
+                horizontal=True,
+                key=f"tipo_mapa_burbujas_{modo_mapa}_{yac_mapa}"
+            )
 
-        tipo_mapa = st.radio(
-            "Tipo de mapa",
-            opciones_tipo_mapa,
-            horizontal=True,
-            key=f"tipo_mapa_burbujas_{modo_mapa}_{yac_mapa}"
-        )
+        with c6_np:
+            st.caption("Productores")
+            st.markdown(
+                f"<b style='color:green'>{pozos_np_mapa:,.0f}</b> pozos",
+                unsafe_allow_html=True
+            )
+
+        with c6_iny:
+            st.caption("Inyectores")
+            st.markdown(
+                f"<b style='color:blue'>{pozos_iny_mapa:,.0f}</b> pozos",
+                unsafe_allow_html=True
+            )
         
+    if mapa.empty:
+        st.warning("No hay pozos para mostrar con los filtros seleccionados.")
+        return
 
     # =====================================================
     # KPI CARDS SOLO PARA TODOS
@@ -2531,6 +2949,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     # =====================================================
     # TAMAÑO Y ETIQUETAS DE BURBUJAS
     # =====================================================
+    mapa_uirevision = f"{modo_mapa}|{yac_mapa}|{tipo_mapa}|{variable}|{pozo_zoom}"
     color_burbuja = color_variable.get(variable, "green")
 
     if not ver_todos_campo:
@@ -2543,6 +2962,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         max_val = mapa[variable].max()
 
         if max_val > 0:
+
             mapa["SIZE"] = 18 + (mapa[variable] / max_val) * 80
         else:
             mapa["SIZE"] = 18
@@ -2559,6 +2979,52 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     else:
         mapa["SIZE"] = 8
         mapa["ETIQUETA_MAPA"] = ""
+
+    def mostrar_tabla_pozos_mapa(datos_mapa: pd.DataFrame):
+        if datos_mapa.empty:
+            st.info("No hay pozos para mostrar en la tabla con los filtros actuales.")
+            return
+
+        columnas_preferidas = [
+            "POZO",
+            COL_YAC,
+            "YACIMIENTO",
+            "ESTADO",
+            "SAP",
+            "NP_BLS",
+            "WP_BLS",
+            "WINJ_BLS",
+            "GP_PC",
+            "ULTIMO_WC",
+            "NP_NORM_MB",
+            "MESES_OPERANDO",
+            "RADIO DRENE",
+            "ORIGEN_COORD",
+            x_col,
+            y_col
+        ]
+
+        columnas_tabla = []
+        for col in columnas_preferidas:
+            if col in datos_mapa.columns and col not in columnas_tabla:
+                columnas_tabla.append(col)
+
+        tabla = datos_mapa[columnas_tabla].copy()
+
+        if "POZO" in tabla.columns:
+            tabla = tabla.sort_values("POZO")
+
+        st.markdown(
+            "<div class='section-title'>Pozos mostrados en el mapa</div>",
+            unsafe_allow_html=True
+        )
+        st.caption(f"Total de pozos en la tabla: {tabla['POZO'].nunique():,.0f}" if "POZO" in tabla.columns else "")
+        st.dataframe(
+            tabla,
+            use_container_width=True,
+            hide_index=True,
+            height=360
+        )
 
     # =====================================================
     # MAPA GIS
@@ -2682,6 +3148,67 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     )
                 )
 
+        if not inyectores_operando_mapa.empty:
+            iny_gis = convertir_utm_a_latlon(inyectores_operando_mapa, x_col, y_col)
+
+            fig_gis.add_trace(go.Scattermapbox(
+                lat=iny_gis["LAT"],
+                lon=iny_gis["LON"],
+                mode="markers",
+                marker=dict(
+                    size=18,
+                    color="#0057FF",
+                    opacity=0.95
+                ),
+                name="Inyectores operando",
+                customdata=iny_gis[["POZO", COL_YAC, "Operando", "VI_BLS"]],
+                hovertemplate=
+                    "<b>Inyector operando:</b> %{customdata[0]}<br>" +
+                    "<b>Yacimiento:</b> %{customdata[1]}<br>" +
+                    "<b>Operando:</b> %{customdata[2]}<br>" +
+                    "<b>Vi:</b> %{customdata[3]:,.0f} bls<br>" +
+                    "<extra></extra>",
+                showlegend=True
+            ))
+
+        centro_gis = dict(
+            lat=mapa_gis["LAT"].mean(),
+            lon=mapa_gis["LON"].mean()
+        )
+        zoom_gis = 12
+
+        if pozo_zoom != "Todos" and "POZO" in mapa_gis.columns:
+            row_zoom_gis = mapa_gis[mapa_gis["POZO"].astype(str) == str(pozo_zoom)]
+
+            if not row_zoom_gis.empty:
+                lat0 = row_zoom_gis["LAT"].iloc[0]
+                lon0 = row_zoom_gis["LON"].iloc[0]
+                centro_gis = dict(lat=lat0, lon=lon0)
+                zoom_gis = 15
+
+                fig_gis.add_trace(go.Scattermapbox(
+                    lat=[lat0],
+                    lon=[lon0],
+                    mode="markers+text",
+                    text=[str(pozo_zoom)],
+                    textposition="top center",
+                    textfont=dict(
+                        size=16,
+                        color="#D35400",
+                        family="Arial Black"
+                    ),
+                    marker=dict(
+                        size=18,
+                        symbol="star",
+                        color="#FFD700"
+                    ),
+                    name=f"Pozo: {pozo_zoom}",
+                    hovertemplate=
+                        "<b>Pozo:</b> %{text}<br>" +
+                        "<extra></extra>",
+                    showlegend=True
+                ))
+
         fig_gis.update_layout(
             title=(
                 "<b>Mapa GIS operativo - Campo completo</b>"
@@ -2690,13 +3217,11 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             ),
             mapbox=dict(
                 style="open-street-map",
-                center=dict(
-                    lat=mapa_gis["LAT"].mean(),
-                    lon=mapa_gis["LON"].mean()
-                ),
-                zoom=12
+                center=centro_gis,
+                zoom=zoom_gis
             ),
             height=850,
+            uirevision=mapa_uirevision,
             margin=dict(l=0, r=0, t=60, b=0),
             showlegend=True,
             legend=dict(
@@ -2717,6 +3242,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 "displaylogo": False
             }
         )
+
+        mostrar_tabla_pozos_mapa(mapa)
 
         return
 
@@ -2870,6 +3397,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             title=f"<b>Heatmap Kriging - {nombre_variable} - {yac_mapa}</b>",
             template="plotly_white",
             height=950,
+            uirevision=mapa_uirevision,
             margin=dict(l=20, r=20, t=70, b=20),
             showlegend=True,
             legend=dict(
@@ -2923,6 +3451,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 "modeBarButtonsToRemove": ["lasso2d", "select2d"]
             }
         )
+
+        mostrar_tabla_pozos_mapa(mapa)
 
         return
 
@@ -2982,7 +3512,9 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
     if not ver_todos_campo:
 
-        theta = np.linspace(0, 2 * np.pi, 180)
+        theta = np.linspace(0, 2 * np.pi, 90)
+        radios_x = []
+        radios_y = []
 
         for _, row in mapa.iterrows():
 
@@ -2996,19 +3528,20 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 x0 = row[x_col]
                 y0 = row[y_col]
 
-                fig.add_trace(go.Scatter(
-                    x=x0 + radio * np.cos(theta),
-                    y=y0 + radio * np.sin(theta),
-                    mode="lines",
-                    line=dict(width=2, color="black", dash="dash"),
-                    name="Radio de drene (m)",
-                    legendgroup="radios",
-                    showlegend=False,
-                    hovertemplate=
-                        "<b>Pozo:</b> " + str(row.get("POZO", "")) + "<br>" +
-                        "<b>Radio drene:</b> " + f"{radio:,.0f} m" +
-                        "<extra></extra>",
-                ))
+                radios_x.extend((x0 + radio * np.cos(theta)).tolist() + [None])
+                radios_y.extend((y0 + radio * np.sin(theta)).tolist() + [None])
+
+        if radios_x:
+            fig.add_trace(go.Scatter(
+                x=radios_x,
+                y=radios_y,
+                mode="lines",
+                line=dict(width=2, color="black", dash="dash"),
+                name="Radio de drene (m)",
+                legendgroup="radios",
+                showlegend=False,
+                hoverinfo="skip"
+            ))
 
     if not ver_todos_campo:
 
@@ -3019,8 +3552,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             fig.add_trace(go.Scatter(
                 x=mapa_burb[x_col],
                 y=mapa_burb[y_col],
-                mode="markers+text",
-                text=mapa_burb["ETIQUETA_MAPA"],
+                mode="markers+text" if mostrar_etiquetas_burbujas else "markers",
+                text=mapa_burb["ETIQUETA_MAPA"] if mostrar_etiquetas_burbujas else None,
                 textposition="top center",
                 textfont=dict(
                     size=15,
@@ -3071,8 +3604,12 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 fig.add_trace(go.Scatter(
                     x=mapa_iny[x_col],
                     y=mapa_iny[y_col],
-                    mode="markers+text",
-                    text=mapa_iny["WINJ_BLS"].map(lambda x: f"{x/1000:,.1f}"),
+                    mode="markers+text" if mostrar_etiquetas_burbujas else "markers",
+                    text=(
+                        mapa_iny["WINJ_BLS"].map(lambda x: f"{x/1000:,.1f}")
+                        if mostrar_etiquetas_burbujas
+                        else None
+                    ),
                     textposition="bottom center",
                     textfont=dict(
                         size=15,
@@ -3103,6 +3640,29 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     legendgroup="iny",
                     showlegend=True
                 ))
+
+    if not inyectores_operando_mapa.empty:
+        fig.add_trace(go.Scatter(
+            x=inyectores_operando_mapa[x_col],
+            y=inyectores_operando_mapa[y_col],
+            mode="markers",
+            marker=dict(
+                size=22,
+                symbol="circle-open",
+                color="#0057FF",
+                line=dict(color="#0057FF", width=4)
+            ),
+            name="Inyectores operando",
+            customdata=inyectores_operando_mapa[["POZO", COL_YAC, "Operando", "VI_BLS"]],
+            hovertemplate=
+                "<b>Inyector operando:</b> %{customdata[0]}<br>" +
+                "<b>Yacimiento:</b> %{customdata[1]}<br>" +
+                "<b>Operando:</b> %{customdata[2]}<br>" +
+                "<b>Vi:</b> %{customdata[3]:,.0f} bls<br>" +
+                "<extra></extra>",
+            legendgroup="inyectores_operando",
+            showlegend=True
+        ))
 
     # =====================================================
     # PUNTOS POR ESTADO / SAP
@@ -3268,6 +3828,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         ),
         template="plotly_white",
         height=950,
+        uirevision=mapa_uirevision,
         margin=dict(l=20, r=20, t=70, b=20),
         showlegend=True,
         legend=dict(
@@ -3313,6 +3874,30 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             fig.update_xaxes(range=[x0 - radio_zoom, x0 + radio_zoom])
             fig.update_yaxes(range=[y0 - radio_zoom, y0 + radio_zoom])
 
+            fig.add_trace(go.Scatter(
+                x=[x0],
+                y=[y0],
+                mode="markers+text",
+                text=[str(pozo_zoom)],
+                textposition="top center",
+                textfont=dict(
+                    size=16,
+                    color="#D35400",
+                    family="Arial Black"
+                ),
+                marker=dict(
+                    size=18,
+                    symbol="star",
+                    color="#FFD700",
+                    line=dict(color="black", width=2)
+                ),
+                name=f"Pozo: {pozo_zoom}",
+                hovertemplate=
+                    "<b>Pozo:</b> %{text}<br>" +
+                    "<extra></extra>",
+                showlegend=True
+            ))
+
     st.plotly_chart(
         fig,
         use_container_width=True,
@@ -3322,6 +3907,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             "modeBarButtonsToRemove": ["lasso2d", "select2d"]
         }
     )
+
+    mostrar_tabla_pozos_mapa(mapa)
 ####Termina Mapa Burbujas
 
 try:
@@ -4766,6 +5353,7 @@ def preparar_resumen_campo(df_base: pd.DataFrame):
         .agg(
             QO_TOTAL=(COL_QO, "sum"),
             QW_TOTAL=(COL_QW, "sum"),
+            QIN_TOTAL=(COL_QIN, "sum"),
             QG_TOTAL=(COL_QG, "sum"),
             QG_PCD_TOTAL=(COL_QG_PCD, "sum"),
             ACEITE_BBL=(COL_ACEITE_BBL, "sum"),
@@ -4800,6 +5388,7 @@ def preparar_resumen_campo(df_base: pd.DataFrame):
         .agg(
             QO_TOTAL=(COL_QO, "sum"),
             QW_TOTAL=(COL_QW, "sum"),
+            QIN_TOTAL=(COL_QIN, "sum"),
             QG_TOTAL=(COL_QG, "sum"),
             QG_PCD_TOTAL=(COL_QG_PCD, "sum"),
             ACEITE_BBL=(COL_ACEITE_BBL, "sum"),
@@ -4869,6 +5458,7 @@ def produccion_total_campo():
         .agg(
             QO_TOTAL=("QO_TOTAL", "sum"),
             QW_TOTAL=("QW_TOTAL", "sum"),
+            QIN_TOTAL=("QIN_TOTAL", "sum"),
             QG_TOTAL=("QG_TOTAL", "sum"),
             QG_PCD_TOTAL=("QG_PCD_TOTAL", "sum"),
             ACEITE_BBL=("ACEITE_BBL", "sum"),
@@ -4952,6 +5542,9 @@ def produccion_total_campo():
     with k9:
         kpi_card("Acumulada Gas", f"{last_campo['GP_TOTAL']/1000:,.2f}", "mmmpc", "#1F77B4")
 
+    fecha_min_graficas = total[COL_FECHA].min()
+    fecha_max_graficas = total[COL_FECHA].max()
+
     # =========================
     # GRÁFICO 1: Qo, Qw, Qg y pozos activos
     # =========================
@@ -5020,7 +5613,8 @@ def produccion_total_campo():
         gridcolor="#EAECEE",
         showline=True,
         linewidth=1,
-        linecolor="black"
+        linecolor="black",
+        range=[fecha_min_graficas, fecha_max_graficas]
     )
 
     fig1.update_yaxes(
@@ -5092,7 +5686,8 @@ def produccion_total_campo():
         gridcolor="#EAECEE",
         showline=True,
         linewidth=1,
-        linecolor="black"
+        linecolor="black",
+        range=[fecha_min_graficas, fecha_max_graficas]
     )
 
     fig2.update_yaxes(
@@ -5116,6 +5711,65 @@ def produccion_total_campo():
     # =========================
     # GRÁFICO 3: Acumuladas Np, Wp, Gp
     # =========================
+    fig_iny = go.Figure()
+
+    fig_iny.add_trace(go.Scatter(
+        x=total[COL_FECHA],
+        y=total["QIN_TOTAL"],
+        mode="lines",
+        name="Qiny total",
+        line=dict(color="#00ACC1", width=3),
+        fill="tozeroy",
+        fillcolor="rgba(0, 172, 193, 0.25)",
+        hovertemplate=
+            "<b>Fecha:</b> %{x|%d/%m/%Y}<br>" +
+            "<b>Qiny:</b> %{y:,.1f} bpd<br>" +
+            "<extra></extra>"
+    ))
+
+    fig_iny.update_layout(
+        title="<b>Agua de inyeccion</b>",
+        template="plotly_white",
+        height=520,
+        hovermode="x unified",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.05,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=13, color="black", family="Arial Black")
+        ),
+        hoverlabel=dict(
+            bgcolor="white",
+            font_size=13,
+            font_family="Arial"
+        ),
+        font=dict(size=14, color="black", family="Arial Black"),
+        plot_bgcolor="white",
+        paper_bgcolor="white"
+    )
+
+    fig_iny.update_xaxes(
+        title_text="Fecha",
+        tickformat="%d/%m/%Y",
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black",
+        range=[fecha_min_graficas, fecha_max_graficas]
+    )
+
+    fig_iny.update_yaxes(
+        title_text="Qiny (bpd)",
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black"
+    )
+
     fig3 = go.Figure()
 
     fig3.add_trace(go.Scatter(
@@ -5172,7 +5826,8 @@ def produccion_total_campo():
         gridcolor="#EAECEE",
         showline=True,
         linewidth=1,
-        linecolor="black"
+        linecolor="black",
+        range=[fecha_min_graficas, fecha_max_graficas]
     )
 
     fig3.update_yaxes(
@@ -5184,15 +5839,6 @@ def produccion_total_campo():
         linecolor="black"
     )
 
-                # =====================================================
-    # TABLAS DE DATOS USADOS EN LAS GRÁFICAS
-    # =====================================================
-
-    st.markdown(
-        "<div class='section-title'>Datos usados para las gráficas</div>",
-        unsafe_allow_html=True
-    )
-
     total_export = total.copy()
     yac_export = yac.copy()
 
@@ -5202,6 +5848,7 @@ def produccion_total_campo():
     total_export = total_export.rename(columns={
         "QO_TOTAL": "Qo total (bpd)",
         "QW_TOTAL": "Qw total (bpd)",
+        "QIN_TOTAL": "Qiny total (bpd)",
         "QG_TOTAL": "Qg total (mpcd)",
         "POZOS_ACTIVOS": "Pozos activos",
         "RGA_TOTAL": "RGA (pc/bl)",
@@ -5215,6 +5862,7 @@ def produccion_total_campo():
         COL_YAC: "Yacimiento",
         "QO_TOTAL": "Qo total (bpd)",
         "QW_TOTAL": "Qw total (bpd)",
+        "QIN_TOTAL": "Qiny total (bpd)",
         "QG_TOTAL": "Qg total (mpcd)",
         "POZOS_ACTIVOS": "Pozos activos",
         "RGA_TOTAL": "RGA (pc/bl)",
@@ -5228,6 +5876,7 @@ def produccion_total_campo():
         "FECHA",
         "Qo total (bpd)",
         "Qw total (bpd)",
+        "Qiny total (bpd)",
         "Qg total (mpcd)",
         "Pozos activos",
         "RGA (pc/bl)",
@@ -5242,6 +5891,7 @@ def produccion_total_campo():
         "Yacimiento",
         "Qo total (bpd)",
         "Qw total (bpd)",
+        "Qiny total (bpd)",
         "Qg total (mpcd)",
         "Pozos activos",
         "RGA (pc/bl)",
@@ -5253,36 +5903,6 @@ def produccion_total_campo():
 
     total_export = total_export[[c for c in cols_total if c in total_export.columns]]
     yac_export = yac_export[[c for c in cols_yac if c in yac_export.columns]]
-
-    tab1, tab2 = st.tabs(["Total campo", "Por yacimiento"])
-
-    with tab1:
-        st.dataframe(
-            total_export,
-            use_container_width=True,
-            height=420
-        )
-
-        st.download_button(
-            label="Descargar datos total campo CSV",
-            data=total_export.to_csv(index=False).encode("utf-8-sig"),
-            file_name="datos_produccion_total_campo.csv",
-            mime="text/csv"
-        )
-
-    with tab2:
-        st.dataframe(
-            yac_export,
-            use_container_width=True,
-            height=420
-        )
-
-        st.download_button(
-            label="Descargar datos por yacimiento CSV",
-            data=yac_export.to_csv(index=False).encode("utf-8-sig"),
-            file_name="datos_produccion_por_yacimiento.csv",
-            mime="text/csv"
-        )
 
     #st.plotly_chart(fig3, use_container_width=True)
 
@@ -5302,6 +5922,12 @@ def produccion_total_campo():
 
         st.plotly_chart(
             fig2,
+            use_container_width=True,
+            config={"displaylogo": False}
+        )
+
+        st.plotly_chart(
+            fig_iny,
             use_container_width=True,
             config={"displaylogo": False}
         )
@@ -5480,6 +6106,44 @@ def produccion_total_campo():
 
 
 
+
+    # =====================================================
+    # TABLAS DE DATOS USADOS EN LAS GRAFICAS
+    # =====================================================
+    st.markdown(
+        "<div class='section-title'>Datos usados para las graficas</div>",
+        unsafe_allow_html=True
+    )
+
+    tab1, tab2 = st.tabs(["Total campo", "Por yacimiento"])
+
+    with tab1:
+        st.dataframe(
+            total_export,
+            use_container_width=True,
+            height=420
+        )
+
+        st.download_button(
+            label="Descargar datos total campo CSV",
+            data=total_export.to_csv(index=False).encode("utf-8-sig"),
+            file_name="datos_produccion_total_campo.csv",
+            mime="text/csv"
+        )
+
+    with tab2:
+        st.dataframe(
+            yac_export,
+            use_container_width=True,
+            height=420
+        )
+
+        st.download_button(
+            label="Descargar datos por yacimiento CSV",
+            data=yac_export.to_csv(index=False).encode("utf-8-sig"),
+            file_name="datos_produccion_por_yacimiento.csv",
+            mime="text/csv"
+        )
 
 #Análisis RMA
 def analisis_rma():
@@ -6840,7 +7504,10 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
 
     st.markdown("<div class='filter-box'>", unsafe_allow_html=True)
 
-    f1, f2 = st.columns([1.7, 2.3])
+    if vista == "Producción por pozo":
+        f1, f_modo, f2 = st.columns([1.4, 1.5, 2.1])
+    else:
+        f1, f2 = st.columns([1.7, 2.3])
 
     with f1:
         yacs = sorted(df[COL_YAC].dropna().astype(str).unique())
@@ -6851,28 +7518,56 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
             key="prod_yac_sel"
         )
 
+    if vista == "Producción por pozo":
+        with f_modo:
+            modo_vista_pozo = st.radio(
+                "Tipo de historia",
+                ["Por terminación", "Historia completa por pozo"],
+                horizontal=False,
+                key="prod_modo_historia_pozo"
+            )
+    else:
+        modo_vista_pozo = "Por terminación"
+
+    df_prod_pozo_fisico = agregar_pozo_fisico(df, df_coord)
     df_base_filtro = (
-        df[df[COL_YAC].astype(str).isin(yac_sel)].copy()
-        if yac_sel else df.copy()
+        df_prod_pozo_fisico[df_prod_pozo_fisico[COL_YAC].astype(str).isin(yac_sel)].copy()
+        if yac_sel else df_prod_pozo_fisico.copy()
     )
 
     with f2:
-        pozos = sorted(df_base_filtro[COL_POZO].dropna().astype(str).unique())
+        col_selector_pozo = (
+            "POZO_FISICO"
+            if vista == "Producción por pozo" and modo_vista_pozo == "Historia completa por pozo"
+            else COL_POZO
+        )
+        etiqueta_selector_pozo = (
+            "Pozo"
+            if col_selector_pozo == "POZO_FISICO"
+            else "Pozo / Terminación"
+        )
+
+        pozos = sorted(df_base_filtro[col_selector_pozo].dropna().astype(str).unique())
 
         if not pozos:
             st.warning("No hay pozos para el yacimiento seleccionado.")
             st.stop()
 
         pozo_sel = st.selectbox(
-            "Pozo / Terminación",
+            etiqueta_selector_pozo,
             pozos,
             key="prod_pozo_sel"
         )
 
     # Base real del pozo seleccionado.
-    df_pozo_raw = df[
-        df[COL_POZO].astype(str) == str(pozo_sel)
-    ].copy()
+    if vista == "Producción por pozo" and modo_vista_pozo == "Historia completa por pozo":
+        df_pozo_raw = df_prod_pozo_fisico[
+            df_prod_pozo_fisico["POZO_FISICO"].astype(str) == str(pozo_sel)
+        ].copy()
+    else:
+        df_pozo_raw = df[
+            df[COL_POZO].astype(str) == str(pozo_sel)
+        ].copy()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -6882,8 +7577,13 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
 # =========================================================
 if vista in ["Producción por pozo", "Comparativa por pozo"]:
 
-    df_pozo_completo = completar_fechas_pozo(df_pozo_raw)
-    dfp_full = calcular_columnas_produccion(df_pozo_completo)
+    eventos_yac_historia = pd.DataFrame()
+
+    if vista == "Producción por pozo" and modo_vista_pozo == "Historia completa por pozo":
+        dfp_full, eventos_yac_historia = preparar_historia_pozo_fisico(df_pozo_raw)
+    else:
+        df_pozo_completo = completar_fechas_pozo(df_pozo_raw)
+        dfp_full = calcular_columnas_produccion(df_pozo_completo)
 
     # Ya no se filtra por rango de fechas.
     # Se usa toda la historia disponible del pozo.
@@ -6913,9 +7613,37 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
 # =========================================================
 if vista == "Producción por pozo":
 
+    yacs_prod_txt = first_row.get(COL_YAC, "")
+    yacs_iny_txt = "-"
+    if modo_vista_pozo == "Historia completa por pozo":
+        df_yacs_info = df_pozo_raw.copy()
+        for col in [COL_ACEITE, COL_AGUA, COL_GAS, COL_INY]:
+            df_yacs_info[col] = pd.to_numeric(df_yacs_info[col], errors="coerce").fillna(0)
+
+        yacs_prod = [
+            y for y in df_yacs_info.loc[
+                (df_yacs_info[COL_ACEITE] > 0) |
+                (df_yacs_info[COL_AGUA] > 0) |
+                (df_yacs_info[COL_GAS] > 0),
+                COL_YAC
+            ].dropna().astype(str).str.strip().unique()
+            if y and y.upper() not in ["NAN", "NONE"]
+        ]
+        yacs_iny = [
+            y for y in df_yacs_info.loc[
+                df_yacs_info[COL_INY] > 0,
+                COL_YAC
+            ].dropna().astype(str).str.strip().unique()
+            if y and y.upper() not in ["NAN", "NONE"]
+        ]
+
+        yacs_prod_txt = ", ".join(sorted(set(yacs_prod))) if yacs_prod else "-"
+        yacs_iny_txt = ", ".join(sorted(set(yacs_iny))) if yacs_iny else "-"
+
     st.markdown(
         f"<span class='small-note'>Pozo seleccionado: <b>{pozo_sel}</b> | "
-        f"Yacimiento: <b>{first_row.get(COL_YAC, '')}</b> | ",
+        f"Producción: <b>{yacs_prod_txt}</b> | "
+        f"Inyeccción: <b>{yacs_iny_txt}</b> | ",
         #f"Conta: <b>{first_row.get(COL_CONTA, '')}</b> | "
         #f"Registros reales cargados: <b>{len(dfp)}</b></span>",
         unsafe_allow_html=True
@@ -7076,7 +7804,7 @@ if vista == "Producción por pozo":
         )
 
 # =========================================================
-# FUNCIÓN PARA GRÁFICAS COMPARATIVAS
+# Comparativa FUNCIÓN PARA GRÁFICAS COMPARATIVAS
 # =========================================================
 def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False, normalizar_tiempo=False):
 
@@ -7125,11 +7853,14 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
             go.Scatter(
                 x=x_values,
                 y=y_values,
-                mode="lines+markers",
+                mode="lines",
                 name=str(pozo),
-                line=dict(width=2.5),
-                marker=dict(size=4),
-                connectgaps=False,
+                line=dict(width=2.8),
+                marker=dict(
+                    size=1,
+                    line=dict(color="white", width=0.8)
+                ),
+                                connectgaps=False,
                 hovertemplate=
                     "<b>Pozo: %{fullData.name}</b><br>" +
                     hover_x + "<br>" +
@@ -7165,22 +7896,33 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
         )
 
     fig.update_layout(
-        title=dict(text=title, font=dict(size=18, family="Arial", color="#17202A")),
+        title=dict(
+            text=f"<b>{title}</b>",
+            x=0.02,
+            xanchor="left",
+            font=dict(size=20, family="Arial Black", color="#111827")
+        ),
         template="plotly_white",
         hovermode="x unified",
-        height=520,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,  font=dict(
-        size=14,
-        color="black",
-        family="Arial"
-        )),
-        margin=dict(l=35, r=35, t=60, b=35),
-        plot_bgcolor="white",
+        height=450,
+        plot_bgcolor="#F8F8FF",
         paper_bgcolor="white",
-        font=dict(
-            family="Tahoma",
-            size=16,
-            color="black"
+        font=dict(family="Arial", size=13, color="#111827"),
+        margin=dict(l=70, r=40, t=90, b=70),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(
+                size=14,
+                family="Arial",
+                color="#111827"
+            ),
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="#D1D5DB",
+            borderwidth=1
         )
     )
 
@@ -7188,27 +7930,48 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
         title_text=f"<b>{x_label}</b>",
         tickformat="%d/%m/%Y" if not normalizar_tiempo else None,
         showgrid=True,
-        gridcolor="#EAECEE",
+        gridcolor="#E5E7EB",
+        gridwidth=0.7,
         zeroline=False,
-        tickfont=dict(size=18, color="black"),
         showline=True,
-        linewidth=0.5,
-        linecolor="black"
+        linewidth=1.2,
+        linecolor="#111827",
+        mirror=True,
+        ticks="outside",
+        tickfont=dict(size=18, color="#111827"),
+        title=dict(
+        text=f"<b>{x_label}</b>",
+        font=dict(
+            size=18,
+            color="#374151"
+        )
+    ),
+        rangeslider=dict(visible=False)
     )
 
     fig.update_yaxes(
         title_text=f"<b>{y_title}</b>",
         type="log" if semilog else "linear",
         tickvals=[0.1, 1, 10, 100, 1000, 10000, 100000] if semilog else None,
-        ticktext=["0.1", "1", "10", "100", "1000","10000","100000"] if semilog else None,
+        ticktext=["0.1", "1", "10", "100", "1,000", "10,000", "100,000"] if semilog else None,
         showgrid=True,
-        gridcolor="#EAECEE",
+        gridcolor="#E5E7EB",
+        gridwidth=0.7,
         zeroline=False,
         separatethousands=True,
-        tickfont=dict(size=18, color="black"),
         showline=True,
-        linewidth=0.5,
-        linecolor="black"
+        linewidth=1.2,
+        linecolor="#111827",
+        mirror=True,
+        ticks="outside",
+        tickfont=dict(size=18, color="#111827"),
+        title=dict(
+            text=f"<b>{y_title}</b>",
+            font=dict(
+                size=18,
+                color="#374151"
+            )
+        ),
     )
 
     return fig
@@ -7220,6 +7983,64 @@ if vista == "Producción por pozo":
 
     fig1 = make_subplots(specs=[[{"secondary_y": True}]])
     dfp["QB"] = dfp[COL_QO] + dfp[COL_QW]
+
+    def marcar_inicios_yacimiento(fig):
+        if eventos_yac_historia.empty:
+            return
+
+        colores_yac = [
+            "#7E57C2",
+            "#F39C12",
+            "#16A085",
+            "#C0392B",
+            "#2E86C1",
+            "#6D4C41"
+        ]
+        yacs_eventos = list(eventos_yac_historia[COL_YAC].astype(str).drop_duplicates())
+        color_por_yac = {
+            yac: colores_yac[i % len(colores_yac)]
+            for i, yac in enumerate(yacs_eventos)
+        }
+        eventos_ordenados = eventos_yac_historia.copy()
+        eventos_ordenados["FECHA_ETIQUETA"] = pd.to_datetime(
+            eventos_ordenados["FECHA_INICIO"]
+        ).dt.normalize()
+        eventos_ordenados = eventos_ordenados.sort_values(
+            ["FECHA_ETIQUETA", "TIPO_EVENTO", COL_YAC]
+        )
+        niveles_por_fecha = {}
+
+        for i, (_, evento) in enumerate(eventos_ordenados.iterrows()):
+            yac_txt = str(evento[COL_YAC])
+            tipo_evento = str(evento.get("TIPO_EVENTO", "Producción"))
+            fecha_inicio = evento["FECHA_INICIO"]
+            fecha_etiqueta = evento["FECHA_ETIQUETA"]
+            color = color_por_yac.get(yac_txt, colores_yac[i % len(colores_yac)])
+            es_inyeccion = tipo_evento == "Inyección"
+            texto_evento = "Iny" if es_inyeccion else "Prod"
+            nivel_fecha = niveles_por_fecha.get(fecha_etiqueta, 0)
+            niveles_por_fecha[fecha_etiqueta] = nivel_fecha + 1
+            y_etiqueta = -0.11 - (nivel_fecha * 0.09)
+
+            fig.add_vline(
+                x=fecha_inicio,
+                line_width=2,
+                line_dash="dot" if es_inyeccion else "dash",
+                line_color=color
+            )
+            fig.add_annotation(
+                x=fecha_inicio,
+                y=y_etiqueta,
+                xref="x",
+                yref="paper",
+                text=f"{texto_evento} {yac_txt}",
+                showarrow=False,
+                font=dict(size=12, color=color, family="Arial Black"),
+                bgcolor="rgba(255,255,255,0.85)",
+                bordercolor=color,
+                borderwidth=1,
+                yanchor="top"
+            )
 
     fig1.add_trace(
         go.Scatter(
@@ -7303,7 +8124,7 @@ if vista == "Producción por pozo":
         color="black",
         family="Arial Black"
         )),
-        margin=dict(l=35, r=35, t=60, b=35)
+        margin=dict(l=35, r=35, t=60, b=150)
     )
 
     fig1.update_xaxes(title_text="<b>Fecha</b>", title_font=dict(size=22), 
@@ -7341,9 +8162,20 @@ if vista == "Producción por pozo":
         zerolinecolor="black",
         linecolor='black')
 
+    marcar_inicios_yacimiento(fig1)
+
     st.plotly_chart(fig1, use_container_width=True)
 
     fig2 = make_subplots(specs=[[{"secondary_y": True}]])
+    df_iny_yac = preparar_inyeccion_por_yacimiento(df_pozo_raw)
+    colores_iny_yac = [
+        "#00ACC1",
+        "#8E44AD",
+        "#F39C12",
+        "#16A085",
+        "#D35400",
+        "#2E86C1"
+    ]
 
     fig2.add_trace(
         go.Scatter(
@@ -7352,21 +8184,6 @@ if vista == "Producción por pozo":
             mode="lines+markers",
             name="Qw (bpd)",
             line=dict(width=2, color="#3498DB"),
-            marker=dict(size=3),
-            fill="tozeroy",
-            fillcolor="rgba(52,152,219,0.20)",
-            connectgaps=False
-        ),
-        secondary_y=False
-    )
-
-    fig2.add_trace(
-        go.Scatter(
-            x=dfp[COL_FECHA],
-            y=dfp[COL_QIN],
-            mode="lines+markers",
-            name="Qiny (bpd)",
-            line=dict(width=2, color="cyan"),
             marker=dict(size=3),
             fill="tozeroy",
             fillcolor="rgba(52,152,219,0.20)",
@@ -7389,7 +8206,7 @@ if vista == "Producción por pozo":
     )
 
     fig2.update_layout(
-        title="Agua y acumulada de agua",
+        title="Agua producida y acumulada de agua",
         template="plotly_white",
         hovermode="x unified",
         height=520,
@@ -7398,7 +8215,7 @@ if vista == "Producción por pozo":
         color="black",
         family="Arial Black"
         )),
-        margin=dict(l=35, r=35, t=60, b=35)
+        margin=dict(l=35, r=35, t=60, b=150)
     )
 
     fig2.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y", title_font=dict(size=22), tickfont=dict(
@@ -7437,7 +8254,136 @@ if vista == "Producción por pozo":
         zerolinecolor="black",
         linecolor='black')
 
+    marcar_inicios_yacimiento(fig2)
+
     st.plotly_chart(fig2, use_container_width=True)
+
+    fig_iny = make_subplots(specs=[[{"secondary_y": True}]])
+
+    fig_iny.add_trace(
+        go.Scatter(
+            x=dfp[COL_FECHA],
+            y=dfp[COL_QIN],
+            mode="lines+markers",
+            name="Qiny total (bpd)",
+            line=dict(width=3, color="cyan"),
+            marker=dict(size=3),
+            fill="tozeroy",
+            fillcolor="rgba(0,172,193,0.18)",
+            connectgaps=False
+        ),
+        secondary_y=False
+    )
+
+    for i, yac in enumerate(sorted(df_iny_yac[COL_YAC].dropna().astype(str).unique())):
+        dfi_yac = df_iny_yac[df_iny_yac[COL_YAC].astype(str) == yac].copy()
+        color_yac = colores_iny_yac[i % len(colores_iny_yac)]
+
+        fig_iny.add_trace(
+            go.Scatter(
+                x=dfi_yac[COL_FECHA],
+                y=dfi_yac[COL_QIN],
+                mode="lines+markers",
+                name=f"Qiny {yac} (bpd)",
+                line=dict(width=2, color=color_yac, dash="dash"),
+                marker=dict(size=4),
+                connectgaps=False,
+                hovertemplate=
+                    "<b>Fecha:</b> %{x|%d/%m/%Y}<br>" +
+                    f"<b>Yacimiento:</b> {yac}<br>" +
+                    "<b>Qiny:</b> %{y:,.1f} bpd<br>" +
+                    "<extra></extra>"
+            ),
+            secondary_y=False
+        )
+
+    fig_iny.add_trace(
+        go.Scatter(
+            x=dfp[COL_FECHA],
+            y=dfp[COL_WINJ],
+            mode="lines+markers",
+            name="Winj total (mbl)",
+            line=dict(width=3, color="#00ACC1"),
+            marker=dict(size=3),
+            connectgaps=False
+        ),
+        secondary_y=True
+    )
+
+    for i, yac in enumerate(sorted(df_iny_yac[COL_YAC].dropna().astype(str).unique())):
+        dfi_yac = df_iny_yac[df_iny_yac[COL_YAC].astype(str) == yac].copy()
+        color_yac = colores_iny_yac[i % len(colores_iny_yac)]
+
+        fig_iny.add_trace(
+            go.Scatter(
+                x=dfi_yac[COL_FECHA],
+                y=dfi_yac[COL_WINJ],
+                mode="lines+markers",
+                name=f"Winj {yac} (mbl)",
+                line=dict(width=2, color=color_yac, dash="dot"),
+                marker=dict(size=4),
+                connectgaps=False,
+                hovertemplate=
+                    "<b>Fecha:</b> %{x|%d/%m/%Y}<br>" +
+                    f"<b>Yacimiento:</b> {yac}<br>" +
+                    "<b>Winj:</b> %{y:,.1f} mbl<br>" +
+                    "<extra></extra>"
+            ),
+            secondary_y=True
+        )
+
+    fig_iny.update_layout(
+        title="Agua inyectada y acumulada de inyección",
+        template="plotly_white",
+        hovermode="x unified",
+        height=520,
+        legend=dict(orientation="h", y=1.02,  font=dict(
+        size=14,
+        color="black",
+        family="Arial Black"
+        )),
+        margin=dict(l=35, r=35, t=60, b=150)
+    )
+
+    fig_iny.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y", title_font=dict(size=22), tickfont=dict(
+        size=16,
+        color="black",
+        family="Arial Black"
+        ),showline=True,
+        linewidth=1,
+        linecolor='black')
+
+    fig_iny.update_yaxes(title_text="Qiny (bpd)", title_font=dict(size=22),
+        secondary_y=False, tickfont=dict(
+        size=16,
+        color="black",
+        family="Arial Black"
+        ),showline=True,
+        showgrid=False,
+        zeroline=True,
+        zerolinewidth=1,
+        zerolinecolor="black",
+        linewidth=1,
+        range=[0, None],
+        linecolor='black')
+
+    fig_iny.update_yaxes(title_text="Winj (mbl)", title_font=dict(size=22),
+        secondary_y=True, tickfont=dict(
+        size=16,
+        color="black",
+        family="Arial Black"
+        ),showline=True,
+        linewidth=1,
+        showgrid=False,
+        zeroline=True,
+        zerolinewidth=1,
+        range=[0, None],
+        zerolinecolor="black",
+        linecolor='black')
+
+    marcar_inicios_yacimiento(fig_iny)
+
+    st.plotly_chart(fig_iny, use_container_width=True)
 
     fig3 = make_subplots(specs=[[{"secondary_y": True}]])
 
@@ -7480,7 +8426,7 @@ if vista == "Producción por pozo":
         color="black",
         family="Arial Black"
         )),
-        margin=dict(l=35, r=35, t=60, b=35)
+        margin=dict(l=35, r=35, t=60, b=150)
     )
 
     fig3.update_xaxes(title_text="Fecha", tickformat="%d/%m/%Y", title_font=dict(size=22), tickfont=dict(
@@ -7518,6 +8464,8 @@ if vista == "Producción por pozo":
         zerolinecolor="black",
         linecolor='black')
 
+    marcar_inicios_yacimiento(fig3)
+
     st.plotly_chart(fig3, use_container_width=True)
 
     # =====================================================
@@ -7546,11 +8494,13 @@ if vista == "Producción por pozo":
         COL_DIAS,
         COL_QO,
         COL_QW,
+        COL_QIN,
         COL_QG,
         COL_WC,
         COL_RGA,
         COL_NP,
         COL_WP,
+        COL_WINJ,
         COL_GP
     ]
 
@@ -7570,11 +8520,13 @@ if vista == "Producción por pozo":
     tabla_pozo = tabla_pozo.style.format({
         COL_QO: "{:,.1f}",
         COL_QW: "{:,.1f}",
+        COL_QIN: "{:,.1f}",
         COL_QG: "{:,.1f}",
         COL_WC: "{:,.1f}",
         COL_RGA: "{:,.0f}",
         COL_NP: "{:,.1f}",
         COL_WP: "{:,.1f}",
+        COL_WINJ: "{:,.1f}",
         COL_GP: "{:,.1f}",
     })
 
@@ -7658,7 +8610,7 @@ elif vista == "Comparativa por pozo":
                 comparative_plot(
                     df_comp,
                     COL_QO,
-                    "Comparativo semilog de producción de aceite por pozo",
+                    "Producción de aceite por pozo",
                     "Qo (bpd)",
                     pozos_sel_comp,
                     semilog=usar_semilog,
@@ -7671,7 +8623,7 @@ elif vista == "Comparativa por pozo":
                 comparative_plot(
                     df_comp,
                     COL_RGA,
-                    "Comparativo semilog de RGA por pozo",
+                    "RGA por pozo",
                     "RGA (pc/bl)",
                     pozos_sel_comp,
                     semilog=usar_semilog,
@@ -7682,9 +8634,9 @@ elif vista == "Comparativa por pozo":
 
             # =========================
             # =========================
-            # 3. COMPARATIVO Qw + %Agua
+            # 3. COMPARATIVO %Agua
             # =========================
-            fig_agua = make_subplots(specs=[[{"secondary_y": True}]])
+            fig_agua = make_subplots(specs=[[{"secondary_y": False}]])
 
             for pozo in pozos_sel_comp:
 
@@ -7708,29 +8660,12 @@ elif vista == "Comparativa por pozo":
                     hover_x = "Fecha: %{x|%d/%m/%Y}"
                     x_title = "Fecha"
 
-                #fig_agua.add_trace(
-                #    go.Scatter(
-                #        x=x_values,
-                #        y=dfi[COL_QW].replace(0, np.nan),
-                #        mode="lines+markers",
-                #        name=f"{pozo} | Qw",
-                #        line=dict(width=3),
-                #        marker=dict(size=4),
-                #        connectgaps=False,
-                #        hovertemplate=
-                #            f"<b>Pozo: {pozo}</b><br>" +
-                #            hover_x + "<br>" +
-                #            "Qw: %{y:,.2f} bpd<extra></extra>"
-                #    ),
-                #    secondary_y=False
-                #)
-
                 fig_agua.add_trace(
                     go.Scatter(
                         x=x_values,
                         y=dfi[COL_WC].replace(0, np.nan),
                         mode="lines+markers",
-                        name=f"{pozo} | % Agua",
+                        name=f"{pozo}",
                         line=dict(width=3),
                         marker=dict(size=4),
                         connectgaps=False,
@@ -7743,61 +8678,86 @@ elif vista == "Comparativa por pozo":
                 )
 
             fig_agua.update_layout(
-                title="<b>Comparativo de agua producida y corte de agua por pozo</b>",
+                title=dict(
+                    text=f"<b>Corte de agua por pozo</b>",
+                    x=0.02,
+                    xanchor="left",
+                    font=dict(size=20, family="Arial Black", color="#111827")
+                ),
                 template="plotly_white",
                 hovermode="x unified",
-                height=520,
+                height=450,
+                plot_bgcolor="#F8F8FF",
+                paper_bgcolor="white",
+                font=dict(family="Arial", size=13, color="#111827"),
+                margin=dict(l=70, r=40, t=90, b=70),
                 legend=dict(
                     orientation="h",
                     yanchor="bottom",
                     y=1.02,
-                    xanchor="right",
-                    x=1,
-                    font=dict(size=14, color="black", family="Arial")
-                ),
-                margin=dict(l=35, r=35, t=60, b=35),
-                plot_bgcolor="white",
-                paper_bgcolor="white",
-                font=dict(family="Tahoma", size=16, color="black")
+                    xanchor="center",
+                    x=0.5,
+                    font=dict(
+                        size=14,
+                        family="Arial",
+                        color="#111827"
+                    ),
+                    bgcolor="rgba(255,255,255,0.8)",
+                    bordercolor="#D1D5DB",
+                    borderwidth=1
+                )
             )
 
             fig_agua.update_xaxes(
                 title_text=f"<b>{x_title}</b>",
                 tickformat="%d/%m/%Y" if not normalizar_tiempo else None,
                 showgrid=True,
-                gridcolor="#EAECEE",
+                gridcolor="#E5E7EB",
+                gridwidth=0.7,
                 zeroline=False,
-                tickfont=dict(size=18, color="black"),
                 showline=True,
-                linewidth=0.5,
-                linecolor="black"
+                linewidth=1.2,
+                linecolor="#111827",
+                mirror=True,
+                ticks="outside",
+                tickfont=dict(size=18, color="#111827"),
+                title=dict(
+                text=f"<b>{x_title}</b>",
+                font=dict(
+                    size=18,
+                    color="#374151"
+                )
+            ),
+                rangeslider=dict(visible=False)
             )
 
             fig_agua.update_yaxes(
-                title_text="<b>Agua producida, Qw (bpd)</b>",
-                secondary_y=False,
+                title_text=f"<b>Corte de agua (%)</b>",
+                
                 showgrid=True,
-                gridcolor="#EAECEE",
+                gridcolor="#E5E7EB",
+                gridwidth=0.7,
                 zeroline=False,
                 separatethousands=True,
-                tickfont=dict(size=18, color="black"),
                 showline=True,
-                linewidth=0.5,
-                linecolor="black"
+                linewidth=1.2,
+                linecolor="#111827",
+                mirror=True,
+                ticks="outside",
+                tickfont=dict(size=18, color="#111827"),
+                title=dict(
+                    text=f"<b>Corte de agua (%)</b>",
+                    font=dict(
+                        size=18,
+                        color="#374151"
+                    )
+                ),
             )
-
-            fig_agua.update_yaxes(
-                title_text="<b>Corte de agua (%)</b>",
-                secondary_y=True,
-                range=[0, 100],
-                showgrid=False,
-                zeroline=False,
-                tickfont=dict(size=18, color="black"),
-                showline=True,
-                linewidth=0.5,
-                linecolor="black"
-            )
-
+            if not normalizar_tiempo:
+                fecha_min = df_comp[COL_FECHA].min()
+                fecha_max = df_comp[COL_FECHA].max()
+                fig_agua.update_xaxes(range=[fecha_min, fecha_max])
+            
             st.plotly_chart(fig_agua, use_container_width=True)
 
             # =========================
@@ -7844,48 +8804,86 @@ elif vista == "Comparativa por pozo":
                 )
 
             fig_iny.update_layout(
-                title="<b>Comparativo de agua de inyección por pozo</b>",
+                title=dict(
+                    text=f"<b>Agua Inyectada (bpd)</b>",
+                    x=0.02,
+                    xanchor="left",
+                    font=dict(size=20, family="Arial Black", color="#111827")
+                ),
                 template="plotly_white",
                 hovermode="x unified",
-                height=520,
+                height=450,
+                plot_bgcolor="#F8F8FF",
+                paper_bgcolor="white",
+                font=dict(family="Arial", size=13, color="#111827"),
+                margin=dict(l=70, r=40, t=90, b=70),
                 legend=dict(
                     orientation="h",
                     yanchor="bottom",
                     y=1.02,
-                    xanchor="right",
-                    x=1,
-                    font=dict(size=14, color="black", family="Arial")
-                ),
-                margin=dict(l=35, r=35, t=60, b=35),
-                plot_bgcolor="white",
-                paper_bgcolor="white",
-                font=dict(family="Tahoma", size=16, color="black")
+                    xanchor="center",
+                    x=0.5,
+                    font=dict(
+                        size=14,
+                        family="Arial",
+                        color="#111827"
+                    ),
+                    bgcolor="rgba(255,255,255,0.8)",
+                    bordercolor="#D1D5DB",
+                    borderwidth=1
+                )
             )
 
             fig_iny.update_xaxes(
                 title_text=f"<b>{x_title}</b>",
                 tickformat="%d/%m/%Y" if not normalizar_tiempo else None,
                 showgrid=True,
-                gridcolor="#EAECEE",
+                gridcolor="#E5E7EB",
+                gridwidth=0.7,
                 zeroline=False,
-                tickfont=dict(size=18, color="black"),
                 showline=True,
-                linewidth=0.5,
-                linecolor="black"
+                linewidth=1.2,
+                linecolor="#111827",
+                mirror=True,
+                ticks="outside",
+                tickfont=dict(size=18, color="#111827"),
+                title=dict(
+                text=f"<b>{x_title}</b>",
+                font=dict(
+                    size=18,
+                    color="#374151"
+                )
+            ),
+                rangeslider=dict(visible=False)
             )
 
             fig_iny.update_yaxes(
-                title_text="<b>Agua inyectada, Qiny (bpd)</b>",
+                title_text=f"<b>Agua Inyectada (bpd)</b>",
+                
                 showgrid=True,
-                gridcolor="#EAECEE",
+                gridcolor="#E5E7EB",
+                gridwidth=0.7,
                 zeroline=False,
                 separatethousands=True,
-                tickfont=dict(size=18, color="black"),
                 showline=True,
-                linewidth=0.5,
-                linecolor="black"
+                linewidth=1.2,
+                linecolor="#111827",
+                mirror=True,
+                ticks="outside",
+                tickfont=dict(size=18, color="#111827"),
+                title=dict(
+                    text=f"<b>Agua Inyectada (bpd)</b>",
+                    font=dict(
+                        size=18,
+                        color="#374151"
+                    )
+                ),
             )
 
+            if not normalizar_tiempo:
+                fecha_min = df_comp[COL_FECHA].min()
+                fecha_max = df_comp[COL_FECHA].max()
+                fig_iny.update_xaxes(range=[fecha_min, fecha_max])
             st.plotly_chart(fig_iny, use_container_width=True)
 
         else:
