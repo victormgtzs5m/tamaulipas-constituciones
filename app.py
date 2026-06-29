@@ -1005,8 +1005,10 @@ def preparar_historia_pozo_fisico(df_pozo_raw: pd.DataFrame):
 
 def preparar_inyeccion_por_yacimiento(df_pozo_raw: pd.DataFrame) -> pd.DataFrame:
     """Calcula Qiny y Winj por yacimiento para el pozo/terminacion seleccionado."""
+    columnas_salida = [COL_YAC, COL_FECHA, COL_INY_BBL, COL_QIN, COL_WINJ]
+
     if df_pozo_raw.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=columnas_salida)
 
     df_base = df_pozo_raw.copy().sort_values([COL_YAC, COL_FECHA])
     df_base[COL_INY] = pd.to_numeric(df_base[COL_INY], errors="coerce").fillna(0)
@@ -1014,7 +1016,7 @@ def preparar_inyeccion_por_yacimiento(df_pozo_raw: pd.DataFrame) -> pd.DataFrame
     df_iny = df_base[df_base[COL_INY] > 0].copy()
 
     if df_iny.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=columnas_salida)
 
     df_iny[COL_INY_BBL] = df_iny[COL_INY] * M3_A_BBL
     dias_validos = df_iny[COL_DIAS].replace(0, np.nan)
@@ -1051,6 +1053,9 @@ def preparar_inyeccion_por_yacimiento(df_pozo_raw: pd.DataFrame) -> pd.DataFrame
         completo_yac.loc[completo_yac[COL_WINJ] <= 0, COL_WINJ] = np.nan
         completo_yac.loc[completo_yac[COL_INY_BBL] <= 0, COL_QIN] = np.nan
         salida.append(completo_yac)
+
+    if not salida:
+        return pd.DataFrame(columns=columnas_salida)
 
     return pd.concat(salida, ignore_index=True)
 
@@ -2861,6 +2866,13 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 key=f"tipo_mapa_burbujas_{modo_mapa}_{yac_mapa}"
             )
 
+            animar_tiempo = st.checkbox(
+                "Modo animado",
+                value=False,
+                disabled=ver_todos_campo,
+                key=f"modo_animado_burbujas_{modo_mapa}_{yac_mapa}"
+            )
+
         with c6_np:
             st.caption("Productores")
             st.markdown(
@@ -3026,12 +3038,325 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             height=360
         )
 
+    def preparar_animacion_burbujas(datos_mapa: pd.DataFrame, usar_gis=False):
+        if ver_todos_campo or datos_mapa.empty:
+            return pd.DataFrame(), []
+
+        prod_anim = load_prod_calc().copy()
+        prod_anim = prod_anim[
+            prod_anim[COL_YAC].astype(str) == str(yac_mapa)
+        ].copy()
+        prod_anim = prod_anim[
+            prod_anim[COL_POZO].astype(str).isin(datos_mapa[COL_POZO].astype(str))
+        ].copy()
+
+        if prod_anim.empty:
+            return pd.DataFrame(), []
+
+        prod_anim[COL_FECHA] = pd.to_datetime(prod_anim[COL_FECHA], errors="coerce")
+        prod_anim = prod_anim.dropna(subset=[COL_FECHA]).copy()
+        prod_anim[COL_FECHA] = prod_anim[COL_FECHA].dt.normalize()
+
+        for col in [COL_ACEITE_BBL, COL_INY_BBL]:
+            prod_anim[col] = pd.to_numeric(prod_anim[col], errors="coerce").fillna(0)
+
+        prod_anim = prod_anim[
+            (prod_anim[COL_ACEITE_BBL] > 0) |
+            (prod_anim[COL_INY_BBL] > 0)
+        ].copy()
+
+        if prod_anim.empty:
+            return pd.DataFrame(), []
+
+        fechas_anim = sorted(prod_anim[COL_FECHA].unique())
+        pozos_anim = sorted(datos_mapa[COL_POZO].dropna().astype(str).unique())
+
+        base_anim = pd.MultiIndex.from_product(
+            [fechas_anim, pozos_anim],
+            names=[COL_FECHA, COL_POZO]
+        ).to_frame(index=False)
+
+        vol_anim = (
+            prod_anim
+            .groupby([COL_FECHA, COL_POZO], as_index=False)
+            .agg(
+                NP_MES=(COL_ACEITE_BBL, "sum"),
+                WINJ_MES=(COL_INY_BBL, "sum")
+            )
+        )
+        vol_anim[COL_POZO] = vol_anim[COL_POZO].astype(str)
+
+        anim = base_anim.merge(vol_anim, on=[COL_FECHA, COL_POZO], how="left")
+        anim[["NP_MES", "WINJ_MES"]] = anim[["NP_MES", "WINJ_MES"]].fillna(0)
+        anim = anim.sort_values([COL_POZO, COL_FECHA])
+        anim["NP_BLS_ANIM"] = anim.groupby(COL_POZO)["NP_MES"].cumsum()
+        anim["WINJ_BLS_ANIM"] = anim.groupby(COL_POZO)["WINJ_MES"].cumsum()
+
+        cols_coord_anim = [COL_POZO, "POZO", COL_YAC, x_col, y_col]
+        if usar_gis:
+            cols_coord_anim += ["LAT", "LON"]
+
+        cols_coord_anim = [
+            col for col in cols_coord_anim
+            if col in datos_mapa.columns
+        ]
+
+        coords_anim = datos_mapa[cols_coord_anim].drop_duplicates(subset=[COL_POZO]).copy()
+        coords_anim[COL_POZO] = coords_anim[COL_POZO].astype(str)
+        anim = anim.merge(coords_anim, on=COL_POZO, how="left")
+        anim = anim.dropna(subset=["LAT", "LON"] if usar_gis else [x_col, y_col]).copy()
+
+        max_np_anim = anim["NP_BLS_ANIM"].max()
+        max_iny_anim = anim["WINJ_BLS_ANIM"].max()
+        anim["SIZE_NP_ANIM"] = np.where(
+            max_np_anim > 0,
+            14 + (anim["NP_BLS_ANIM"] / max_np_anim) * 75,
+            14
+        )
+        anim["SIZE_INY_ANIM"] = np.where(
+            max_iny_anim > 0,
+            14 + (anim["WINJ_BLS_ANIM"] / max_iny_anim) * 75,
+            14
+        )
+        anim["FECHA_TXT"] = anim[COL_FECHA].dt.strftime("%d/%m/%Y")
+        anim["ETIQUETA_NP_ANIM"] = anim["NP_BLS_ANIM"].map(lambda v: f"{v/1000:,.1f}" if v > 0 else "")
+        anim["ETIQUETA_INY_ANIM"] = anim["WINJ_BLS_ANIM"].map(lambda v: f"{v/1000:,.1f}" if v > 0 else "")
+
+        return anim, fechas_anim
+
+    def controles_animacion_burbujas():
+        return dict(
+            updatemenus=[
+                dict(
+                    type="buttons",
+                    direction="left",
+                    x=0.43,
+                    y=1.10,
+                    xanchor="center",
+                    yanchor="top",
+                    buttons=[
+                        dict(
+                            label="Play",
+                            method="animate",
+                            args=[None, {
+                                "frame": {"duration": 650, "redraw": True},
+                                "transition": {"duration": 250},
+                                "fromcurrent": True,
+                                "mode": "immediate"
+                            }]
+                        ),
+                        dict(
+                            label="Stop",
+                            method="animate",
+                            args=[[None], {
+                                "frame": {"duration": 0, "redraw": False},
+                                "transition": {"duration": 0},
+                                "mode": "immediate"
+                            }]
+                        )
+                    ]
+                )
+            ],
+            sliders=[
+                dict(
+                    active=0,
+                    x=0.01,
+                    y=-0.03,
+                    len=0.95,
+                    currentvalue=dict(prefix="Fecha: "),
+                    steps=[]
+                )
+            ]
+        )
+
     # =====================================================
     # MAPA GIS
     # =====================================================
     if tipo_mapa == "Mapa GIS":
 
         mapa_gis = convertir_utm_a_latlon(mapa, x_col, y_col)
+
+        if animar_tiempo and not ver_todos_campo:
+            anim_gis, fechas_anim = preparar_animacion_burbujas(mapa_gis, usar_gis=True)
+
+            if anim_gis.empty or not fechas_anim:
+                st.warning("No hay historia de aceite o inyección para animar con los filtros actuales.")
+            else:
+                fecha_ini_anim = fechas_anim[0]
+                datos_ini = anim_gis[anim_gis[COL_FECHA] == fecha_ini_anim].copy()
+                datos_np_ini = datos_ini[datos_ini["NP_BLS_ANIM"] > 0].copy()
+                datos_iny_ini = datos_ini[datos_ini["WINJ_BLS_ANIM"] > 0].copy()
+
+                fig_anim_gis = go.Figure()
+
+                fig_anim_gis.add_trace(go.Scattermapbox(
+                    lat=datos_np_ini["LAT"],
+                    lon=datos_np_ini["LON"],
+                    mode="markers+text" if mostrar_nombres else "markers",
+                    text=datos_np_ini["POZO"] if mostrar_nombres else None,
+                    textposition="top center",
+                    marker=dict(
+                        size=datos_np_ini["SIZE_NP_ANIM"],
+                        color="green",
+                        opacity=0.42
+                    ),
+                    name="Np acumulado",
+                    customdata=datos_np_ini[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT"]],
+                    hovertemplate=
+                        "<b>Pozo:</b> %{customdata[0]}<br>" +
+                        "<b>Yacimiento:</b> %{customdata[1]}<br>" +
+                        "<b>Fecha:</b> %{customdata[4]}<br>" +
+                        "<b>Np:</b> %{customdata[2]:,.0f} bls<br>" +
+                        "<b>Winj:</b> %{customdata[3]:,.0f} bls<br>" +
+                        "<extra></extra>"
+                ))
+
+                fig_anim_gis.add_trace(go.Scattermapbox(
+                    lat=datos_iny_ini["LAT"],
+                    lon=datos_iny_ini["LON"],
+                    mode="markers+text" if mostrar_etiquetas_burbujas else "markers",
+                    text=datos_iny_ini["ETIQUETA_INY_ANIM"] if mostrar_etiquetas_burbujas else None,
+                    textposition="bottom center",
+                    marker=dict(
+                        size=datos_iny_ini["SIZE_INY_ANIM"],
+                        color="rgba(0, 120, 255, 0.25)",
+                        opacity=0.70
+                    ),
+                    name="Winj acumulado",
+                    customdata=datos_iny_ini[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT"]],
+                    hovertemplate=
+                        "<b>Pozo:</b> %{customdata[0]}<br>" +
+                        "<b>Yacimiento:</b> %{customdata[1]}<br>" +
+                        "<b>Fecha:</b> %{customdata[4]}<br>" +
+                        "<b>Np:</b> %{customdata[2]:,.0f} bls<br>" +
+                        "<b>Winj:</b> %{customdata[3]:,.0f} bls<br>" +
+                        "<extra></extra>"
+                ))
+
+                if not inyectores_operando_mapa.empty:
+                    iny_gis = convertir_utm_a_latlon(inyectores_operando_mapa, x_col, y_col)
+                    fig_anim_gis.add_trace(go.Scattermapbox(
+                        lat=iny_gis["LAT"],
+                        lon=iny_gis["LON"],
+                        mode="markers",
+                        marker=dict(size=18, color="#0057FF", opacity=0.95),
+                        name="Inyectores operando",
+                        customdata=iny_gis[["POZO", COL_YAC, "Operando", "VI_BLS"]],
+                        hovertemplate=
+                            "<b>Inyector operando:</b> %{customdata[0]}<br>" +
+                            "<b>Yacimiento:</b> %{customdata[1]}<br>" +
+                            "<b>Operando:</b> %{customdata[2]}<br>" +
+                            "<b>Vi:</b> %{customdata[3]:,.0f} bls<br>" +
+                            "<extra></extra>"
+                    ))
+
+                frames_gis = []
+                steps_gis = []
+                for fecha_anim in fechas_anim:
+                    datos_frame = anim_gis[anim_gis[COL_FECHA] == fecha_anim].copy()
+                    datos_np = datos_frame[datos_frame["NP_BLS_ANIM"] > 0].copy()
+                    datos_iny = datos_frame[datos_frame["WINJ_BLS_ANIM"] > 0].copy()
+                    nombre_frame = pd.to_datetime(fecha_anim).strftime("%d/%m/%Y")
+
+                    frames_gis.append(go.Frame(
+                        name=nombre_frame,
+                        traces=[0, 1],
+                        data=[
+                            go.Scattermapbox(
+                                lat=datos_np["LAT"],
+                                lon=datos_np["LON"],
+                                mode="markers+text" if mostrar_nombres else "markers",
+                                text=datos_np["POZO"] if mostrar_nombres else None,
+                                textposition="top center",
+                                marker=dict(size=datos_np["SIZE_NP_ANIM"], color="green", opacity=0.42),
+                                customdata=datos_np[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT"]]
+                            ),
+                            go.Scattermapbox(
+                                lat=datos_iny["LAT"],
+                                lon=datos_iny["LON"],
+                                mode="markers+text" if mostrar_etiquetas_burbujas else "markers",
+                                text=datos_iny["ETIQUETA_INY_ANIM"] if mostrar_etiquetas_burbujas else None,
+                                textposition="bottom center",
+                                marker=dict(size=datos_iny["SIZE_INY_ANIM"], color="rgba(0, 120, 255, 0.25)", opacity=0.70),
+                                customdata=datos_iny[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT"]]
+                            )
+                        ]
+                    ))
+                    steps_gis.append(dict(
+                        label=nombre_frame,
+                        method="animate",
+                        args=[[nombre_frame], {
+                            "frame": {"duration": 0, "redraw": True},
+                            "transition": {"duration": 0},
+                            "mode": "immediate"
+                        }]
+                    ))
+
+                fig_anim_gis.frames = frames_gis
+
+                centro_gis_anim = dict(lat=mapa_gis["LAT"].mean(), lon=mapa_gis["LON"].mean())
+                zoom_gis_anim = 12
+
+                if pozo_zoom != "Todos" and "POZO" in mapa_gis.columns:
+                    row_zoom_gis = mapa_gis[mapa_gis["POZO"].astype(str) == str(pozo_zoom)]
+                    if not row_zoom_gis.empty:
+                        centro_gis_anim = dict(
+                            lat=row_zoom_gis["LAT"].iloc[0],
+                            lon=row_zoom_gis["LON"].iloc[0]
+                        )
+                        zoom_gis_anim = 15
+
+                fig_anim_gis.update_layout(
+                    title=f"<b>Animación acumulada Np / Winj - {yac_mapa}</b>",
+                    mapbox=dict(style="open-street-map", center=centro_gis_anim, zoom=zoom_gis_anim),
+                    height=850,
+                    margin=dict(l=0, r=0, t=125, b=35),
+                    showlegend=True,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    updatemenus=[
+                        dict(
+                            type="buttons",
+                            direction="left",
+                            x=0.43,
+                            y=1.10,
+                            xanchor="center",
+                            yanchor="top",
+                            buttons=[
+                                dict(label="Play", method="animate", args=[None, {
+                                    "frame": {"duration": 650, "redraw": True},
+                                    "transition": {"duration": 250},
+                                    "fromcurrent": True,
+                                    "mode": "immediate"
+                                }]),
+                                dict(label="Stop", method="animate", args=[[None], {
+                                    "frame": {"duration": 0, "redraw": False},
+                                    "transition": {"duration": 0},
+                                    "mode": "immediate"
+                                }])
+                            ]
+                        )
+                    ],
+                    sliders=[
+                        dict(
+                            active=0,
+                            x=0.01,
+                            y=1.04,
+                            len=0.95,
+                            currentvalue=dict(prefix="Fecha: "),
+                            steps=steps_gis
+                        )
+                    ]
+                )
+
+                st.plotly_chart(
+                    fig_anim_gis,
+                    use_container_width=True,
+                    config={"scrollZoom": True, "displaylogo": False}
+                )
+
+                mostrar_tabla_pozos_mapa(mapa)
+
+                return
 
         fig_gis = go.Figure()
 
@@ -3542,6 +3867,232 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 showlegend=False,
                 hoverinfo="skip"
             ))
+
+    if animar_tiempo and not ver_todos_campo:
+        anim_utm, fechas_anim = preparar_animacion_burbujas(mapa, usar_gis=False)
+
+        if anim_utm.empty or not fechas_anim:
+            st.warning("No hay historia de aceite o inyección para animar con los filtros actuales.")
+        else:
+            fecha_ini_anim = fechas_anim[0]
+            datos_ini = anim_utm[anim_utm[COL_FECHA] == fecha_ini_anim].copy()
+            datos_np_ini = datos_ini[datos_ini["NP_BLS_ANIM"] > 0].copy()
+            datos_iny_ini = datos_ini[datos_ini["WINJ_BLS_ANIM"] > 0].copy()
+
+            idx_np_anim = len(fig.data)
+            idx_iny_anim = idx_np_anim + 1
+
+            fig.add_trace(go.Scatter(
+                x=datos_np_ini[x_col],
+                y=datos_np_ini[y_col],
+                mode="markers+text" if mostrar_nombres else "markers",
+                text=datos_np_ini["POZO"] if mostrar_nombres else None,
+                textposition="top center",
+                marker=dict(
+                    size=datos_np_ini["SIZE_NP_ANIM"],
+                    sizemode="diameter",
+                    color="green",
+                    opacity=0.35,
+                    line=dict(color="green", width=1.5)
+                ),
+                name="Np acumulado",
+                customdata=datos_np_ini[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT"]],
+                hovertemplate=
+                    "<b>Pozo:</b> %{customdata[0]}<br>" +
+                    "<b>Yacimiento:</b> %{customdata[1]}<br>" +
+                    "<b>Fecha:</b> %{customdata[4]}<br>" +
+                    "<b>Np:</b> %{customdata[2]:,.0f} bls<br>" +
+                    "<b>Winj:</b> %{customdata[3]:,.0f} bls<br>" +
+                    "<extra></extra>"
+            ))
+
+            fig.add_trace(go.Scatter(
+                x=datos_iny_ini[x_col],
+                y=datos_iny_ini[y_col],
+                mode="markers+text" if mostrar_etiquetas_burbujas else "markers",
+                text=datos_iny_ini["ETIQUETA_INY_ANIM"] if mostrar_etiquetas_burbujas else None,
+                textposition="bottom center",
+                marker=dict(
+                    size=datos_iny_ini["SIZE_INY_ANIM"],
+                    sizemode="diameter",
+                    color="rgba(0, 120, 255, 0.20)",
+                    opacity=0.70,
+                    line=dict(color="blue", width=1.2)
+                ),
+                name="Winj acumulado",
+                customdata=datos_iny_ini[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT"]],
+                hovertemplate=
+                    "<b>Pozo:</b> %{customdata[0]}<br>" +
+                    "<b>Yacimiento:</b> %{customdata[1]}<br>" +
+                    "<b>Fecha:</b> %{customdata[4]}<br>" +
+                    "<b>Np:</b> %{customdata[2]:,.0f} bls<br>" +
+                    "<b>Winj:</b> %{customdata[3]:,.0f} bls<br>" +
+                    "<extra></extra>"
+            ))
+
+            frames_utm = []
+            steps_utm = []
+            for fecha_anim in fechas_anim:
+                datos_frame = anim_utm[anim_utm[COL_FECHA] == fecha_anim].copy()
+                datos_np = datos_frame[datos_frame["NP_BLS_ANIM"] > 0].copy()
+                datos_iny = datos_frame[datos_frame["WINJ_BLS_ANIM"] > 0].copy()
+                nombre_frame = pd.to_datetime(fecha_anim).strftime("%d/%m/%Y")
+
+                frames_utm.append(go.Frame(
+                    name=nombre_frame,
+                    traces=[idx_np_anim, idx_iny_anim],
+                    data=[
+                        go.Scatter(
+                            x=datos_np[x_col],
+                            y=datos_np[y_col],
+                            mode="markers+text" if mostrar_nombres else "markers",
+                            text=datos_np["POZO"] if mostrar_nombres else None,
+                            textposition="top center",
+                            marker=dict(
+                                size=datos_np["SIZE_NP_ANIM"],
+                                sizemode="diameter",
+                                color="green",
+                                opacity=0.35,
+                                line=dict(color="green", width=1.5)
+                            ),
+                            customdata=datos_np[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT"]]
+                        ),
+                        go.Scatter(
+                            x=datos_iny[x_col],
+                            y=datos_iny[y_col],
+                            mode="markers+text" if mostrar_etiquetas_burbujas else "markers",
+                            text=datos_iny["ETIQUETA_INY_ANIM"] if mostrar_etiquetas_burbujas else None,
+                            textposition="bottom center",
+                            marker=dict(
+                                size=datos_iny["SIZE_INY_ANIM"],
+                                sizemode="diameter",
+                                color="rgba(0, 120, 255, 0.20)",
+                                opacity=0.70,
+                                line=dict(color="blue", width=1.2)
+                            ),
+                            customdata=datos_iny[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT"]]
+                        )
+                    ]
+                ))
+                steps_utm.append(dict(
+                    label=nombre_frame,
+                    method="animate",
+                    args=[[nombre_frame], {
+                        "frame": {"duration": 0, "redraw": True},
+                        "transition": {"duration": 0},
+                        "mode": "immediate"
+                    }]
+                ))
+
+            fig.frames = frames_utm
+
+            if not inyectores_operando_mapa.empty:
+                fig.add_trace(go.Scatter(
+                    x=inyectores_operando_mapa[x_col],
+                    y=inyectores_operando_mapa[y_col],
+                    mode="markers",
+                    marker=dict(
+                        size=22,
+                        symbol="circle-open",
+                        color="#0057FF",
+                        line=dict(color="#0057FF", width=4)
+                    ),
+                    name="Inyectores operando",
+                    customdata=inyectores_operando_mapa[["POZO", COL_YAC, "Operando", "VI_BLS"]],
+                    hovertemplate=
+                        "<b>Inyector operando:</b> %{customdata[0]}<br>" +
+                        "<b>Yacimiento:</b> %{customdata[1]}<br>" +
+                        "<b>Operando:</b> %{customdata[2]}<br>" +
+                        "<b>Vi:</b> %{customdata[3]:,.0f} bls<br>" +
+                        "<extra></extra>",
+                    legendgroup="inyectores_operando",
+                    showlegend=True
+                ))
+
+            fig.update_layout(
+                title=f"<b>Animación acumulada Np / Winj - {yac_mapa}</b>",
+                template="plotly_white",
+                height=950,
+                uirevision=mapa_uirevision,
+                margin=dict(l=20, r=20, t=135, b=35),
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                updatemenus=[
+                    dict(
+                        type="buttons",
+                        direction="left",
+                        x=0.43,
+                        y=1.10,
+                        xanchor="center",
+                        yanchor="top",
+                        buttons=[
+                            dict(label="Play", method="animate", args=[None, {
+                                "frame": {"duration": 650, "redraw": True},
+                                "transition": {"duration": 250},
+                                "fromcurrent": True,
+                                "mode": "immediate"
+                            }]),
+                            dict(label="Stop", method="animate", args=[[None], {
+                                "frame": {"duration": 0, "redraw": False},
+                                "transition": {"duration": 0},
+                                "mode": "immediate"
+                            }])
+                        ]
+                    )
+                ],
+                sliders=[
+                    dict(
+                        active=0,
+                        x=0.01,
+                        y=1.04,
+                        len=0.95,
+                        currentvalue=dict(prefix="Fecha: "),
+                        steps=steps_utm
+                    )
+                ]
+            )
+
+            fig.update_xaxes(
+                title_text="UTM X",
+                showgrid=True,
+                gridcolor="#EAECEE",
+                showline=True,
+                linewidth=1,
+                linecolor="black"
+            )
+            fig.update_yaxes(
+                title_text="UTM Y",
+                scaleanchor="x",
+                scaleratio=1,
+                showgrid=True,
+                gridcolor="#EAECEE",
+                showline=True,
+                linewidth=1,
+                linecolor="black"
+            )
+
+            if pozo_zoom != "Todos" and "POZO" in mapa.columns:
+                row_zoom = mapa[mapa["POZO"].astype(str) == str(pozo_zoom)]
+                if not row_zoom.empty:
+                    x0 = row_zoom[x_col].iloc[0]
+                    y0 = row_zoom[y_col].iloc[0]
+                    radio_zoom = 1000
+                    fig.update_xaxes(range=[x0 - radio_zoom, x0 + radio_zoom])
+                    fig.update_yaxes(range=[y0 - radio_zoom, y0 + radio_zoom])
+
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+                config={
+                    "scrollZoom": True,
+                    "displaylogo": False,
+                    "modeBarButtonsToRemove": ["lasso2d", "select2d"]
+                }
+            )
+
+            mostrar_tabla_pozos_mapa(mapa)
+
+            return
 
     if not ver_todos_campo:
 
@@ -7535,39 +8086,43 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
         if yac_sel else df_prod_pozo_fisico.copy()
     )
 
-    with f2:
-        col_selector_pozo = (
-            "POZO_FISICO"
-            if vista == "Producción por pozo" and modo_vista_pozo == "Historia completa por pozo"
-            else COL_POZO
-        )
-        etiqueta_selector_pozo = (
-            "Pozo"
-            if col_selector_pozo == "POZO_FISICO"
-            else "Pozo / Terminación"
-        )
+    if vista == "Producción por pozo":
+        with f2:
+            col_selector_pozo = (
+                "POZO_FISICO"
+                if modo_vista_pozo == "Historia completa por pozo"
+                else COL_POZO
+            )
+            etiqueta_selector_pozo = (
+                "Pozo"
+                if col_selector_pozo == "POZO_FISICO"
+                else "Pozo / Terminación"
+            )
 
-        pozos = sorted(df_base_filtro[col_selector_pozo].dropna().astype(str).unique())
+            pozos = sorted(df_base_filtro[col_selector_pozo].dropna().astype(str).unique())
 
-        if not pozos:
-            st.warning("No hay pozos para el yacimiento seleccionado.")
-            st.stop()
+            if not pozos:
+                st.warning("No hay pozos para el yacimiento seleccionado.")
+                st.stop()
 
-        pozo_sel = st.selectbox(
-            etiqueta_selector_pozo,
-            pozos,
-            key="prod_pozo_sel"
-        )
+            pozo_sel = st.selectbox(
+                etiqueta_selector_pozo,
+                pozos,
+                key="prod_pozo_sel"
+            )
 
-    # Base real del pozo seleccionado.
-    if vista == "Producción por pozo" and modo_vista_pozo == "Historia completa por pozo":
-        df_pozo_raw = df_prod_pozo_fisico[
-            df_prod_pozo_fisico["POZO_FISICO"].astype(str) == str(pozo_sel)
-        ].copy()
+        # Base real del pozo seleccionado.
+        if modo_vista_pozo == "Historia completa por pozo":
+            df_pozo_raw = df_prod_pozo_fisico[
+                df_prod_pozo_fisico["POZO_FISICO"].astype(str) == str(pozo_sel)
+            ].copy()
+        else:
+            df_pozo_raw = df[
+                df[COL_POZO].astype(str) == str(pozo_sel)
+            ].copy()
     else:
-        df_pozo_raw = df[
-            df[COL_POZO].astype(str) == str(pozo_sel)
-        ].copy()
+        with f2:
+            st.caption("Selecciona los pozos a comparar en el panel inferior.")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -7575,7 +8130,7 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
 # BASE DE PRODUCCIÓN SIN FILTRO DE FECHAS
 # Solo aplica para Producción por pozo y Comparativa
 # =========================================================
-if vista in ["Producción por pozo", "Comparativa por pozo"]:
+if vista == "Producción por pozo":
 
     eventos_yac_historia = pd.DataFrame()
 
@@ -8168,6 +8723,11 @@ if vista == "Producción por pozo":
 
     fig2 = make_subplots(specs=[[{"secondary_y": True}]])
     df_iny_yac = preparar_inyeccion_por_yacimiento(df_pozo_raw)
+    yacs_iny_graf = (
+        sorted(df_iny_yac[COL_YAC].dropna().astype(str).unique())
+        if COL_YAC in df_iny_yac.columns and not df_iny_yac.empty
+        else []
+    )
     colores_iny_yac = [
         "#00ACC1",
         "#8E44AD",
@@ -8275,7 +8835,7 @@ if vista == "Producción por pozo":
         secondary_y=False
     )
 
-    for i, yac in enumerate(sorted(df_iny_yac[COL_YAC].dropna().astype(str).unique())):
+    for i, yac in enumerate(yacs_iny_graf):
         dfi_yac = df_iny_yac[df_iny_yac[COL_YAC].astype(str) == yac].copy()
         color_yac = colores_iny_yac[i % len(colores_iny_yac)]
 
@@ -8310,7 +8870,7 @@ if vista == "Producción por pozo":
         secondary_y=True
     )
 
-    for i, yac in enumerate(sorted(df_iny_yac[COL_YAC].dropna().astype(str).unique())):
+    for i, yac in enumerate(yacs_iny_graf):
         dfi_yac = df_iny_yac[df_iny_yac[COL_YAC].astype(str) == yac].copy()
         color_yac = colores_iny_yac[i % len(colores_iny_yac)]
 
@@ -8550,7 +9110,7 @@ elif vista == "Comparativa por pozo":
     pozos_sel_comp = st.multiselect(
     "Selecciona pozos para comparar",
     pozos_comp,
-    default=[str(pozo_sel).strip()] if str(pozo_sel).strip() in pozos_comp else []
+    default=[pozos_comp[0]] if pozos_comp else []
     )
 
     modo_comparacion = st.radio(
