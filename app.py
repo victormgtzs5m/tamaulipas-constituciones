@@ -1823,7 +1823,7 @@ def load_muestreos_agua() -> pd.DataFrame:
     try:
         muestreos = pd.read_excel(
             URL_MUESTREOS_AGUA,
-            sheet_name="Muestreos"
+            sheet_name="Pozos"
         )
     except Exception as exc:
         st.warning(f"No se pudo cargar Muestreos.xlsx desde GitHub: {exc}")
