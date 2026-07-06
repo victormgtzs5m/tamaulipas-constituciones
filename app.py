@@ -8,6 +8,8 @@ import plotly.express as px
 import streamlit.components.v1 as components
 from pathlib import Path
 import os
+import re
+import unicodedata
 
 # =========================================================
 # CONFIGURACIÓN GENERAL
@@ -27,7 +29,7 @@ st.set_page_config(
 # Ruta de la base datos
 ruta_db = "prodcoord.db"
 
-# Tablas
+# Tablas"""  """
 TABLA_PROD = "Produccion"
 TABLA_COORD = "Coord"
 TABLA_CONTORNO = "Contorno"
@@ -39,6 +41,9 @@ TABLA_PRESIONES = "Presiones"
 TABLA_OPERACION = "Operacion"
 TABLA_INYECTORES = "Inyectores"
 TABLA_EVENTOS = "Eventos"
+TABLA_LOCALIZACIONES = "Localizaciones"
+
+URL_MUESTREOS_AGUA = "https://raw.githubusercontent.com/victormgtzs5m/tamaulipas-constituciones/main/Muestreos.xlsx"
 
 #Leer archivo db
 @st.cache_data(show_spinner=False)
@@ -1555,6 +1560,53 @@ def preparar_acumuladas_mapa():
     return acum
 
 @st.cache_data(show_spinner=False)
+def preparar_datos_graficas_animadas_cache(pozo_sel, yac_mapa):
+    if not pozo_sel:
+        return pd.DataFrame(), pd.DataFrame()
+
+    prod_pozo_raw = load_data().copy()
+    prod_pozo_raw[COL_POZO] = prod_pozo_raw[COL_POZO].astype(str).str.strip()
+    prod_pozo_raw[COL_FECHA] = pd.to_datetime(prod_pozo_raw[COL_FECHA], errors="coerce")
+    prod_pozo_raw = prod_pozo_raw.dropna(subset=[COL_FECHA]).copy()
+    prod_pozo_raw = prod_pozo_raw[
+        prod_pozo_raw[COL_POZO] == str(pozo_sel).strip()
+    ].copy()
+
+    if yac_mapa != "Todos" and COL_YAC in prod_pozo_raw.columns:
+        prod_pozo_raw = prod_pozo_raw[
+            prod_pozo_raw[COL_YAC].astype(str) == str(yac_mapa)
+        ].copy()
+
+    if not prod_pozo_raw.empty:
+        prod_pozo_raw = completar_fechas_pozo(prod_pozo_raw)
+        prod_pozo = calcular_columnas_produccion(prod_pozo_raw)
+        prod_pozo[COL_POZO] = prod_pozo[COL_POZO].astype(str).str.strip()
+        prod_pozo[COL_FECHA] = pd.to_datetime(prod_pozo[COL_FECHA], errors="coerce")
+        prod_pozo = prod_pozo.dropna(subset=[COL_FECHA]).sort_values(COL_FECHA)
+    else:
+        prod_pozo = pd.DataFrame()
+
+    pres_pozo = load_presiones()
+    if not pres_pozo.empty:
+        pres_pozo["TERMINACION"] = pres_pozo["TERMINACION"].astype(str).str.strip()
+        pres_pozo["POZO"] = pres_pozo["POZO"].astype(str).str.strip()
+        pres_pozo = pres_pozo[
+            (pres_pozo["TERMINACION"] == str(pozo_sel).strip()) |
+            (pres_pozo["POZO"] == str(pozo_sel).strip())
+        ].copy()
+
+        if yac_mapa != "Todos" and "YACIMIENTO" in pres_pozo.columns:
+            pres_pozo = pres_pozo[
+                pres_pozo["YACIMIENTO"].astype(str) == str(yac_mapa)
+            ].copy()
+
+        pres_pozo["FECHA"] = pd.to_datetime(pres_pozo["FECHA"], errors="coerce")
+        pres_pozo["PRESION"] = pd.to_numeric(pres_pozo["PRESION"], errors="coerce")
+        pres_pozo = pres_pozo.dropna(subset=["FECHA", "PRESION"]).sort_values("FECHA")
+
+    return prod_pozo, pres_pozo
+
+@st.cache_data(show_spinner=False)
 def load_contorno_asignacion():
 
     contorno = load_table(TABLA_CONTORNO)
@@ -1678,6 +1730,42 @@ def load_term_perforados() -> pd.DataFrame:
 
     return term
 
+@st.cache_data(show_spinner="Cargando localizaciones...")
+def load_localizaciones() -> pd.DataFrame:
+    try:
+        loc = load_table(TABLA_LOCALIZACIONES)
+    except Exception as exc:
+        st.warning(f"No se pudo cargar la tabla Localizaciones: {exc}")
+        return pd.DataFrame()
+
+    loc = loc.loc[:, ~loc.columns.astype(str).str.startswith("Unnamed")]
+    loc = normalizar_columnas(loc)
+
+    cols_req = ["POZO", "TERMINACION", "YACIMIENTO", "CATEGORIA", "FONDO X", "FONDO Y"]
+    faltantes = [c for c in cols_req if c not in loc.columns]
+    if faltantes:
+        st.warning(
+            "Faltan columnas en Localizaciones: "
+            f"{faltantes}. Columnas leidas: {loc.columns.tolist()}"
+        )
+        return pd.DataFrame()
+
+    loc = loc.copy()
+    for col in ["POZO", "TERMINACION", "YACIMIENTO", "CATEGORIA"]:
+        loc[col] = loc[col].astype(str).str.strip()
+
+    loc["CATEGORIA"] = loc["CATEGORIA"].str.upper()
+    loc["FONDO X"] = pd.to_numeric(loc["FONDO X"], errors="coerce")
+    loc["FONDO Y"] = pd.to_numeric(loc["FONDO Y"], errors="coerce")
+    loc = loc.dropna(subset=["POZO", "YACIMIENTO", "FONDO X", "FONDO Y"]).copy()
+
+    if "COLUMNA 1" in loc.columns:
+        loc["COLUMNA 1"] = loc["COLUMNA 1"].astype(str).str.strip()
+    else:
+        loc["COLUMNA 1"] = ""
+
+    return loc.reset_index(drop=True)
+
 @st.cache_data(show_spinner="Cargando pozos intervenidos RMA...")
 def load_rma_intervenidos() -> pd.DataFrame:
     rma = load_table(TABLA_RMA)
@@ -1720,6 +1808,79 @@ def load_presiones() -> pd.DataFrame:
     pres = pres.dropna(subset=["TERMINACION", "POZO", "YACIMIENTO", "FECHA", "PRESION"])
 
     return pres
+
+@st.cache_data(show_spinner="Cargando muestreos de agua...")
+def load_muestreos_agua() -> pd.DataFrame:
+    cols_req = ["TERMINACION", "POZO", "FECHA MUESTREO", "% AGUA LAB"]
+
+    def clave_columna(col):
+        texto = str(col).strip().upper()
+        texto = unicodedata.normalize("NFKD", texto)
+        texto = "".join(c for c in texto if not unicodedata.combining(c))
+        texto = re.sub(r"[^A-Z0-9%]+", " ", texto)
+        return re.sub(r"\s+", " ", texto).strip()
+
+    try:
+        muestreos = pd.read_excel(
+            URL_MUESTREOS_AGUA,
+            sheet_name="Muestreos"
+        )
+    except Exception as exc:
+        st.warning(f"No se pudo cargar Muestreos.xlsx desde GitHub: {exc}")
+        return pd.DataFrame(columns=cols_req)
+
+    muestreos = muestreos.loc[:, ~muestreos.columns.astype(str).str.startswith("Unnamed")]
+    muestreos = normalizar_columnas(muestreos)
+
+    columnas_por_clave = {clave_columna(c): c for c in muestreos.columns}
+    candidatos = {
+        "TERMINACION": ["TERMINACION"],
+        "POZO": ["POZO"],
+        "FECHA MUESTREO": [
+            "FECHA MUESTREO",
+            "FECHA DE MUESTREO",
+            "FECHA MUESTRA",
+            "FECHA DE MUESTRA",
+        ],
+        "% AGUA LAB": [
+            "% AGUA LAB",
+            "AGUA LAB %",
+            "RESULTADO LAB AGUA %",
+            "RESULTADO LAB AGUA",
+            "AGUA %",
+        ],
+    }
+
+    renombres = {}
+    for col_salida, opciones in candidatos.items():
+        for opcion in opciones:
+            col_real = columnas_por_clave.get(clave_columna(opcion))
+            if col_real is not None:
+                renombres[col_real] = col_salida
+                break
+
+    muestreos = muestreos.rename(columns=renombres)
+
+    faltantes = [c for c in cols_req if c not in muestreos.columns]
+    if faltantes:
+        st.warning(
+            "Faltan columnas en Muestreos.xlsx: "
+            f"{faltantes}. Columnas leidas: {muestreos.columns.tolist()}"
+        )
+        return pd.DataFrame(columns=cols_req)
+
+    muestreos = muestreos[cols_req].copy()
+    muestreos["TERMINACION"] = muestreos["TERMINACION"].astype(str).str.strip()
+    muestreos["POZO"] = muestreos["POZO"].astype(str).str.strip()
+    muestreos["FECHA MUESTREO"] = convertir_fechas(muestreos["FECHA MUESTREO"])
+    muestreos["% AGUA LAB"] = pd.to_numeric(muestreos["% AGUA LAB"], errors="coerce")
+
+    muestreos = muestreos.dropna(subset=["FECHA MUESTREO", "% AGUA LAB"])
+    muestreos = muestreos[
+        ~muestreos["TERMINACION"].str.upper().isin(["", "NAN", "NONE"])
+    ].copy()
+
+    return muestreos.sort_values(["POZO", "TERMINACION", "FECHA MUESTREO"]).reset_index(drop=True)
 
 @st.cache_data(show_spinner="Cargando estado de pozos...")
 def load_estado_pozos() -> pd.DataFrame:
@@ -2715,6 +2876,54 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
     inyectores_operando_mapa = preparar_inyectores_operando_burbujas()
 
+    colores_localizaciones = {
+        "PND": "#00A65A",
+        "PRB": "#FFD700",
+        "POS": "#0057FF"
+    }
+    localizaciones_mapa = pd.DataFrame()
+    filtro_localizaciones = "Ninguno"
+
+    def preparar_localizaciones_burbujas(tipo_localizaciones):
+        loc = load_localizaciones()
+
+        if loc.empty or ver_todos_campo:
+            return pd.DataFrame()
+
+        loc = loc[
+            loc["YACIMIENTO"].astype(str).str.upper() == str(yac_mapa).upper()
+        ].copy()
+
+        if loc.empty:
+            return pd.DataFrame()
+
+        if tipo_localizaciones == "196":
+            col_196 = (
+                loc["COLUMNA 1"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+            )
+            valores_196 = set(
+                v.upper()
+                for v in col_196
+                if v and v.upper() not in ["NAN", "NONE"]
+            )
+            loc = loc[
+                loc["COLUMNA 1"]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                .isin(valores_196)
+            ].copy()
+
+        loc[x_col] = pd.to_numeric(loc["FONDO X"], errors="coerce")
+        loc[y_col] = pd.to_numeric(loc["FONDO Y"], errors="coerce")
+        loc = loc.dropna(subset=[x_col, y_col]).copy()
+        loc["COLOR_LOCALIZACION"] = loc["CATEGORIA"].map(colores_localizaciones).fillna("#7F8C8D")
+
+        return loc
+
     with c2:
 
         if ver_todos_campo:
@@ -2795,7 +3004,13 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
             filtro_term = st.selectbox(
                 "Pozos perforados históricos TERM",
-                ["Todos", "Solo perforados 2011-2020", "Solo no perforados"],
+                [
+                    "Todos",
+                    "Solo perforados 2011-2020",
+                    "Solo no perforados",
+                    "Mostrar localizaciones 315",
+                    "Mostrar localizaciones 196"
+                ],
                 key=f"filtro_term_mapa_{modo_mapa}_{yac_mapa}"
             )
 
@@ -2805,6 +3020,25 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             elif filtro_term == "Solo no perforados":
                 mapa = mapa[mapa["PERFORADO_TERM"] == "No"].copy()
 
+            elif filtro_term == "Mostrar localizaciones 315":
+                filtro_localizaciones = "315"
+                localizaciones_mapa = preparar_localizaciones_burbujas(filtro_localizaciones)
+
+            elif filtro_term == "Mostrar localizaciones 196":
+                filtro_localizaciones = "196"
+                localizaciones_mapa = preparar_localizaciones_burbujas(filtro_localizaciones)
+
+    animar_key = f"modo_animado_burbujas_{modo_mapa}_{yac_mapa}"
+    tipo_mapa_key = f"tipo_mapa_burbujas_{modo_mapa}_{yac_mapa}"
+    solo_acum_key = f"solo_pozos_con_acum_mapa_{modo_mapa}_{yac_mapa}"
+    mostrar_valores_key = f"mostrar_valores_burbujas_{modo_mapa}_{yac_mapa}"
+    animar_tiempo_activo = bool(st.session_state.get(animar_key, False)) and not ver_todos_campo
+
+    if animar_tiempo_activo:
+        st.session_state[tipo_mapa_key] = "Mapa Burbujas"
+        st.session_state[solo_acum_key] = False
+        st.session_state[mostrar_valores_key] = False
+
     c5, c6 = st.columns([1, 3])
 
     with c5:
@@ -2813,17 +3047,21 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             value=True,
             key=f"mostrar_nombres_mapa_{modo_mapa}_{yac_mapa}"
         )
-        solo_pozos_con_acum = st.checkbox(
-            "Solo pozos con aceite o inyeccion",
-            value=False,
-            key=f"solo_pozos_con_acum_mapa_{modo_mapa}_{yac_mapa}"
-        )
-        mostrar_etiquetas_burbujas = st.checkbox(
-            "Mostrar valores de burbujas",
-            value=False,
-            disabled=ver_todos_campo,
-            key=f"mostrar_valores_burbujas_{modo_mapa}_{yac_mapa}"
-        )
+        if animar_tiempo_activo:
+            solo_pozos_con_acum = False
+            mostrar_etiquetas_burbujas = False
+        else:
+            solo_pozos_con_acum = st.checkbox(
+                "Solo pozos con aceite o inyeccion",
+                value=False,
+                key=solo_acum_key
+            )
+            mostrar_etiquetas_burbujas = st.checkbox(
+                "Mostrar valores de burbujas",
+                value=False,
+                disabled=ver_todos_campo,
+                key=mostrar_valores_key
+            )
 
     if solo_pozos_con_acum and {"NP_BLS", "WINJ_BLS"}.issubset(mapa.columns):
         mapa = mapa[
@@ -2853,25 +3091,31 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         c6_tipo, c6_np, c6_iny = st.columns([2.4, 1, 1])
 
         with c6_tipo:
-            opciones_tipo_mapa = (
-                ["Mapa GIS"]
-                if ver_todos_campo
-                else ["Mapa Burbujas", "Mapa GIS"]
-            )
+            if ver_todos_campo:
+                opciones_tipo_mapa = ["Mapa GIS"]
+            elif animar_tiempo_activo:
+                opciones_tipo_mapa = ["Mapa Burbujas"]
+            else:
+                opciones_tipo_mapa = ["Mapa Burbujas", "Mapa GIS"]
 
             tipo_mapa = st.radio(
                 "Tipo de mapa",
                 opciones_tipo_mapa,
                 horizontal=True,
-                key=f"tipo_mapa_burbujas_{modo_mapa}_{yac_mapa}"
+                key=tipo_mapa_key
             )
 
             animar_tiempo = st.checkbox(
                 "Modo animado",
                 value=False,
                 disabled=ver_todos_campo,
-                key=f"modo_animado_burbujas_{modo_mapa}_{yac_mapa}"
+                key=animar_key
             )
+
+            if animar_tiempo and not ver_todos_campo:
+                tipo_mapa = "Mapa Burbujas"
+                solo_pozos_con_acum = False
+                mostrar_etiquetas_burbujas = False
 
         with c6_np:
             st.caption("Productores")
@@ -2964,7 +3208,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     mapa_uirevision = f"{modo_mapa}|{yac_mapa}|{tipo_mapa}|{variable}|{pozo_zoom}"
     color_burbuja = color_variable.get(variable, "green")
 
-    if not ver_todos_campo:
+    if not ver_todos_campo and not animar_tiempo:
 
         mapa[variable] = pd.to_numeric(
             mapa[variable],
@@ -3038,13 +3282,21 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             height=360
         )
 
-    def preparar_animacion_burbujas(datos_mapa: pd.DataFrame, usar_gis=False):
-        if ver_todos_campo or datos_mapa.empty:
+    @st.cache_data(show_spinner=False)
+    def preparar_animacion_burbujas(
+        datos_mapa: pd.DataFrame,
+        yac_mapa_arg,
+        x_col_arg,
+        y_col_arg,
+        usar_gis=False,
+        ver_todos=False
+    ):
+        if ver_todos or datos_mapa.empty:
             return pd.DataFrame(), []
 
         prod_anim = load_prod_calc().copy()
         prod_anim = prod_anim[
-            prod_anim[COL_YAC].astype(str) == str(yac_mapa)
+            prod_anim[COL_YAC].astype(str) == str(yac_mapa_arg)
         ].copy()
         prod_anim = prod_anim[
             prod_anim[COL_POZO].astype(str).isin(datos_mapa[COL_POZO].astype(str))
@@ -3092,7 +3344,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         anim["NP_BLS_ANIM"] = anim.groupby(COL_POZO)["NP_MES"].cumsum()
         anim["WINJ_BLS_ANIM"] = anim.groupby(COL_POZO)["WINJ_MES"].cumsum()
 
-        cols_coord_anim = [COL_POZO, "POZO", COL_YAC, x_col, y_col]
+        cols_coord_anim = [COL_POZO, "POZO", COL_YAC, x_col_arg, y_col_arg]
         if usar_gis:
             cols_coord_anim += ["LAT", "LON"]
 
@@ -3104,7 +3356,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         coords_anim = datos_mapa[cols_coord_anim].drop_duplicates(subset=[COL_POZO]).copy()
         coords_anim[COL_POZO] = coords_anim[COL_POZO].astype(str)
         anim = anim.merge(coords_anim, on=COL_POZO, how="left")
-        anim = anim.dropna(subset=["LAT", "LON"] if usar_gis else [x_col, y_col]).copy()
+        anim = anim.dropna(subset=["LAT", "LON"] if usar_gis else [x_col_arg, y_col_arg]).copy()
 
         max_np_anim = anim["NP_BLS_ANIM"].max()
         max_iny_anim = anim["WINJ_BLS_ANIM"].max()
@@ -3121,6 +3373,22 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         anim["FECHA_TXT"] = anim[COL_FECHA].dt.strftime("%d/%m/%Y")
         anim["ETIQUETA_NP_ANIM"] = anim["NP_BLS_ANIM"].map(lambda v: f"{v/1000:,.1f}" if v > 0 else "")
         anim["ETIQUETA_INY_ANIM"] = anim["WINJ_BLS_ANIM"].map(lambda v: f"{v/1000:,.1f}" if v > 0 else "")
+        anim["INYECTANDO_ANIM"] = anim["WINJ_MES"] > 0
+        anim["COLOR_INY_ANIM"] = np.where(
+            anim["INYECTANDO_ANIM"],
+            "rgba(0, 92, 255, 0.32)",
+            "rgba(115, 190, 255, 0.18)"
+        )
+        anim["BORDE_INY_ANIM"] = np.where(
+            anim["INYECTANDO_ANIM"],
+            "#001BFF",
+            "rgba(115, 190, 255, 0.70)"
+        )
+        anim["ANCHO_BORDE_INY_ANIM"] = np.where(
+            anim["INYECTANDO_ANIM"],
+            3.2,
+            1.2
+        )
 
         return anim, fechas_anim
 
@@ -3169,6 +3437,287 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             ]
         )
 
+    def preparar_datos_graficas_animadas(pozo_sel):
+        if not pozo_sel:
+            return pd.DataFrame(), pd.DataFrame()
+
+        prod_pozo_raw = df_base[
+            df_base[COL_POZO].astype(str).str.strip() == str(pozo_sel).strip()
+        ].copy()
+
+        if yac_mapa != "Todos" and COL_YAC in prod_pozo_raw.columns:
+            prod_pozo_raw = prod_pozo_raw[
+                prod_pozo_raw[COL_YAC].astype(str) == str(yac_mapa)
+            ].copy()
+
+        if not prod_pozo_raw.empty:
+            df_pozo_completo = completar_fechas_pozo(prod_pozo_raw)
+            prod_pozo = calcular_columnas_produccion(df_pozo_completo)
+            prod_pozo = prod_pozo.sort_values(COL_FECHA).reset_index(drop=True)
+        else:
+            prod_pozo = pd.DataFrame()
+
+        pres_pozo = load_presiones()
+        if not pres_pozo.empty:
+            pres_pozo["TERMINACION"] = pres_pozo["TERMINACION"].astype(str).str.strip()
+            pres_pozo["POZO"] = pres_pozo["POZO"].astype(str).str.strip()
+            pres_pozo = pres_pozo[
+                (pres_pozo["TERMINACION"] == str(pozo_sel).strip()) |
+                (pres_pozo["POZO"] == str(pozo_sel).strip())
+            ].copy()
+
+            if yac_mapa != "Todos" and "YACIMIENTO" in pres_pozo.columns:
+                pres_pozo = pres_pozo[
+                    pres_pozo["YACIMIENTO"].astype(str) == str(yac_mapa)
+                ].copy()
+
+            pres_pozo["FECHA"] = pd.to_datetime(pres_pozo["FECHA"], errors="coerce")
+            pres_pozo["PRESION"] = pd.to_numeric(pres_pozo["PRESION"], errors="coerce")
+            pres_pozo = pres_pozo.dropna(subset=["FECHA", "PRESION"]).sort_values("FECHA")
+
+        return prod_pozo, pres_pozo
+
+    def pozos_disponibles_graficas_animadas(datos_mapa):
+        cols_historia_anim = [
+            col for col in ["NP_BLS", "WP_BLS", "GP_PC", "WINJ_BLS"]
+            if col in datos_mapa.columns
+        ]
+        if not cols_historia_anim:
+            return []
+
+        datos = datos_mapa.copy()
+        datos["TOTAL_HISTORIA_GRAF"] = (
+            datos[cols_historia_anim]
+            .apply(pd.to_numeric, errors="coerce")
+            .fillna(0)
+            .sum(axis=1)
+        )
+
+        return sorted(
+            datos.loc[
+                datos["TOTAL_HISTORIA_GRAF"] > 0,
+                COL_POZO
+            ].dropna().astype(str).unique()
+        )
+
+    @st.fragment
+    def graficas_pozo_animadas_fragment(pozos_graficas_anim):
+        if not pozos_graficas_anim:
+            st.caption("No hay pozos con historia de produccion o inyeccion para graficar.")
+            return
+
+        pozo_sel_graf = st.selectbox(
+            "Pozo para graficas",
+            pozos_graficas_anim,
+            key=f"pozo_graficas_anim_burbujas_{modo_mapa}_{yac_mapa}"
+        )
+
+        prod_graf, pres_graf = preparar_datos_graficas_animadas(pozo_sel_graf)
+
+        if prod_graf.empty:
+            st.info("No hay historia para el pozo seleccionado.")
+            return
+
+        fechas_rango = list(pd.to_datetime(prod_graf[COL_FECHA], errors="coerce"))
+        if not pres_graf.empty:
+            fechas_rango.extend(pd.to_datetime(pres_graf["FECHA"], errors="coerce"))
+        fechas_rango = [fecha for fecha in fechas_rango if pd.notna(fecha)]
+        rango_x = [min(fechas_rango), max(fechas_rango)] if fechas_rango else None
+
+        def formato_grafica(fig, titulo, y1, y2=None):
+            fig.update_layout(
+                title=dict(
+                    text=f"<b>{titulo}</b>",
+                    x=0.02,
+                    xanchor="left",
+                    font=dict(size=14, family="Arial Black", color="#111827")
+                ),
+                template="plotly_white",
+                hovermode="x unified",
+                height=255,
+                plot_bgcolor="#F8F8FF",
+                paper_bgcolor="white",
+                font=dict(family="Arial", size=11, color="#111827"),
+                margin=dict(l=45, r=45, t=55, b=38),
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="center",
+                    x=0.5,
+                    font=dict(size=10, family="Arial", color="#111827"),
+                    bgcolor="rgba(255,255,255,0.8)",
+                    bordercolor="#D1D5DB",
+                    borderwidth=1
+                )
+            )
+            fig.update_xaxes(
+                range=rango_x,
+                title_text="<b>Fecha</b>",
+                tickformat="%d/%m/%Y",
+                showgrid=True,
+                gridcolor="#E5E7EB",
+                gridwidth=0.7,
+                zeroline=False,
+                showline=True,
+                linewidth=1.2,
+                linecolor="#111827",
+                mirror=True,
+                ticks="outside",
+                tickfont=dict(size=10, color="#111827")
+            )
+            fig.update_yaxes(
+                title_text=f"<b>{y1}</b>",
+                showgrid=True,
+                gridcolor="#E5E7EB",
+                gridwidth=0.7,
+                zeroline=False,
+                separatethousands=True,
+                showline=True,
+                linewidth=1.2,
+                linecolor="#111827",
+                mirror=True,
+                ticks="outside",
+                tickfont=dict(size=10, color="#111827"),
+                secondary_y=False
+            )
+            if y2:
+                fig.update_yaxes(
+                    title_text=f"<b>{y2}</b>",
+                    showgrid=False,
+                    zeroline=False,
+                    separatethousands=True,
+                    showline=True,
+                    linewidth=1.2,
+                    linecolor="#111827",
+                    ticks="outside",
+                    tickfont=dict(size=10, color="#111827"),
+                    secondary_y=True
+                )
+            return fig
+
+        fig_aceite = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_aceite.add_trace(go.Scatter(
+            x=prod_graf[COL_FECHA],
+            y=prod_graf[COL_QO],
+            mode="lines+markers",
+            name="Qo (bpd)",
+            line=dict(width=2, color="#27AE60"),
+            marker=dict(size=3),
+            fill="tozeroy",
+            fillcolor="rgba(39,174,96,0.18)",
+            connectgaps=False,
+            hovertemplate="<b>Fecha:</b> %{x|%d/%m/%Y}<br><b>Qo:</b> %{y:,.2f} bpd<extra></extra>"
+        ), secondary_y=False)
+        if not pres_graf.empty:
+            fig_aceite.add_trace(go.Scatter(
+                x=pres_graf["FECHA"],
+                y=pres_graf["PRESION"],
+                mode="markers",
+                name="Presion",
+                marker=dict(size=7, color="#8E44AD", symbol="diamond"),
+                connectgaps=False,
+                hovertemplate="<b>Fecha:</b> %{x|%d/%m/%Y}<br><b>Presion:</b> %{y:,.2f}<extra></extra>"
+            ), secondary_y=True)
+        st.plotly_chart(
+            formato_grafica(fig_aceite, f"Aceite y presion - {pozo_sel_graf}", "Qo", "Presion"),
+            use_container_width=True,
+            config={"displaylogo": False}
+        )
+
+        fig_agua = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_agua.add_trace(go.Scatter(
+            x=prod_graf[COL_FECHA],
+            y=prod_graf[COL_WC],
+            mode="lines+markers",
+            name="% Agua",
+            line=dict(width=2, color="#0000FF"),
+            marker=dict(size=3),
+            connectgaps=False,
+            hovertemplate="<b>Fecha:</b> %{x|%d/%m/%Y}<br><b>% Agua:</b> %{y:,.2f}<extra></extra>"
+        ), secondary_y=False)
+        fig_agua.add_trace(go.Scatter(
+            x=prod_graf[COL_FECHA],
+            y=prod_graf[COL_QW],
+            mode="lines+markers",
+            name="Qw (bpd)",
+            line=dict(width=2, color="#3498DB"),
+            marker=dict(size=3),
+            fill="tozeroy",
+            fillcolor="rgba(52,152,219,0.16)",
+            connectgaps=False,
+            hovertemplate="<b>Fecha:</b> %{x|%d/%m/%Y}<br><b>Qw:</b> %{y:,.2f} bpd<extra></extra>"
+        ), secondary_y=True)
+        st.plotly_chart(
+            formato_grafica(fig_agua, f"Corte de agua y agua - {pozo_sel_graf}", "% Agua", "Qw"),
+            use_container_width=True,
+            config={"displaylogo": False}
+        )
+
+        fig_gas = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_gas.add_trace(go.Scatter(
+            x=prod_graf[COL_FECHA],
+            y=prod_graf[COL_QG],
+            mode="lines+markers",
+            name="Qg (mpcd)",
+            line=dict(width=2, color="#FF0000"),
+            marker=dict(size=3),
+            connectgaps=False,
+            hovertemplate="<b>Fecha:</b> %{x|%d/%m/%Y}<br><b>Qg:</b> %{y:,.2f} mpcd<extra></extra>"
+        ), secondary_y=False)
+        fig_gas.add_trace(go.Scatter(
+            x=prod_graf[COL_FECHA],
+            y=prod_graf[COL_RGA],
+            mode="lines+markers",
+            name="RGA (pc/bl)",
+            line=dict(width=2, color="#E67E22"),
+            marker=dict(size=3),
+            connectgaps=False,
+            hovertemplate="<b>Fecha:</b> %{x|%d/%m/%Y}<br><b>RGA:</b> %{y:,.2f} pc/bl<extra></extra>"
+        ), secondary_y=True)
+        st.plotly_chart(
+            formato_grafica(fig_gas, f"Gas y RGA - {pozo_sel_graf}", "Qg", "RGA"),
+            use_container_width=True,
+            config={"displaylogo": False}
+        )
+
+        fig_acum = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_acum.add_trace(go.Scatter(
+            x=prod_graf[COL_FECHA],
+            y=prod_graf[COL_NP],
+            mode="lines+markers",
+            name="Np (mbl)",
+            line=dict(width=2, color="#008000"),
+            marker=dict(size=3),
+            connectgaps=False,
+            hovertemplate="<b>Fecha:</b> %{x|%d/%m/%Y}<br><b>Np:</b> %{y:,.2f} mbl<extra></extra>"
+        ), secondary_y=False)
+        fig_acum.add_trace(go.Scatter(
+            x=prod_graf[COL_FECHA],
+            y=prod_graf[COL_WP],
+            mode="lines+markers",
+            name="Wp (mbl)",
+            line=dict(width=2, color="#1E88E5"),
+            marker=dict(size=3),
+            connectgaps=False,
+            hovertemplate="<b>Fecha:</b> %{x|%d/%m/%Y}<br><b>Wp:</b> %{y:,.2f} mbl<extra></extra>"
+        ), secondary_y=False)
+        fig_acum.add_trace(go.Scatter(
+            x=prod_graf[COL_FECHA],
+            y=prod_graf[COL_GP],
+            mode="lines+markers",
+            name="Gp (mmpc)",
+            line=dict(width=2, color="#E53935"),
+            marker=dict(size=3),
+            connectgaps=False,
+            hovertemplate="<b>Fecha:</b> %{x|%d/%m/%Y}<br><b>Gp:</b> %{y:,.2f} mmpc<extra></extra>"
+        ), secondary_y=True)
+        st.plotly_chart(
+            formato_grafica(fig_acum, f"Acumuladas - {pozo_sel_graf}", "Np / Wp", "Gp"),
+            use_container_width=True,
+            config={"displaylogo": False}
+        )
+
     # =====================================================
     # MAPA GIS
     # =====================================================
@@ -3177,7 +3726,18 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         mapa_gis = convertir_utm_a_latlon(mapa, x_col, y_col)
 
         if animar_tiempo and not ver_todos_campo:
-            anim_gis, fechas_anim = preparar_animacion_burbujas(mapa_gis, usar_gis=True)
+            cols_anim_gis = [
+                col for col in [COL_POZO, "POZO", COL_YAC, x_col, y_col, "LAT", "LON"]
+                if col in mapa_gis.columns
+            ]
+            anim_gis, fechas_anim = preparar_animacion_burbujas(
+                mapa_gis[cols_anim_gis].copy(),
+                yac_mapa,
+                x_col,
+                y_col,
+                usar_gis=True,
+                ver_todos=ver_todos_campo
+            )
 
             if anim_gis.empty or not fechas_anim:
                 st.warning("No hay historia de aceite o inyección para animar con los filtros actuales.")
@@ -3219,17 +3779,18 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     textposition="bottom center",
                     marker=dict(
                         size=datos_iny_ini["SIZE_INY_ANIM"],
-                        color="rgba(0, 120, 255, 0.25)",
+                        color=datos_iny_ini["COLOR_INY_ANIM"],
                         opacity=0.70
                     ),
                     name="Winj acumulado",
-                    customdata=datos_iny_ini[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT"]],
+                    customdata=datos_iny_ini[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT", "WINJ_MES"]],
                     hovertemplate=
                         "<b>Pozo:</b> %{customdata[0]}<br>" +
                         "<b>Yacimiento:</b> %{customdata[1]}<br>" +
                         "<b>Fecha:</b> %{customdata[4]}<br>" +
                         "<b>Np:</b> %{customdata[2]:,.0f} bls<br>" +
                         "<b>Winj:</b> %{customdata[3]:,.0f} bls<br>" +
+                        "<b>Inyeccion del mes:</b> %{customdata[5]:,.0f} bls<br>" +
                         "<extra></extra>"
                 ))
 
@@ -3277,8 +3838,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                                 mode="markers+text" if mostrar_etiquetas_burbujas else "markers",
                                 text=datos_iny["ETIQUETA_INY_ANIM"] if mostrar_etiquetas_burbujas else None,
                                 textposition="bottom center",
-                                marker=dict(size=datos_iny["SIZE_INY_ANIM"], color="rgba(0, 120, 255, 0.25)", opacity=0.70),
-                                customdata=datos_iny[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT"]]
+                                marker=dict(size=datos_iny["SIZE_INY_ANIM"], color=datos_iny["COLOR_INY_ANIM"], opacity=0.70),
+                                customdata=datos_iny[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT", "WINJ_MES"]]
                             )
                         ]
                     ))
@@ -3472,6 +4033,38 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                         showlegend=True
                     )
                 )
+
+        if not localizaciones_mapa.empty:
+            loc_gis = convertir_utm_a_latlon(localizaciones_mapa, x_col, y_col)
+
+            for categoria, color in colores_localizaciones.items():
+                tmp_loc = loc_gis[loc_gis["CATEGORIA"].astype(str).str.upper() == categoria].copy()
+
+                if tmp_loc.empty:
+                    continue
+
+                fig_gis.add_trace(go.Scattermapbox(
+                    lat=tmp_loc["LAT"],
+                    lon=tmp_loc["LON"],
+                    mode="markers+text" if mostrar_nombres else "markers",
+                    text=tmp_loc["POZO"] if mostrar_nombres else None,
+                    textposition="bottom center",
+                    marker=dict(
+                        size=13,
+                        color=color,
+                        opacity=0.95
+                    ),
+                    name=f"Loc {filtro_localizaciones} {categoria}",
+                    customdata=tmp_loc[["POZO", "TERMINACION", "YACIMIENTO", "CATEGORIA"]],
+                    hovertemplate=
+                        "<b>Localizacion:</b> %{customdata[0]}<br>" +
+                        "<b>Terminacion:</b> %{customdata[1]}<br>" +
+                        "<b>Yacimiento:</b> %{customdata[2]}<br>" +
+                        "<b>Categoria:</b> %{customdata[3]}<br>" +
+                        "<extra></extra>",
+                    legendgroup=f"loc_{categoria}",
+                    showlegend=True
+                ))
 
         if not inyectores_operando_mapa.empty:
             iny_gis = convertir_utm_a_latlon(inyectores_operando_mapa, x_col, y_col)
@@ -3835,7 +4428,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         st.warning(f"No se pudo graficar contorno/asignación: {e}")
 
 
-    if not ver_todos_campo:
+    if not ver_todos_campo and not animar_tiempo:
 
         theta = np.linspace(0, 2 * np.pi, 90)
         radios_x = []
@@ -3869,7 +4462,18 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             ))
 
     if animar_tiempo and not ver_todos_campo:
-        anim_utm, fechas_anim = preparar_animacion_burbujas(mapa, usar_gis=False)
+        cols_anim_utm = [
+            col for col in [COL_POZO, "POZO", COL_YAC, x_col, y_col]
+            if col in mapa.columns
+        ]
+        anim_utm, fechas_anim = preparar_animacion_burbujas(
+            mapa[cols_anim_utm].copy(),
+            yac_mapa,
+            x_col,
+            y_col,
+            usar_gis=False,
+            ver_todos=ver_todos_campo
+        )
 
         if anim_utm.empty or not fechas_anim:
             st.warning("No hay historia de aceite o inyección para animar con los filtros actuales.")
@@ -3915,18 +4519,22 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 marker=dict(
                     size=datos_iny_ini["SIZE_INY_ANIM"],
                     sizemode="diameter",
-                    color="rgba(0, 120, 255, 0.20)",
+                    color=datos_iny_ini["COLOR_INY_ANIM"],
                     opacity=0.70,
-                    line=dict(color="blue", width=1.2)
+                    line=dict(
+                        color=datos_iny_ini["BORDE_INY_ANIM"],
+                        width=datos_iny_ini["ANCHO_BORDE_INY_ANIM"]
+                    )
                 ),
                 name="Winj acumulado",
-                customdata=datos_iny_ini[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT"]],
+                customdata=datos_iny_ini[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT", "WINJ_MES"]],
                 hovertemplate=
                     "<b>Pozo:</b> %{customdata[0]}<br>" +
                     "<b>Yacimiento:</b> %{customdata[1]}<br>" +
                     "<b>Fecha:</b> %{customdata[4]}<br>" +
                     "<b>Np:</b> %{customdata[2]:,.0f} bls<br>" +
                     "<b>Winj:</b> %{customdata[3]:,.0f} bls<br>" +
+                    "<b>Inyeccion del mes:</b> %{customdata[5]:,.0f} bls<br>" +
                     "<extra></extra>"
             ))
 
@@ -3966,11 +4574,14 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                             marker=dict(
                                 size=datos_iny["SIZE_INY_ANIM"],
                                 sizemode="diameter",
-                                color="rgba(0, 120, 255, 0.20)",
+                                color=datos_iny["COLOR_INY_ANIM"],
                                 opacity=0.70,
-                                line=dict(color="blue", width=1.2)
+                                line=dict(
+                                    color=datos_iny["BORDE_INY_ANIM"],
+                                    width=datos_iny["ANCHO_BORDE_INY_ANIM"]
+                                )
                             ),
-                            customdata=datos_iny[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT"]]
+                            customdata=datos_iny[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT", "WINJ_MES"]]
                         )
                     ]
                 ))
@@ -3978,7 +4589,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     label=nombre_frame,
                     method="animate",
                     args=[[nombre_frame], {
-                        "frame": {"duration": 0, "redraw": True},
+                        "frame": {"duration": 0, "redraw": False},
                         "transition": {"duration": 0},
                         "mode": "immediate"
                     }]
@@ -4014,32 +4625,23 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 template="plotly_white",
                 height=950,
                 uirevision=mapa_uirevision,
-                margin=dict(l=20, r=20, t=135, b=35),
+                margin=dict(l=20, r=35, t=135, b=35),
                 showlegend=True,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                updatemenus=[
-                    dict(
-                        type="buttons",
-                        direction="left",
-                        x=0.43,
-                        y=1.10,
-                        xanchor="center",
-                        yanchor="top",
-                        buttons=[
-                            dict(label="Play", method="animate", args=[None, {
-                                "frame": {"duration": 650, "redraw": True},
-                                "transition": {"duration": 250},
-                                "fromcurrent": True,
-                                "mode": "immediate"
-                            }]),
-                            dict(label="Stop", method="animate", args=[[None], {
-                                "frame": {"duration": 0, "redraw": False},
-                                "transition": {"duration": 0},
-                                "mode": "immediate"
-                            }])
-                        ]
-                    )
-                ],
+                hovermode="closest",
+                plot_bgcolor="#F8F8FF",
+                paper_bgcolor="white",
+                font=dict(family="Arial", size=13, color="#111827"),
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1,
+                    font=dict(size=12, family="Arial", color="#111827"),
+                    bgcolor="rgba(255,255,255,0.8)",
+                    bordercolor="#D1D5DB",
+                    borderwidth=1
+                ),
                 sliders=[
                     dict(
                         active=0,
@@ -4052,23 +4654,27 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 ]
             )
 
-            fig.update_xaxes(
-                title_text="UTM X",
-                showgrid=True,
-                gridcolor="#EAECEE",
-                showline=True,
-                linewidth=1,
-                linecolor="black"
-            )
-            fig.update_yaxes(
-                title_text="UTM Y",
-                scaleanchor="x",
-                scaleratio=1,
-                showgrid=True,
-                gridcolor="#EAECEE",
-                showline=True,
-                linewidth=1,
-                linecolor="black"
+            fig.update_layout(
+                xaxis=dict(
+                    domain=[0.0, 1.0],
+                    title_text="UTM X",
+                    showgrid=True,
+                    gridcolor="#EAECEE",
+                    showline=True,
+                    linewidth=1,
+                    linecolor="black"
+                ),
+                yaxis=dict(
+                    domain=[0.0, 1.0],
+                    title_text="UTM Y",
+                    scaleanchor="x",
+                    scaleratio=1,
+                    showgrid=True,
+                    gridcolor="#EAECEE",
+                    showline=True,
+                    linewidth=1,
+                    linecolor="black"
+                )
             )
 
             if pozo_zoom != "Todos" and "POZO" in mapa.columns:
@@ -4077,18 +4683,28 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     x0 = row_zoom[x_col].iloc[0]
                     y0 = row_zoom[y_col].iloc[0]
                     radio_zoom = 1000
-                    fig.update_xaxes(range=[x0 - radio_zoom, x0 + radio_zoom])
-                    fig.update_yaxes(range=[y0 - radio_zoom, y0 + radio_zoom])
+                    fig.update_layout(
+                        xaxis=dict(range=[x0 - radio_zoom, x0 + radio_zoom]),
+                        yaxis=dict(range=[y0 - radio_zoom, y0 + radio_zoom])
+                    )
 
-            st.plotly_chart(
-                fig,
-                use_container_width=True,
-                config={
-                    "scrollZoom": True,
-                    "displaylogo": False,
-                    "modeBarButtonsToRemove": ["lasso2d", "select2d"]
-                }
-            )
+            col_mapa_anim, col_graficas_anim = st.columns([2.2, 1], gap="small")
+
+            with col_mapa_anim:
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                    config={
+                        "scrollZoom": True,
+                        "displaylogo": False,
+                        "modeBarButtonsToRemove": ["lasso2d", "select2d"]
+                    }
+                )
+
+            with col_graficas_anim:
+                graficas_pozo_animadas_fragment(
+                    pozos_disponibles_graficas_animadas(mapa)
+                )
 
             mostrar_tabla_pozos_mapa(mapa)
 
@@ -4327,6 +4943,40 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     showlegend=False,
                     hoverinfo="skip"
                 ))
+
+    if not ver_todos_campo and not localizaciones_mapa.empty:
+
+        for categoria, color in colores_localizaciones.items():
+            tmp_loc = localizaciones_mapa[
+                localizaciones_mapa["CATEGORIA"].astype(str).str.upper() == categoria
+            ].copy()
+
+            if tmp_loc.empty:
+                continue
+
+            fig.add_trace(go.Scatter(
+                x=tmp_loc[x_col],
+                y=tmp_loc[y_col],
+                mode="markers+text" if mostrar_nombres else "markers",
+                text=tmp_loc["POZO"] if mostrar_nombres else None,
+                textposition="bottom center",
+                marker=dict(
+                    size=12,
+                    symbol="diamond",
+                    color=color,
+                    line=dict(color="black", width=1)
+                ),
+                name=f"Loc {filtro_localizaciones} {categoria}",
+                customdata=tmp_loc[["POZO", "TERMINACION", "YACIMIENTO", "CATEGORIA"]],
+                hovertemplate=
+                    "<b>Localizacion:</b> %{customdata[0]}<br>" +
+                    "<b>Terminacion:</b> %{customdata[1]}<br>" +
+                    "<b>Yacimiento:</b> %{customdata[2]}<br>" +
+                    "<b>Categoria:</b> %{customdata[3]}<br>" +
+                    "<extra></extra>",
+                legendgroup=f"loc_{categoria}",
+                showlegend=True
+            ))
 
     if not ver_todos_campo:
 
@@ -8163,6 +8813,18 @@ if vista == "Producción por pozo":
 
     first_row = df_prod.iloc[0]
     last_row = df_prod.iloc[-1]
+
+    muestreos_agua = load_muestreos_agua()
+    if modo_vista_pozo == "Historia completa por pozo":
+        df_muestreos_pozo = muestreos_agua[
+            muestreos_agua["POZO"].astype(str).str.strip() == str(pozo_sel).strip()
+        ].copy()
+    else:
+        df_muestreos_pozo = muestreos_agua[
+            muestreos_agua["TERMINACION"].astype(str).str.strip() == str(pozo_sel).strip()
+        ].copy()
+
+    df_muestreos_pozo = df_muestreos_pozo.sort_values("FECHA MUESTREO").reset_index(drop=True)
 # =========================================================
 # KPIs
 # =========================================================
@@ -8415,7 +9077,6 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
                     size=1,
                     line=dict(color="white", width=0.8)
                 ),
-                                connectgaps=False,
                 hovertemplate=
                     "<b>Pozo: %{fullData.name}</b><br>" +
                     hover_x + "<br>" +
@@ -8624,6 +9285,30 @@ if vista == "Producción por pozo":
         ),
         secondary_y=False
     )
+
+    if not df_muestreos_pozo.empty:
+        fig1.add_trace(
+            go.Scatter(
+                x=df_muestreos_pozo["FECHA MUESTREO"],
+                y=df_muestreos_pozo["% AGUA LAB"],
+                mode="markers",
+                name="% Agua Lab",
+                marker=dict(
+                    size=7,
+                    color="white",
+                    symbol="square",
+                    line=dict(color="black", width=1.2)
+                ),
+                customdata=df_muestreos_pozo[["TERMINACION", "POZO"]],
+                hovertemplate=
+                    "<b>% Agua Lab:</b> %{y:,.2f}%<br>" +
+                    "<b>Fecha:</b> %{x|%d/%m/%Y}<br>" +
+                    "<b>Terminacion:</b> %{customdata[0]}<br>" +
+                    "<b>Pozo:</b> %{customdata[1]}<br>" +
+                    "<extra></extra>"
+            ),
+            secondary_y=False
+        )
 
     fig1.add_trace(
         go.Scatter(
@@ -9165,6 +9850,11 @@ elif vista == "Comparativa por pozo":
             ].copy()
 
             df_comp = df_comp.sort_values([COL_POZO, COL_FECHA]).reset_index(drop=True)
+            colores_comp = px.colors.qualitative.Plotly
+            color_por_pozo_comp = {
+                str(pozo).strip(): colores_comp[i % len(colores_comp)]
+                for i, pozo in enumerate(pozos_sel_comp)
+            }
 
             st.plotly_chart(
                 comparative_plot(
@@ -9352,7 +10042,7 @@ elif vista == "Comparativa por pozo":
                         x=x_values,
                         y=dfi[COL_QIN].replace(0, np.nan),
                         mode="lines+markers",
-                        name=f"{pozo} | Qiny",
+                        name=f"{pozo}",
                         line=dict(width=3),
                         marker=dict(size=4),
                         connectgaps=False,
@@ -9445,6 +10135,135 @@ elif vista == "Comparativa por pozo":
                 fecha_max = df_comp[COL_FECHA].max()
                 fig_iny.update_xaxes(range=[fecha_min, fecha_max])
             st.plotly_chart(fig_iny, use_container_width=True)
+
+            # =========================
+            # 5. COMPARATIVO PRESIÓN
+            # =========================
+            pres_comp = load_presiones()
+
+            if not pres_comp.empty:
+                pres_comp = pres_comp[
+                    pres_comp["TERMINACION"].astype(str).str.strip().isin(pozos_sel_comp)
+                ].copy()
+
+                pres_comp["FECHA"] = pd.to_datetime(pres_comp["FECHA"], errors="coerce")
+                pres_comp["PRESION"] = pd.to_numeric(pres_comp["PRESION"], errors="coerce")
+                pres_comp = pres_comp.dropna(subset=["FECHA", "PRESION"]).copy()
+                pres_comp = pres_comp.sort_values(["TERMINACION", "FECHA"])
+
+                if not pres_comp.empty:
+                    fig_pres = go.Figure()
+
+                    for pozo in pozos_sel_comp:
+                        dfi_pres = pres_comp[
+                            pres_comp["TERMINACION"].astype(str).str.strip() == str(pozo).strip()
+                        ].copy()
+
+                        if dfi_pres.empty:
+                            continue
+
+                        if normalizar_tiempo:
+                            dfi_pres[COL_TIEMPO_NORM] = range(len(dfi_pres))
+                            x_values = dfi_pres[COL_TIEMPO_NORM]
+                            hover_x = "Medición normalizada: %{x}"
+                            x_title = "Tiempo normalizado, mediciones"
+                        else:
+                            x_values = dfi_pres["FECHA"]
+                            hover_x = "Fecha: %{x|%d/%m/%Y}"
+                            x_title = "Fecha"
+
+                        fig_pres.add_trace(
+                            go.Scatter(
+                                x=x_values,
+                                y=dfi_pres["PRESION"],
+                                mode="markers",
+                                name=f"{pozo}",
+                                marker=dict(
+                                    size=7,
+                                    color=color_por_pozo_comp.get(str(pozo).strip())
+                                ),
+                                connectgaps=False,
+                                hovertemplate=
+                                    f"<b>Pozo: {pozo}</b><br>" +
+                                    hover_x + "<br>" +
+                                    "Presión: %{y:,.2f}<extra></extra>"
+                            )
+                        )
+
+                    fig_pres.update_layout(
+                        title=dict(
+                            text="<b>Presión por pozo</b>",
+                            x=0.02,
+                            xanchor="left",
+                            font=dict(size=20, family="Arial Black", color="#111827")
+                        ),
+                        template="plotly_white",
+                        hovermode="x unified",
+                        height=450,
+                        plot_bgcolor="#F8F8FF",
+                        paper_bgcolor="white",
+                        font=dict(family="Arial", size=13, color="#111827"),
+                        margin=dict(l=70, r=40, t=90, b=70),
+                        legend=dict(
+                            orientation="h",
+                            yanchor="bottom",
+                            y=1.02,
+                            xanchor="center",
+                            x=0.5,
+                            font=dict(size=14, family="Arial", color="#111827"),
+                            bgcolor="rgba(255,255,255,0.8)",
+                            bordercolor="#D1D5DB",
+                            borderwidth=1
+                        )
+                    )
+
+                    fig_pres.update_xaxes(
+                        title_text=f"<b>{x_title}</b>",
+                        tickformat="%d/%m/%Y" if not normalizar_tiempo else None,
+                        showgrid=True,
+                        gridcolor="#E5E7EB",
+                        gridwidth=0.7,
+                        zeroline=False,
+                        showline=True,
+                        linewidth=1.2,
+                        linecolor="#111827",
+                        mirror=True,
+                        ticks="outside",
+                        tickfont=dict(size=18, color="#111827"),
+                        title=dict(
+                            text=f"<b>{x_title}</b>",
+                            font=dict(size=18, color="#374151")
+                        ),
+                        rangeslider=dict(visible=False)
+                    )
+
+                    fig_pres.update_yaxes(
+                        title_text="<b>Presión</b>",
+                        showgrid=True,
+                        gridcolor="#E5E7EB",
+                        gridwidth=0.7,
+                        zeroline=False,
+                        separatethousands=True,
+                        showline=True,
+                        linewidth=1.2,
+                        linecolor="#111827",
+                        mirror=True,
+                        ticks="outside",
+                        tickfont=dict(size=18, color="#111827"),
+                        title=dict(
+                            text="<b>Presión</b>",
+                            font=dict(size=18, color="#374151")
+                        )
+                    )
+
+                    if not normalizar_tiempo:
+                        fig_pres.update_xaxes(range=[fecha_min, fecha_max])
+
+                    st.plotly_chart(fig_pres, use_container_width=True)
+                else:
+                    st.info("No hay datos de presión para los pozos seleccionados.")
+            else:
+                st.info("No hay datos disponibles en la tabla Presiones.")
 
         else:
             st.warning("No hay datos disponibles para los pozos seleccionados.")
