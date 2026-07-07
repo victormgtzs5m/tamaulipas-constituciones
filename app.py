@@ -11,6 +11,7 @@ import os
 import re
 import unicodedata
 
+
 # =========================================================
 # CONFIGURACIÓN GENERAL
 # =========================================================
@@ -4433,6 +4434,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         theta = np.linspace(0, 2 * np.pi, 90)
         radios_x = []
         radios_y = []
+        radios_customdata = []
 
         for _, row in mapa.iterrows():
 
@@ -4448,6 +4450,9 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
                 radios_x.extend((x0 + radio * np.cos(theta)).tolist() + [None])
                 radios_y.extend((y0 + radio * np.sin(theta)).tolist() + [None])
+                radios_customdata.extend(
+                    [[row.get("POZO", ""), radio]] * len(theta) + [[None, None]]
+                )
 
         if radios_x:
             fig.add_trace(go.Scatter(
@@ -4458,7 +4463,11 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 name="Radio de drene (m)",
                 legendgroup="radios",
                 showlegend=False,
-                hoverinfo="skip"
+                customdata=radios_customdata,
+                hovertemplate=
+                    "<b>Pozo:</b> %{customdata[0]}<br>" +
+                    "<b>Radio de drene:</b> %{customdata[1]:,.0f} m<br>" +
+                    "<extra></extra>"
             ))
 
     if animar_tiempo and not ver_todos_campo:
