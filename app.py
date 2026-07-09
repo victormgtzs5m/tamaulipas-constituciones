@@ -3870,6 +3870,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
                 fig_anim_gis.update_layout(
                     title=f"<b>Animación acumulada Np / Winj - {yac_mapa}</b>",
+                    dragmode="pan",
                     mapbox=dict(style="open-street-map", center=centro_gis_anim, zoom=zoom_gis_anim),
                     height=850,
                     margin=dict(l=0, r=0, t=125, b=35),
@@ -4134,6 +4135,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 if ver_todos_campo
                 else f"<b>Mapa GIS de burbujas - {yac_mapa}</b>"
             ),
+            dragmode="pan",
             mapbox=dict(
                 style="open-street-map",
                 center=centro_gis,
@@ -4360,6 +4362,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
                 fig_heat.update_xaxes(range=[x0 - radio_zoom, x0 + radio_zoom])
                 fig_heat.update_yaxes(range=[y0 - radio_zoom, y0 + radio_zoom])
+
+        fig_heat.update_layout(dragmode="pan")
 
         st.plotly_chart(
             fig_heat,
@@ -4700,6 +4704,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             col_mapa_anim, col_graficas_anim = st.columns([2.2, 1], gap="small")
 
             with col_mapa_anim:
+                fig.update_layout(dragmode="pan")
                 st.plotly_chart(
                     fig,
                     use_container_width=True,
@@ -5036,6 +5041,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             if ver_todos_campo
             else f"<b>Mapa de burbujas - {yac_mapa}</b>"
         ),
+        dragmode="pan",
         template="plotly_white",
         height=950,
         uirevision=mapa_uirevision,
