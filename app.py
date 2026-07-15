@@ -19,7 +19,7 @@ st.set_page_config(
     page_title="Campo Tamaulipas Constituciones",
     page_icon="🛢️",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 #st.cache_data.clear()
 # =========================================================
@@ -43,8 +43,11 @@ TABLA_OPERACION = "Operacion"
 TABLA_INYECTORES = "Inyectores"
 TABLA_EVENTOS = "Eventos"
 TABLA_LOCALIZACIONES = "Localizaciones"
+TABLA_INSTA = "Instalaciones"
+TABLA_RESERVAS = "Reservas"
 
 URL_MUESTREOS_AGUA = "https://raw.githubusercontent.com/victormgtzs5m/tamaulipas-constituciones/main/Muestreos.xlsx"
+URL_SEGUIMIENTO = "https://raw.githubusercontent.com/victormgtzs5m/tamaulipas-constituciones/main/Seguimiento.xlsx"
 
 #Leer archivo db
 @st.cache_data(show_spinner=False)
@@ -477,7 +480,7 @@ def inyeccion():
             if yacimiento_sel == "Todos"
             else f"<b>Mapa de inyección - {yacimiento_sel}</b>"
         ),
-        height=850,
+        height=950,
         xaxis_title="UTM X",
         yaxis_title="UTM Y",
         template="plotly_white",
@@ -753,6 +756,16 @@ def normalizar_columnas(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip().upper() for c in df.columns]
     return df
+
+
+def normalizar_clave_texto(serie) -> pd.Series:
+    """Normaliza textos para comparar pozos/terminaciones sin depender de espacios o mayusculas."""
+    return (
+        serie.astype(str)
+        .str.strip()
+        .str.upper()
+        .str.replace(r"\s+", " ", regex=True)
+    )
 
 
 def convertir_fechas(serie: pd.Series) -> pd.Series:
@@ -1767,6 +1780,51 @@ def load_localizaciones() -> pd.DataFrame:
 
     return loc.reset_index(drop=True)
 
+@st.cache_data(show_spinner="Cargando instalaciones...")
+def load_instalaciones_gis() -> pd.DataFrame:
+    try:
+        insta = load_table(TABLA_INSTA)
+    except Exception as exc:
+        st.warning(f"No se pudo cargar la tabla Instalaciones: {exc}")
+        return pd.DataFrame()
+
+    insta = insta.loc[:, ~insta.columns.astype(str).str.startswith("Unnamed")]
+    insta = normalizar_columnas(insta)
+
+    col_lon = "LON" if "LON" in insta.columns else "LONG"
+    cols_req = ["ALIAS", "INSTALACION", "LAT", col_lon]
+    faltantes = [c for c in cols_req if c not in insta.columns]
+    if faltantes:
+        st.warning(
+            "Faltan columnas en Instalaciones: "
+            f"{faltantes}. Columnas leidas: {insta.columns.tolist()}"
+        )
+        return pd.DataFrame()
+
+    insta = insta.copy()
+    insta["ALIAS"] = insta["ALIAS"].astype(str).str.strip()
+    insta["INSTALACION"] = insta["INSTALACION"].astype(str).str.strip().str.upper()
+    insta["INSTALACION"] = insta["INSTALACION"].map(
+        lambda v: "".join(
+            c for c in unicodedata.normalize("NFKD", str(v))
+            if not unicodedata.combining(c)
+        )
+    )
+    insta["LAT"] = pd.to_numeric(insta["LAT"], errors="coerce")
+    insta["LON"] = pd.to_numeric(insta[col_lon], errors="coerce")
+
+    if "CAMPO" in insta.columns:
+        insta["CAMPO"] = insta["CAMPO"].astype(str).str.strip()
+    else:
+        insta["CAMPO"] = ""
+
+    insta = insta.dropna(subset=["ALIAS", "INSTALACION", "LAT", "LON"]).copy()
+    insta = insta[
+        ~insta["ALIAS"].astype(str).str.upper().isin(["", "NAN", "NONE"])
+    ].copy()
+
+    return insta.reset_index(drop=True)
+
 @st.cache_data(show_spinner="Cargando pozos intervenidos RMA...")
 def load_rma_intervenidos() -> pd.DataFrame:
     rma = load_table(TABLA_RMA)
@@ -1882,6 +1940,102 @@ def load_muestreos_agua() -> pd.DataFrame:
     ].copy()
 
     return muestreos.sort_values(["POZO", "TERMINACION", "FECHA MUESTREO"]).reset_index(drop=True)
+
+@st.cache_data(show_spinner="Cargando seguimiento de actividades...")
+def load_seguimiento_actividades(cache_version=2) -> pd.DataFrame:
+    cols_req = ["TERMINACION", "POZO", "FECHA", "ACTIVIDAD"]
+
+    def clave_columna(col):
+        texto = str(col).strip().upper()
+        texto = unicodedata.normalize("NFKD", texto)
+        texto = "".join(c for c in texto if not unicodedata.combining(c))
+        texto = re.sub(r"[^A-Z0-9]+", " ", texto)
+        return re.sub(r"\s+", " ", texto).strip()
+
+    try:
+        seguimiento = pd.read_excel(URL_SEGUIMIENTO)
+    except Exception as exc:
+        st.warning(f"No se pudo cargar Seguimiento.xlsx desde GitHub: {exc}")
+        return pd.DataFrame(columns=cols_req)
+
+    seguimiento = seguimiento.loc[:, ~seguimiento.columns.astype(str).str.startswith("Unnamed")]
+    seguimiento = normalizar_columnas(seguimiento)
+
+    columnas_por_clave = {clave_columna(c): c for c in seguimiento.columns}
+    candidatos = {
+        "TERMINACION": ["TERMINACION", "TERMINACIÓN", "TERM"],
+        "YACIMIENTO": ["YACIMIENTO", "YAC"],
+        "POZO": ["POZO", "POZO FISICO", "NOMBRE POZO"],
+        "FECHA": [
+            "FECHA",
+            "FECHA ACTIVIDAD",
+            "FECHA DE ACTIVIDAD",
+            "FECHA CADA ACTIVIDAD",
+            "FECHA DE CADA ACTIVIDAD",
+            "FECHA EVENTO",
+            "FECHA DE EVENTO",
+        ],
+        "ACTIVIDAD": [
+            "ACTIVIDAD",
+            "ACTIVIDADES",
+            "EVENTO",
+            "EVENTOS",
+            "DESCRIPCION",
+            "DESCRIPCION ACTIVIDAD",
+        ],
+    }
+
+    renombres = {}
+    for col_salida, opciones in candidatos.items():
+        for opcion in opciones:
+            col_real = columnas_por_clave.get(clave_columna(opcion))
+            if col_real is not None:
+                renombres[col_real] = col_salida
+                break
+
+    seguimiento = seguimiento.rename(columns=renombres)
+
+    faltantes = [c for c in cols_req if c not in seguimiento.columns]
+    if faltantes:
+        st.warning(
+            "Faltan columnas en Seguimiento.xlsx: "
+            f"{faltantes}. Columnas leidas: {seguimiento.columns.tolist()}"
+        )
+        return pd.DataFrame(columns=cols_req)
+
+    if "YACIMIENTO" not in seguimiento.columns:
+        seguimiento["YACIMIENTO"] = ""
+
+    seguimiento = seguimiento[["TERMINACION", "POZO", "YACIMIENTO", "FECHA", "ACTIVIDAD"]].copy()
+    seguimiento["TERMINACION"] = seguimiento["TERMINACION"].astype(str).str.strip()
+    seguimiento["POZO"] = seguimiento["POZO"].astype(str).str.strip()
+    seguimiento["YACIMIENTO"] = seguimiento["YACIMIENTO"].astype(str).str.strip()
+    seguimiento["ACTIVIDAD"] = seguimiento["ACTIVIDAD"].astype(str).str.strip()
+    seguimiento["FECHA"] = convertir_fechas(seguimiento["FECHA"])
+
+    seguimiento = seguimiento.dropna(subset=["TERMINACION", "POZO", "FECHA", "ACTIVIDAD"])
+    seguimiento = seguimiento[
+        ~seguimiento["TERMINACION"].str.upper().isin(["", "NAN", "NONE"])
+        & ~seguimiento["POZO"].str.upper().isin(["", "NAN", "NONE"])
+        & ~seguimiento["ACTIVIDAD"].str.upper().isin(["", "NAN", "NONE"])
+    ].copy()
+
+    actividad_norm = (
+        seguimiento["ACTIVIDAD"]
+        .astype(str)
+        .map(lambda v: unicodedata.normalize("NFKD", v))
+        .map(lambda v: "".join(c for c in v if not unicodedata.combining(c)))
+        .str.upper()
+        .str.replace(r"[^A-Z0-9]+", " ", regex=True)
+        .str.replace(r"\s+", " ", regex=True)
+        .str.strip()
+    )
+    patron_excluir = r"(MANTENIMIENTO|ECOMETRO|CALIBRACION|AJUSTE.*GAS|GAS.*AJUSTE)"
+    seguimiento = seguimiento[
+        ~actividad_norm.str.contains(patron_excluir, na=False, regex=True)
+    ].copy()
+
+    return seguimiento.sort_values(["POZO", "TERMINACION", "FECHA", "ACTIVIDAD"]).reset_index(drop=True)
 
 @st.cache_data(show_spinner="Cargando estado de pozos...")
 def load_estado_pozos() -> pd.DataFrame:
@@ -2539,11 +2693,11 @@ def crear_heatmap_kriging_burbujas(
             st.warning(f"No se pudo generar el heatmap con Kriging: {e}")
             return None
 
-def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM", pozos_destacados=None):
+def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM", pozos_destacados=None, mostrar_instalaciones_gis=False):
     """Mapa de burbujas con opción Todos desde Operativas y mapas por yacimiento sin modificar."""
 
     st.markdown(
-        "<div class='section-title'>Mapa de burbujas y radios de drene</div>",
+        "<div class='section-title'>Mapa</div>",
         unsafe_allow_html=True
     )
 
@@ -2710,6 +2864,110 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         )
 
     ver_todos_campo = yac_mapa == "Todos"
+    usar_panel_filtros_mapa = (not ver_todos_campo) and (not es_movil())
+
+    if usar_panel_filtros_mapa:
+        panel_filtros_mapa, salida_mapa_burbujas = st.columns([0.24, 0.76], gap="medium")
+
+        with panel_filtros_mapa:
+            st.markdown(
+                """
+                <div class="map-filter-panel-marker"></div>
+                <style>
+                div[data-testid="column"]:has(.map-filter-panel-marker),
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) {
+                    background: linear-gradient(180deg, #2F363D 0%, #252B31 100%);
+                    border: 1px solid #1F252B;
+                    border-radius: 8px;
+                    padding: 12px 12px 18px 12px;
+                    box-shadow: 0 10px 26px rgba(15, 23, 42, 0.22);
+                }
+                div[data-testid="column"]:has(.map-filter-panel-marker) .map-panel-title,
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) .map-panel-title {
+                    background: #20262D;
+                    border: 1px solid #111827;
+                    border-radius: 6px;
+                    color: #E5E7EB;
+                    font-size: 15px;
+                    font-weight: 800;
+                    letter-spacing: .2px;
+                    padding: 8px 10px;
+                    margin-bottom: 10px;
+                }
+                div[data-testid="column"]:has(.map-filter-panel-marker) .map-panel-section,
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) .map-panel-section {
+                    color: #AEB7C2;
+                    font-size: 10px;
+                    font-weight: 800;
+                    text-transform: uppercase;
+                    letter-spacing: .65px;
+                    margin: 14px 0 6px 0;
+                }
+                div[data-testid="column"]:has(.map-filter-panel-marker) label,
+                div[data-testid="column"]:has(.map-filter-panel-marker) p,
+                div[data-testid="column"]:has(.map-filter-panel-marker) span,
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) label,
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) p,
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) span {
+                    color: #DDE4EC !important;
+                    font-family: "Segoe UI", Arial, sans-serif;
+                    font-size: 12px;
+                }
+                div[data-testid="column"]:has(.map-filter-panel-marker) div[data-testid="stCheckbox"],
+                div[data-testid="column"]:has(.map-filter-panel-marker) div[data-testid="stRadio"],
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) div[data-testid="stCheckbox"],
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) div[data-testid="stRadio"] {
+                    margin-top: -3px;
+                    margin-bottom: -4px;
+                }
+                div[data-testid="column"]:has(.map-filter-panel-marker) div[data-testid="stSelectbox"] label,
+                div[data-testid="column"]:has(.map-filter-panel-marker) div[data-testid="stDateInput"] label,
+                div[data-testid="column"]:has(.map-filter-panel-marker) div[data-testid="stRadio"] label,
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) div[data-testid="stSelectbox"] label,
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) div[data-testid="stDateInput"] label,
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) div[data-testid="stRadio"] label {
+                    color: #F3F4F6 !important;
+                    font-weight: 700;
+                }
+                div[data-testid="column"]:has(.map-filter-panel-marker) div[data-baseweb="select"] > div,
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) div[data-baseweb="select"] > div {
+                    background-color: #1F252B !important;
+                    border-color: #4B5563 !important;
+                    border-radius: 6px;
+                }
+                div[data-testid="column"]:has(.map-filter-panel-marker) div[data-baseweb="select"] span,
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) div[data-baseweb="select"] span,
+                div[data-testid="column"]:has(.map-filter-panel-marker) div[data-baseweb="select"] div,
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) div[data-baseweb="select"] div,
+                div[data-testid="column"]:has(.map-filter-panel-marker) div[data-baseweb="select"] input,
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) div[data-baseweb="select"] input {
+                    color: #F9FAFB !important;
+                }
+                div[data-testid="column"]:has(.map-filter-panel-marker) div[data-baseweb="select"] svg,
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) div[data-baseweb="select"] svg {
+                    color: #F9FAFB !important;
+                    fill: #F9FAFB !important;
+                }
+                div[data-testid="column"]:has(.map-filter-panel-marker) div[data-baseweb="input"] > div,
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) div[data-baseweb="input"] > div {
+                    background-color: #FFFFFF;
+                    border-color: #4B5563;
+                    border-radius: 6px;
+                }
+                div[data-testid="column"]:has(.map-filter-panel-marker) hr,
+                div[data-testid="stColumn"]:has(.map-filter-panel-marker) hr {
+                    border-color: #46505A;
+                    margin: 12px 0;
+                }
+                </style>
+                <div class="map-panel-title">Mapa</div>
+                """,
+                unsafe_allow_html=True
+            )
+   
+    else:
+        panel_filtros_mapa = None
+        salida_mapa_burbujas = st
 
     # =====================================================
     # SI ES TODOS: USAR OPERATIVAS + COORD SUPERFICIE
@@ -2925,7 +3183,125 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
         return loc
 
-    with c2:
+    def preparar_muestreos_agua_burbujas(mapa_base, fecha_inicio=None):
+        muestreos = load_muestreos_agua()
+
+        if muestreos.empty or ver_todos_campo:
+            return pd.DataFrame()
+
+        cols_mapa_req = ["TERMINACION", "POZO", COL_YAC, x_col, y_col]
+        if any(c not in mapa_base.columns for c in cols_mapa_req):
+            return pd.DataFrame()
+
+        muestreos = muestreos.copy()
+        muestreos["TERMINACION"] = muestreos["TERMINACION"].astype(str).str.strip()
+        muestreos["% AGUA LAB"] = pd.to_numeric(muestreos["% AGUA LAB"], errors="coerce")
+        muestreos["FECHA MUESTREO"] = convertir_fechas(muestreos["FECHA MUESTREO"])
+        muestreos = muestreos.dropna(subset=["TERMINACION", "% AGUA LAB", "FECHA MUESTREO"])
+
+        if fecha_inicio is not None:
+            fecha_inicio = pd.to_datetime(fecha_inicio).normalize()
+            muestreos = muestreos[muestreos["FECHA MUESTREO"] >= fecha_inicio].copy()
+
+        if muestreos.empty:
+            return pd.DataFrame()
+
+        muestreos_ult = (
+            muestreos.sort_values(["TERMINACION", "FECHA MUESTREO"])
+            .groupby("TERMINACION", as_index=False)
+            .tail(1)
+        )
+
+        coord_muestreos = (
+            mapa_base[cols_mapa_req]
+            .dropna(subset=["TERMINACION", x_col, y_col])
+            .drop_duplicates(subset=["TERMINACION"])
+            .copy()
+        )
+        coord_muestreos["TERMINACION"] = coord_muestreos["TERMINACION"].astype(str).str.strip()
+
+        muestreos_mapa = muestreos_ult.merge(
+            coord_muestreos,
+            on="TERMINACION",
+            how="inner",
+            suffixes=("_MUESTREO", "")
+        )
+
+        if "POZO" not in muestreos_mapa.columns and "POZO_MUESTREO" in muestreos_mapa.columns:
+            muestreos_mapa["POZO"] = muestreos_mapa["POZO_MUESTREO"]
+
+        muestreos_mapa = muestreos_mapa[
+            muestreos_mapa[COL_YAC].astype(str).str.upper() == str(yac_mapa).upper()
+        ].copy()
+
+        if muestreos_mapa.empty:
+            return pd.DataFrame()
+
+        max_agua_lab = muestreos_mapa["% AGUA LAB"].max()
+        if max_agua_lab > 0:
+            muestreos_mapa["SIZE_MUESTREO"] = 10 + (muestreos_mapa["% AGUA LAB"] / max_agua_lab) * 28
+        else:
+            muestreos_mapa["SIZE_MUESTREO"] = 10
+
+        muestreos_mapa["ETIQUETA_MUESTREO"] = muestreos_mapa["% AGUA LAB"].map(lambda v: f"{v:,.1f}%")
+
+        return muestreos_mapa.dropna(subset=[x_col, y_col]).copy()
+
+    animar_key = f"modo_animado_burbujas_{modo_mapa}_{yac_mapa}"
+    tipo_mapa_key = f"tipo_mapa_burbujas_{modo_mapa}_{yac_mapa}"
+    solo_acum_key = f"solo_pozos_con_acum_mapa_{modo_mapa}"
+    mostrar_valores_key = f"mostrar_valores_burbujas_{modo_mapa}"
+    animar_tiempo_activo = bool(st.session_state.get(animar_key, False)) and not ver_todos_campo
+
+    if animar_tiempo_activo:
+        st.session_state[tipo_mapa_key] = "Mapa Burbujas"
+        st.session_state[solo_acum_key] = False
+        st.session_state[mostrar_valores_key] = False
+
+    if usar_panel_filtros_mapa:
+        with panel_filtros_mapa:
+            #st.markdown("##### Tipo de mapa")
+            #st.markdown("<div class='map-panel-section'>Tipo de mapa</div>", unsafe_allow_html=True)
+            st.markdown(
+                """
+                <style>
+                div[data-testid="stRadio"] {
+                    margin-bottom: -1.2rem;
+                }
+                div[data-testid="stRadio"] ~ div[data-testid="stCheckbox"]:first-of-type {
+                    margin-top: -0.9rem;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True
+            )
+
+            if animar_tiempo_activo:
+                opciones_tipo_mapa = ["Mapa Burbujas"]
+            else:
+                opciones_tipo_mapa = ["Mapa Burbujas", "Mapa GIS"]
+
+            tipo_mapa = st.radio(
+                "Tipo de mapa",
+                opciones_tipo_mapa,
+                horizontal=False,
+                key=tipo_mapa_key
+            )
+
+            animar_tiempo = st.checkbox(
+                "Modo animado",
+                value=False,
+                key=animar_key
+            )
+
+            if animar_tiempo:
+                tipo_mapa = "Mapa Burbujas"
+                solo_pozos_con_acum = False
+                mostrar_etiquetas_burbujas = False
+
+    control_variable_mapa = panel_filtros_mapa if usar_panel_filtros_mapa else c2
+
+    with control_variable_mapa:
 
         if ver_todos_campo:
 
@@ -2940,6 +3316,9 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             )
 
         else:
+            #st.markdown("##### Variable de burbuja")
+            if usar_panel_filtros_mapa:
+                st.markdown("<div class='map-panel-section'>Variable de burbuja</div>", unsafe_allow_html=True)
 
             variable = st.selectbox(
                 "Variable de burbuja",
@@ -2955,7 +3334,9 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 key=f"variable_mapa_burbujas_{modo_mapa}"
             )
 
-    with c3:
+    control_zoom_mapa = c3 if ver_todos_campo else c2
+
+    with control_zoom_mapa:
         pozos_mapa = sorted(mapa["POZO"].dropna().astype(str).unique())
 
         pozo_zoom = st.selectbox(
@@ -2964,9 +3345,14 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             key=f"pozo_zoom_mapa_{modo_mapa}_{yac_mapa}"
         )
 
-    with c4:
+    control_perforados_mapa = panel_filtros_mapa if usar_panel_filtros_mapa else c4
 
-        if ver_todos_campo:
+    with control_perforados_mapa:
+
+        if usar_panel_filtros_mapa:
+            pass
+
+        elif ver_todos_campo:
 
             yacs_operativas = sorted(
                 mapa["YACIMIENTO"]
@@ -2988,6 +3374,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 ].copy()
 
         elif modo_mapa == "RMA":
+            st.markdown("##### Pozos RMA")
 
             filtro_term = st.selectbox(
                 "Pozos intervenidos RMA",
@@ -3002,58 +3389,140 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 mapa = mapa[mapa["POZO_RMA"] == "No"].copy()
 
         else:
+            #st.markdown("##### Pozos perforados TERM")
 
             filtro_term = st.selectbox(
                 "Pozos perforados históricos TERM",
                 [
                     "Todos",
-                    "Solo perforados 2011-2020",
-                    "Solo no perforados",
-                    "Mostrar localizaciones 315",
-                    "Mostrar localizaciones 196"
+                    "Solo Campañas 2011-2020",
+                    "315 Localizaciones",
+                    "196 Localizaciones"
                 ],
                 key=f"filtro_term_mapa_{modo_mapa}_{yac_mapa}"
             )
 
-            if filtro_term == "Solo perforados 2011-2020":
+            if filtro_term == "Solo Campañas 2011-2020":
                 mapa = mapa[mapa["PERFORADO_TERM"] == "Sí"].copy()
 
-            elif filtro_term == "Solo no perforados":
-                mapa = mapa[mapa["PERFORADO_TERM"] == "No"].copy()
-
-            elif filtro_term == "Mostrar localizaciones 315":
+            elif filtro_term == "315 Localizaciones":
                 filtro_localizaciones = "315"
                 localizaciones_mapa = preparar_localizaciones_burbujas(filtro_localizaciones)
 
-            elif filtro_term == "Mostrar localizaciones 196":
+            elif filtro_term == "196 Localizaciones":
                 filtro_localizaciones = "196"
                 localizaciones_mapa = preparar_localizaciones_burbujas(filtro_localizaciones)
 
-    animar_key = f"modo_animado_burbujas_{modo_mapa}_{yac_mapa}"
-    tipo_mapa_key = f"tipo_mapa_burbujas_{modo_mapa}_{yac_mapa}"
-    solo_acum_key = f"solo_pozos_con_acum_mapa_{modo_mapa}_{yac_mapa}"
-    mostrar_valores_key = f"mostrar_valores_burbujas_{modo_mapa}_{yac_mapa}"
-    animar_tiempo_activo = bool(st.session_state.get(animar_key, False)) and not ver_todos_campo
+    if usar_panel_filtros_mapa:
+        control_opciones_mapa = panel_filtros_mapa
+        resumen_tipo_mapa = salida_mapa_burbujas
+    else:
+        c5, c6 = st.columns([1, 3])
+        control_opciones_mapa = c5
+        resumen_tipo_mapa = c6
 
-    if animar_tiempo_activo:
-        st.session_state[tipo_mapa_key] = "Mapa Burbujas"
-        st.session_state[solo_acum_key] = False
-        st.session_state[mostrar_valores_key] = False
+    filtro_solo_perforados_term = False
+    mostrar_localizaciones_315 = False
+    mostrar_localizaciones_196 = False
+    mostrar_inyectores_operando = False
+    mostrar_radio_drene = False
+    mostrar_muestreos_agua = False
+    fecha_inicio_muestreos_agua = None
+    mostrar_perforados_term = False
+    estados_activos_mapa = set(leyenda_estados.keys())
 
-    c5, c6 = st.columns([1, 3])
+    with control_opciones_mapa:
+        if usar_panel_filtros_mapa:
+            #st.markdown("##### Opciones visuales")
+            st.markdown("<div class='map-panel-section'>Filtros</div>", unsafe_allow_html=True)
 
-    with c5:
+            if modo_mapa != "RMA":
+                #st.markdown("###### Pozos perforados TERM")
+
+                filtro_solo_perforados_term = st.checkbox(
+                    "Solo Campañas 2011-2020",
+                    value=False,
+                    key=f"filtro_term_solo_perf_chk_{modo_mapa}"
+                )
+
+                mostrar_localizaciones_315 = st.checkbox(
+                    "315 Localizaciones",
+                    value=False,
+                    key=f"filtro_term_loc_315_chk_{modo_mapa}"
+                )
+
+                mostrar_localizaciones_196 = st.checkbox(
+                    "196 Localizaciones",
+                    value=False,
+                    key=f"filtro_term_loc_196_chk_{modo_mapa}"
+                )
+
+                mostrar_inyectores_operando = st.checkbox(
+                    "Inyectores Operando",
+                    value=False,
+                    key=f"mostrar_inyectores_operando_chk_{modo_mapa}"
+                )
+
+                mostrar_radio_drene = st.checkbox(
+                    "Radios de drene",
+                    value=False,
+                    key=f"mostrar_radio_drene_chk_{modo_mapa}"
+                )
+
+                mostrar_muestreos_agua = st.checkbox(
+                    "Muestreos % Agua",
+                    value=False,
+                    key=f"mostrar_muestreos_agua_chk_{modo_mapa}"
+                )
+
+                fecha_inicio_muestreos_agua = None
+                if mostrar_muestreos_agua:
+                    fecha_inicio_muestreos_agua = st.date_input(
+                        "Muestreos desde",
+                        value=pd.to_datetime("2026-05-23").date(),
+                        key=f"fecha_inicio_muestreos_agua_{modo_mapa}"
+                    )
+
+                st.markdown("Estados de pozos")
+
+                estados_activos_mapa = set()
+                estados_panel_mapa = [
+                    ("OP", "Op"),
+                    ("CCP", "Ccp"),
+                    ("CSP", "Csp"),
+                    ("INY", "Iny"),
+                    ("PROG TAPONAMIENTO", "Prog. Taponamiento"),
+                    ("TAPONADO", "Taponado"),
+                    ("SIN ESTADO", "Sin Estado"),
+                ]
+
+                for estado_key, estado_label in estados_panel_mapa:
+                    if st.checkbox(
+                        estado_label,
+                        value=True,
+                        key=f"estado_mapa_chk_{estado_key}_{modo_mapa}"
+                    ):
+                        estados_activos_mapa.add(estado_key)
+
+                mostrar_perforados_term = st.checkbox(
+                    "Campañas 2011-2020",
+                    value=False,
+                    key=f"mostrar_perforados_term_chk_{modo_mapa}"
+                )
+
+                st.markdown("---")
+
         mostrar_nombres = st.checkbox(
             "Mostrar nombres de pozos",
             value=True,
-            key=f"mostrar_nombres_mapa_{modo_mapa}_{yac_mapa}"
+            key=f"mostrar_nombres_mapa_{modo_mapa}"
         )
         if animar_tiempo_activo:
             solo_pozos_con_acum = False
             mostrar_etiquetas_burbujas = False
         else:
             solo_pozos_con_acum = st.checkbox(
-                "Solo pozos con aceite o inyeccion",
+                "Solo pozos con producción",
                 value=False,
                 key=solo_acum_key
             )
@@ -3064,6 +3533,35 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 key=mostrar_valores_key
             )
 
+    if usar_panel_filtros_mapa and modo_mapa != "RMA":
+        if filtro_solo_perforados_term:
+            mapa = mapa[mapa["PERFORADO_TERM"] == "Sí"].copy()
+
+        locs_panel = []
+
+        if mostrar_localizaciones_315:
+            loc_315 = preparar_localizaciones_burbujas("315")
+            if not loc_315.empty:
+                locs_panel.append(loc_315)
+
+        if mostrar_localizaciones_196:
+            loc_196 = preparar_localizaciones_burbujas("196")
+            if not loc_196.empty:
+                locs_panel.append(loc_196)
+
+        if locs_panel:
+            filtro_localizaciones = "/".join(
+                [
+                    tipo
+                    for tipo, activo in [
+                        ("315", mostrar_localizaciones_315),
+                        ("196", mostrar_localizaciones_196)
+                    ]
+                    if activo
+                ]
+            )
+            localizaciones_mapa = pd.concat(locs_panel, ignore_index=True)
+
     if solo_pozos_con_acum and {"NP_BLS", "WINJ_BLS"}.issubset(mapa.columns):
         mapa = mapa[
             (pd.to_numeric(mapa["NP_BLS"], errors="coerce").fillna(0) > 0) |
@@ -3071,6 +3569,13 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         ].copy()
     elif solo_pozos_con_acum:
         st.warning("No se encontraron columnas NP_BLS y WINJ_BLS para aplicar el filtro de acumuladas.")
+
+    muestreos_agua_mapa = pd.DataFrame()
+    if mostrar_muestreos_agua:
+        muestreos_agua_mapa = preparar_muestreos_agua_burbujas(
+            mapa,
+            fecha_inicio=fecha_inicio_muestreos_agua
+        )
 
     if "NP_BLS" in mapa.columns:
         pozos_np_mapa = mapa.loc[
@@ -3088,49 +3593,67 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     else:
         pozos_iny_mapa = 0
 
-    with c6:
-        c6_tipo, c6_np, c6_iny = st.columns([2.4, 1, 1])
+    contadores_mapa = [
+        ("Productores", pozos_np_mapa, "green"),
+        ("Inyectores Históricos", pozos_iny_mapa, "blue"),
+    ]
 
-        with c6_tipo:
-            if ver_todos_campo:
-                opciones_tipo_mapa = ["Mapa GIS"]
-            elif animar_tiempo_activo:
-                opciones_tipo_mapa = ["Mapa Burbujas"]
-            else:
-                opciones_tipo_mapa = ["Mapa Burbujas", "Mapa GIS"]
+    if mostrar_muestreos_agua:
+        contadores_mapa.append((
+            "Muestreos % Agua",
+            muestreos_agua_mapa["POZO"].dropna().astype(str).nunique() if not muestreos_agua_mapa.empty else 0,
+            "#0057FF"
+        ))
 
-            tipo_mapa = st.radio(
-                "Tipo de mapa",
-                opciones_tipo_mapa,
-                horizontal=True,
-                key=tipo_mapa_key
-            )
+    if mostrar_inyectores_operando:
+        contadores_mapa.append((
+            "Iny. operando",
+            inyectores_operando_mapa["POZO"].dropna().astype(str).nunique() if not inyectores_operando_mapa.empty else 0,
+            "#0057FF"
+        ))
 
-            animar_tiempo = st.checkbox(
-                "Modo animado",
-                value=False,
-                disabled=ver_todos_campo,
-                key=animar_key
-            )
+    with resumen_tipo_mapa:
+        if usar_panel_filtros_mapa:
+            columnas_contadores = st.columns(len(contadores_mapa))
+        else:
+            c6_tipo, *columnas_contadores = st.columns([2.4] + [1] * len(contadores_mapa))
 
-            if animar_tiempo and not ver_todos_campo:
-                tipo_mapa = "Mapa Burbujas"
-                solo_pozos_con_acum = False
-                mostrar_etiquetas_burbujas = False
+        if not usar_panel_filtros_mapa:
+            with c6_tipo:
+                if ver_todos_campo:
+                    opciones_tipo_mapa = ["Mapa GIS"]
+                elif animar_tiempo_activo:
+                    opciones_tipo_mapa = ["Mapa Burbujas"]
+                else:
+                    opciones_tipo_mapa = ["Mapa Burbujas", "Mapa GIS"]
 
-        with c6_np:
-            st.caption("Productores")
-            st.markdown(
-                f"<b style='color:green'>{pozos_np_mapa:,.0f}</b> pozos",
-                unsafe_allow_html=True
-            )
+                tipo_mapa = st.radio(
+                    "Tipo de mapa",
+                    opciones_tipo_mapa,
+                    horizontal=True,
+                    key=tipo_mapa_key
+                )
 
-        with c6_iny:
-            st.caption("Inyectores")
-            st.markdown(
-                f"<b style='color:blue'>{pozos_iny_mapa:,.0f}</b> pozos",
-                unsafe_allow_html=True
-            )
+                animar_tiempo = st.checkbox(
+                    "Modo animado",
+                    value=False,
+                    disabled=ver_todos_campo,
+                    key=animar_key
+                )
+
+                if animar_tiempo and not ver_todos_campo:
+                    tipo_mapa = "Mapa Burbujas"
+                    solo_pozos_con_acum = False
+                    mostrar_etiquetas_burbujas = False
+
+        for col_contador, (titulo_contador, valor_contador, color_contador) in zip(columnas_contadores, contadores_mapa):
+            with col_contador:
+                st.markdown(
+                    f"<div style='text-align:center; font-size:12px; color:#64748B;'>{titulo_contador}</div>"
+                    f"<div style='text-align:center; font-size:22px; font-weight:800; color:{color_contador};'>{valor_contador:,.0f}</div>"
+                    f"<div style='text-align:center; font-size:11px; color:#64748B;'>pozos</div>",
+                    unsafe_allow_html=True
+                )
         
     if mapa.empty:
         st.warning("No hay pozos para mostrar con los filtros seleccionados.")
@@ -3795,7 +4318,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                         "<extra></extra>"
                 ))
 
-                if not inyectores_operando_mapa.empty:
+                if mostrar_inyectores_operando and not inyectores_operando_mapa.empty:
                     iny_gis = convertir_utm_a_latlon(inyectores_operando_mapa, x_col, y_col)
                     fig_anim_gis.add_trace(go.Scattermapbox(
                         lat=iny_gis["LAT"],
@@ -3911,7 +4434,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     ]
                 )
 
-                st.plotly_chart(
+                salida_mapa_burbujas.plotly_chart(
                     fig_anim_gis,
                     use_container_width=True,
                     config={"scrollZoom": True, "displaylogo": False}
@@ -4007,6 +4530,9 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
             for estado, color in leyenda_estados.items():
 
+                if estado not in estados_activos_mapa:
+                    continue
+
                 tmp = mapa_gis[mapa_gis["ESTADO_MAPA"] == estado].copy()
 
                 if tmp.empty:
@@ -4035,6 +4561,48 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                         showlegend=True
                     )
                 )
+
+        if not muestreos_agua_mapa.empty:
+            muestreos_gis = convertir_utm_a_latlon(muestreos_agua_mapa, x_col, y_col)
+
+            fig_gis.add_trace(go.Scattermapbox(
+                lat=muestreos_gis["LAT"],
+                lon=muestreos_gis["LON"],
+                mode="markers",
+                marker=dict(
+                    size=muestreos_gis["SIZE_MUESTREO"] + 4,
+                    color="#0057FF",
+                    opacity=0.85
+                ),
+                name="Borde Muestreos % Agua",
+                legendgroup="muestreos_agua",
+                showlegend=False,
+                hoverinfo="skip"
+            ))
+
+            fig_gis.add_trace(go.Scattermapbox(
+                lat=muestreos_gis["LAT"],
+                lon=muestreos_gis["LON"],
+                mode="markers+text",
+                text=muestreos_gis["ETIQUETA_MUESTREO"],
+                textposition="bottom center",
+                marker=dict(
+                    size=muestreos_gis["SIZE_MUESTREO"],
+                    color="#8EDBFF",
+                    opacity=0.82
+                ),
+                name="Muestreos % Agua",
+                legendgroup="muestreos_agua",
+                customdata=muestreos_gis[["POZO", "TERMINACION", COL_YAC, "FECHA MUESTREO", "% AGUA LAB"]],
+                hovertemplate=
+                    "<b>Pozo:</b> %{customdata[0]}<br>" +
+                    "<b>Terminación:</b> %{customdata[1]}<br>" +
+                    "<b>Yacimiento:</b> %{customdata[2]}<br>" +
+                    "<b>Fecha muestreo:</b> %{customdata[3]|%d/%m/%Y}<br>" +
+                    "<b>% Agua Lab:</b> %{customdata[4]:,.1f}%<br>" +
+                    "<extra></extra>",
+                showlegend=True
+            ))
 
         if not localizaciones_mapa.empty:
             loc_gis = convertir_utm_a_latlon(localizaciones_mapa, x_col, y_col)
@@ -4068,7 +4636,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     showlegend=True
                 ))
 
-        if not inyectores_operando_mapa.empty:
+        if mostrar_inyectores_operando and not inyectores_operando_mapa.empty:
             iny_gis = convertir_utm_a_latlon(inyectores_operando_mapa, x_col, y_col)
 
             fig_gis.add_trace(go.Scattermapbox(
@@ -4076,7 +4644,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 lon=iny_gis["LON"],
                 mode="markers",
                 marker=dict(
-                    size=18,
+                    size=11 if ver_todos_campo else 18,
                     color="#0057FF",
                     opacity=0.95
                 ),
@@ -4090,6 +4658,61 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     "<extra></extra>",
                 showlegend=True
             ))
+
+        if ver_todos_campo and mostrar_instalaciones_gis:
+            instalaciones_gis = load_instalaciones_gis()
+
+            if not instalaciones_gis.empty:
+                estilos_instalaciones = {
+                    "BATERIA": {"color": "purple", "name": "Baterias"},
+                    "SIACO": {"color": "cyan", "name": "SIACO"},
+                    "COMPRESORA": {"color": "red", "name": "Compresora"},
+                }
+
+                for tipo_inst, estilo_inst in estilos_instalaciones.items():
+                    tmp_inst = instalaciones_gis[
+                        instalaciones_gis["INSTALACION"].astype(str).str.upper() == tipo_inst
+                    ].copy()
+
+                    if tmp_inst.empty:
+                        continue
+
+                    fig_gis.add_trace(go.Scattermapbox(
+                        lat=tmp_inst["LAT"],
+                        lon=tmp_inst["LON"],
+                        mode="markers",
+                        marker=dict(
+                            size=18,
+                            color="black",
+                            opacity=0.95
+                        ),
+                        name=f"Borde {estilo_inst['name']}",
+                        legendgroup=f"inst_{tipo_inst}",
+                        showlegend=False,
+                        hoverinfo="skip"
+                    ))
+
+                    fig_gis.add_trace(go.Scattermapbox(
+                        lat=tmp_inst["LAT"],
+                        lon=tmp_inst["LON"],
+                        mode="markers+text" if mostrar_nombres else "markers",
+                        text=tmp_inst["ALIAS"] if mostrar_nombres else None,
+                        textposition="bottom center",
+                        marker=dict(
+                            size=14,
+                            color=estilo_inst["color"],
+                            opacity=0.95
+                        ),
+                        name=estilo_inst["name"],
+                        customdata=tmp_inst[["ALIAS", "INSTALACION", "CAMPO"]],
+                        hovertemplate=
+                            "<b>Instalacion:</b> %{customdata[0]}<br>" +
+                            "<b>Tipo:</b> %{customdata[1]}<br>" +
+                            "<b>Campo:</b> %{customdata[2]}<br>" +
+                            "<extra></extra>",
+                        legendgroup=f"inst_{tipo_inst}",
+                        showlegend=True
+                    ))
 
         centro_gis = dict(
             lat=mapa_gis["LAT"].mean(),
@@ -4133,7 +4756,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             title=(
                 "<b>Mapa GIS operativo - Campo completo</b>"
                 if ver_todos_campo
-                else f"<b>Mapa GIS de burbujas - {yac_mapa}</b>"
+                else f"<b>Mapa GIS - {yac_mapa}</b>"
             ),
             dragmode="pan",
             mapbox=dict(
@@ -4155,7 +4778,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             )
         )
 
-        st.plotly_chart(
+        salida_mapa_burbujas.plotly_chart(
             fig_gis,
             use_container_width=True,
             config={
@@ -4365,7 +4988,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
         fig_heat.update_layout(dragmode="pan")
 
-        st.plotly_chart(
+        salida_mapa_burbujas.plotly_chart(
             fig_heat,
             use_container_width=True,
             config={
@@ -4433,7 +5056,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         st.warning(f"No se pudo graficar contorno/asignación: {e}")
 
 
-    if not ver_todos_campo and not animar_tiempo:
+    if not ver_todos_campo and not animar_tiempo and mostrar_radio_drene:
 
         theta = np.linspace(0, 2 * np.pi, 90)
         radios_x = []
@@ -4610,7 +5233,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
             fig.frames = frames_utm
 
-            if not inyectores_operando_mapa.empty:
+            if mostrar_inyectores_operando and not inyectores_operando_mapa.empty:
                 fig.add_trace(go.Scatter(
                     x=inyectores_operando_mapa[x_col],
                     y=inyectores_operando_mapa[y_col],
@@ -4701,7 +5324,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                         yaxis=dict(range=[y0 - radio_zoom, y0 + radio_zoom])
                     )
 
-            col_mapa_anim, col_graficas_anim = st.columns([2.2, 1], gap="small")
+            col_mapa_anim, col_graficas_anim = salida_mapa_burbujas.columns([2.2, 1], gap="small")
 
             with col_mapa_anim:
                 fig.update_layout(dragmode="pan")
@@ -4822,7 +5445,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     showlegend=True
                 ))
 
-    if not inyectores_operando_mapa.empty:
+    if mostrar_inyectores_operando and not inyectores_operando_mapa.empty:
         fig.add_trace(go.Scatter(
             x=inyectores_operando_mapa[x_col],
             y=inyectores_operando_mapa[y_col],
@@ -4913,6 +5536,9 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
         for estado, color in leyenda_estados.items():
 
+            if estado not in estados_activos_mapa:
+                continue
+
             tmp = mapa[mapa["ESTADO_MAPA"] == estado].copy()
 
             if tmp.empty:
@@ -4958,6 +5584,40 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     hoverinfo="skip"
                 ))
 
+    if not ver_todos_campo and not muestreos_agua_mapa.empty:
+
+        fig.add_trace(go.Scatter(
+            x=muestreos_agua_mapa[x_col],
+            y=muestreos_agua_mapa[y_col],
+            mode="markers+text",
+            text=muestreos_agua_mapa["ETIQUETA_MUESTREO"],
+            textposition="bottom center",
+            textfont=dict(
+                size=11,
+                color="#0057FF",
+                family="Arial Black"
+            ),
+            marker=dict(
+                size=muestreos_agua_mapa["SIZE_MUESTREO"],
+                sizemode="diameter",
+                symbol="circle",
+                color="#8EDBFF",
+                opacity=0.82,
+                line=dict(color="#0057FF", width=2)
+            ),
+            name="Muestreos % Agua",
+            customdata=muestreos_agua_mapa[["POZO", "TERMINACION", COL_YAC, "FECHA MUESTREO", "% AGUA LAB"]],
+            hovertemplate=
+                "<b>Pozo:</b> %{customdata[0]}<br>" +
+                "<b>Terminación:</b> %{customdata[1]}<br>" +
+                "<b>Yacimiento:</b> %{customdata[2]}<br>" +
+                "<b>Fecha muestreo:</b> %{customdata[3]|%d/%m/%Y}<br>" +
+                "<b>% Agua Lab:</b> %{customdata[4]:,.1f}%<br>" +
+                "<extra></extra>",
+            legendgroup="muestreos_agua",
+            showlegend=True
+        ))
+
     if not ver_todos_campo and not localizaciones_mapa.empty:
 
         for categoria, color in colores_localizaciones.items():
@@ -4992,7 +5652,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 showlegend=True
             ))
 
-    if not ver_todos_campo:
+    if not ver_todos_campo and (modo_mapa == "RMA" or mostrar_perforados_term):
 
         if modo_mapa == "RMA":
             mapa_destacado = mapa[mapa["POZO_RMA"] == "Sí"].copy()
@@ -5023,7 +5683,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 showlegend=True
             ))
 
-    if not ver_todos_campo:
+    if not ver_todos_campo and mostrar_radio_drene:
 
         fig.add_trace(go.Scatter(
             x=[None],
@@ -5039,7 +5699,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         title=(
             "<b>Mapa operativo de pozos - Campo completo</b>"
             if ver_todos_campo
-            else f"<b>Mapa de burbujas - {yac_mapa}</b>"
+            else f"<b>Tamaulipas-Constituciones - {yac_mapa}</b>"
         ),
         dragmode="pan",
         template="plotly_white",
@@ -5114,7 +5774,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 showlegend=True
             ))
 
-    st.plotly_chart(
+    salida_mapa_burbujas.plotly_chart(
         fig,
         use_container_width=True,
         config={
@@ -5126,6 +5786,573 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
     mostrar_tabla_pozos_mapa(mapa)
 ####Termina Mapa Burbujas
+
+
+def mapa_burbujas_rma_modulo(
+    rma_filtrada: pd.DataFrame,
+    df_coord_base: pd.DataFrame,
+    col_anio: str,
+    col_yac: str,
+    col_yac_rma: str,
+    col_qoi: str,
+    col_np_rma: str,
+    col_meses_activos: str,
+    rma_solo_ubicacion: pd.DataFrame | None = None,
+    yac_mapa_default: str = "Todos"
+):
+    """Mapa exclusivo para el modulo RMA 2011-2020, sin modificar mapa_burbujas general."""
+    st.markdown(
+        "<div class='section-title'>Mapa de burbujas RMA 2011-2020</div>",
+        unsafe_allow_html=True
+    )
+
+    if rma_filtrada.empty:
+        st.warning("No hay RMA para mostrar en el mapa con los filtros seleccionados.")
+        return
+
+    coord = df_coord_base.copy()
+    coord = coord.loc[:, ~coord.columns.astype(str).str.startswith("Unnamed")]
+    coord = normalizar_columnas(coord)
+
+    cols_coord_req = [COL_POZO, "CIMA X UTM", "CIMA Y UTM", "FONDO X UTM", "FONDO Y UTM"]
+    faltan_coord = [c for c in cols_coord_req if c not in coord.columns]
+
+    if faltan_coord:
+        st.error(f"Faltan columnas en Coord para el mapa RMA: {faltan_coord}")
+        st.write(coord.columns.tolist())
+        return
+
+    coord[COL_POZO] = coord[COL_POZO].astype(str).str.strip()
+
+    for c in ["CIMA X UTM", "CIMA Y UTM", "FONDO X UTM", "FONDO Y UTM"]:
+        coord[c] = pd.to_numeric(coord[c], errors="coerce")
+
+    coord["X_MAPA"] = coord["CIMA X UTM"].fillna(coord["FONDO X UTM"])
+    coord["Y_MAPA"] = coord["CIMA Y UTM"].fillna(coord["FONDO Y UTM"])
+
+    cols_coord_mapa = [COL_POZO, "X_MAPA", "Y_MAPA"]
+    for c in ["POZO", COL_YAC]:
+        if c in coord.columns and c not in cols_coord_mapa:
+            cols_coord_mapa.append(c)
+
+    coord_mapa = (
+        coord[cols_coord_mapa]
+        .dropna(subset=[COL_POZO, "X_MAPA", "Y_MAPA"])
+        .drop_duplicates(subset=[COL_POZO])
+        .copy()
+    )
+
+    if coord_mapa.empty:
+        st.warning("No hay coordenadas disponibles en Coord para construir el mapa RMA.")
+        return
+
+    rma_mapa = rma_filtrada.copy()
+    rma_mapa[COL_POZO] = rma_mapa[COL_POZO].astype(str).str.strip()
+    col_nombre_pozo_rma = COL_POZO_FISICO if COL_POZO_FISICO in rma_mapa.columns else COL_POZO
+    rma_mapa["POZO_NOMBRE_RMA_BASE"] = rma_mapa[col_nombre_pozo_rma].astype(str).str.strip()
+    rma_mapa["POZO_NOMBRE_RMA_BASE"] = rma_mapa["POZO_NOMBRE_RMA_BASE"].where(
+        ~rma_mapa["POZO_NOMBRE_RMA_BASE"].str.upper().isin(["", "NAN", "NONE"]),
+        rma_mapa[COL_POZO].astype(str).str.strip()
+    )
+
+    for c in [col_qoi, col_np_rma, col_meses_activos]:
+        rma_mapa[c] = pd.to_numeric(rma_mapa[c], errors="coerce").fillna(0)
+
+    if col_anio in rma_mapa.columns:
+        rma_mapa[col_anio] = pd.to_numeric(rma_mapa[col_anio], errors="coerce")
+
+    yacs_rma = (
+        rma_mapa[col_yac]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .tolist()
+        if col_yac in rma_mapa.columns
+        else []
+    )
+    yacs_coord = (
+        coord_mapa[COL_YAC]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .tolist()
+        if COL_YAC in coord_mapa.columns
+        else []
+    )
+    yacs_intervencion_mapa = (
+        rma_mapa[col_yac_rma]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .tolist()
+        if col_yac_rma in rma_mapa.columns
+        else []
+    )
+    yacs_mapa = sorted({
+        y for y in yacs_rma + yacs_intervencion_mapa + yacs_coord
+        if y and y.upper() not in ["NAN", "NONE"]
+    })
+
+    opciones_yac_mapa = ["Todos"] + yacs_mapa
+    if yac_mapa_default not in opciones_yac_mapa:
+        yac_mapa_default = "Todos"
+
+    c1, c2, c3, c4 = st.columns([1.2, 1.3, 1.5, 1.3])
+    key_yac_mapa_rma = "rma_mapa_yacimiento"
+    st.session_state[key_yac_mapa_rma] = yac_mapa_default
+
+    with c1:
+        yac_mapa = st.selectbox(
+            "Yacimiento del mapa",
+            opciones_yac_mapa,
+            index=opciones_yac_mapa.index(yac_mapa_default),
+            key=key_yac_mapa_rma
+        )
+
+    rma_fil_mapa = rma_mapa.copy()
+    coord_fil_mapa = coord_mapa.copy()
+
+    if yac_mapa != "Todos":
+        clave_yac = normalizar_clave_texto(pd.Series([yac_mapa])).iloc[0]
+
+        if col_yac_rma in rma_fil_mapa.columns:
+            rma_fil_mapa = rma_fil_mapa[
+                normalizar_clave_texto(rma_fil_mapa[col_yac_rma]) == clave_yac
+            ].copy()
+        elif col_yac in rma_fil_mapa.columns:
+            rma_fil_mapa = rma_fil_mapa[
+                normalizar_clave_texto(rma_fil_mapa[col_yac]) == clave_yac
+            ].copy()
+
+        if COL_YAC in coord_fil_mapa.columns:
+            coord_fil_mapa = coord_fil_mapa[
+                normalizar_clave_texto(coord_fil_mapa[COL_YAC]) == clave_yac
+            ].copy()
+
+    def unir_unicos_mapa(serie):
+        vals = [
+            v for v in serie.dropna().astype(str).str.strip().unique()
+            if v and v.upper() not in ["NAN", "NONE"]
+        ]
+        return ", ".join(sorted(vals))
+
+    agregaciones = {
+        "NP_RMA_MB": (col_np_rma, "sum"),
+        "QOI_RMA_BPD": (col_qoi, "mean"),
+        "MESES_ACTIVOS_RMA": (col_meses_activos, "sum"),
+        "RMA_EVENTOS": (COL_POZO, "size"),
+        "POZO_NOMBRE_RMA": ("POZO_NOMBRE_RMA_BASE", unir_unicos_mapa),
+    }
+
+    if col_yac in rma_fil_mapa.columns:
+        agregaciones["YACIMIENTO_RMA_ORIGEN"] = (col_yac, unir_unicos_mapa)
+    if col_yac_rma in rma_fil_mapa.columns:
+        agregaciones["INTERVENCIONES_RMA"] = (col_yac_rma, unir_unicos_mapa)
+    if col_anio in rma_fil_mapa.columns:
+        agregaciones["ANIOS_RMA"] = (col_anio, lambda s: ", ".join(sorted(s.dropna().astype(int).astype(str).unique())))
+
+    if rma_fil_mapa.empty:
+        rma_resumen = pd.DataFrame(columns=[COL_POZO] + list(agregaciones.keys()))
+    else:
+        rma_resumen = (
+            rma_fil_mapa
+            .groupby(COL_POZO, as_index=False)
+            .agg(**agregaciones)
+        )
+
+    mapa_rma = rma_resumen.merge(
+        coord_mapa,
+        on=COL_POZO,
+        how="left",
+        suffixes=("", "_COORD")
+    )
+
+    mapa_rma = mapa_rma.dropna(subset=["X_MAPA", "Y_MAPA"]).copy()
+    mapa_rma["POZO_MAPA"] = mapa_rma["POZO_NOMBRE_RMA"].astype(str).str.strip()
+    mapa_rma["POZO_MAPA"] = mapa_rma["POZO_MAPA"].where(
+        ~mapa_rma["POZO_MAPA"].str.upper().isin(["", "NAN", "NONE"]),
+        mapa_rma[COL_POZO].astype(str)
+    )
+
+    mapa_rma_ubicacion = pd.DataFrame()
+    if rma_solo_ubicacion is not None and not rma_solo_ubicacion.empty:
+        rma_ubic = rma_solo_ubicacion.copy()
+        rma_ubic[COL_POZO] = rma_ubic[COL_POZO].astype(str).str.strip()
+        col_nombre_ubic = COL_POZO_FISICO if COL_POZO_FISICO in rma_ubic.columns else COL_POZO
+        rma_ubic["POZO_NOMBRE_RMA"] = rma_ubic[col_nombre_ubic].astype(str).str.strip()
+        rma_ubic["POZO_NOMBRE_RMA"] = rma_ubic["POZO_NOMBRE_RMA"].where(
+            ~rma_ubic["POZO_NOMBRE_RMA"].str.upper().isin(["", "NAN", "NONE"]),
+            rma_ubic[COL_POZO].astype(str).str.strip()
+        )
+
+        if yac_mapa != "Todos":
+            clave_yac_ubic = normalizar_clave_texto(pd.Series([yac_mapa])).iloc[0]
+            if col_yac_rma in rma_ubic.columns:
+                rma_ubic = rma_ubic[
+                    normalizar_clave_texto(rma_ubic[col_yac_rma]) == clave_yac_ubic
+                ].copy()
+            elif col_yac in rma_ubic.columns:
+                rma_ubic = rma_ubic[
+                    normalizar_clave_texto(rma_ubic[col_yac]) == clave_yac_ubic
+                ].copy()
+
+        if not rma_ubic.empty:
+            agregaciones_ubic = {
+                "POZO_MAPA": ("POZO_NOMBRE_RMA", unir_unicos_mapa),
+                "RMA_UBIC_EVENTOS": (COL_POZO, "size"),
+            }
+            if col_yac in rma_ubic.columns:
+                agregaciones_ubic["YACIMIENTO_RMA_ORIGEN"] = (col_yac, unir_unicos_mapa)
+            if col_yac_rma in rma_ubic.columns:
+                agregaciones_ubic["INTERVENCIONES_RMA"] = (col_yac_rma, unir_unicos_mapa)
+
+            rma_ubic_resumen = (
+                rma_ubic
+                .groupby(COL_POZO, as_index=False)
+                .agg(**agregaciones_ubic)
+            )
+
+            mapa_rma_ubicacion = rma_ubic_resumen.merge(
+                coord_mapa,
+                on=COL_POZO,
+                how="left",
+                suffixes=("", "_COORD")
+            ).dropna(subset=["X_MAPA", "Y_MAPA"]).copy()
+
+    with c2:
+        variable = st.selectbox(
+            "Variable de burbuja",
+            ["NP_RMA_MB", "QOI_RMA_BPD", "MESES_ACTIVOS_RMA"],
+            format_func=lambda x: {
+                "NP_RMA_MB": "Acumulada aceite [mb]",
+                "QOI_RMA_BPD": "Gasto Inicial [bpd]",
+                "MESES_ACTIVOS_RMA": "Meses activos"
+            }[x],
+            key="rma_mapa_variable"
+        )
+
+    with c3:
+        alcance_mapa = st.selectbox(
+            "Pozos intervenidos RMA",
+            ["Solo RMA filtrados", "Todos los pozos del yacimiento"],
+            key="rma_mapa_alcance"
+        )
+
+    if alcance_mapa == "Todos los pozos del yacimiento":
+        datos_zoom_partes = [
+            coord_fil_mapa.rename(columns={COL_POZO: "POZO_MAPA"})[["POZO_MAPA", "X_MAPA", "Y_MAPA"]],
+            mapa_rma[["POZO_MAPA", "X_MAPA", "Y_MAPA"]]
+        ]
+        if not mapa_rma_ubicacion.empty:
+            datos_zoom_partes.append(mapa_rma_ubicacion[["POZO_MAPA", "X_MAPA", "Y_MAPA"]])
+
+        datos_zoom = pd.concat(
+            datos_zoom_partes,
+            ignore_index=True
+        ).drop_duplicates(subset=["POZO_MAPA"])
+    else:
+        datos_zoom_partes = [mapa_rma[["POZO_MAPA", "X_MAPA", "Y_MAPA"]].copy()]
+        if not mapa_rma_ubicacion.empty:
+            datos_zoom_partes.append(mapa_rma_ubicacion[["POZO_MAPA", "X_MAPA", "Y_MAPA"]])
+        datos_zoom = pd.concat(datos_zoom_partes, ignore_index=True).drop_duplicates(subset=["POZO_MAPA"])
+
+    pozos_zoom = sorted(datos_zoom["POZO_MAPA"].dropna().astype(str).unique())
+
+    with c4:
+        pozo_zoom = st.selectbox(
+            "Zoom a pozo",
+            ["Todos"] + pozos_zoom,
+            key=f"rma_mapa_zoom_{yac_mapa}_{alcance_mapa}"
+        )
+
+    if mapa_rma.empty and mapa_rma_ubicacion.empty and alcance_mapa != "Todos los pozos del yacimiento":
+        st.warning("Los pozos RMA filtrados no tienen coordenadas disponibles en Coord.")
+        return
+
+    colores_variable = {
+        "NP_RMA_MB": "#00A65A",
+        "QOI_RMA_BPD": "#FF7F0E",
+        "MESES_ACTIVOS_RMA": "#E53935"
+    }
+
+    etiquetas_variable = {
+        "NP_RMA_MB": "Acumulada aceite, Np RMA (mb)",
+        "QOI_RMA_BPD": "Gasto inicial, Qoi (bpd)",
+        "MESES_ACTIVOS_RMA": "Meses activo"
+    }
+
+    if not mapa_rma.empty:
+        mapa_rma[variable] = pd.to_numeric(mapa_rma[variable], errors="coerce").fillna(0)
+        mapa_rma["VALOR_VARIABLE"] = mapa_rma[variable]
+        max_val = mapa_rma[variable].max()
+        mapa_rma["SIZE_BURBUJA"] = np.where(
+            max_val > 0,
+            18 + (mapa_rma[variable] / max_val) * 70,
+            22
+        )
+        mapa_rma["ETIQUETA_VALOR"] = mapa_rma[variable].map(lambda x: f"{x:,.1f}")
+        mapa_rma["ETIQUETA_POZO_VALOR"] = (
+            mapa_rma["POZO_MAPA"].astype(str)
+            + "<br>"
+            + mapa_rma["ETIQUETA_VALOR"].astype(str)
+        )
+
+    fig = go.Figure()
+
+    try:
+        contorno, asignacion = load_contorno_asignacion()
+        contorno = normalizar_columnas(contorno.copy())
+        asignacion = normalizar_columnas(asignacion.copy())
+
+        if "ORDEN" in contorno.columns:
+            contorno = contorno.sort_values("ORDEN")
+        if "ORDEN" in asignacion.columns:
+            asignacion = asignacion.sort_values("ORDEN")
+
+        for base_borde in [contorno, asignacion]:
+            if "X" in base_borde.columns:
+                base_borde["X"] = pd.to_numeric(base_borde["X"], errors="coerce")
+            if "Y" in base_borde.columns:
+                base_borde["Y"] = pd.to_numeric(base_borde["Y"], errors="coerce")
+
+        if {"X", "Y"}.issubset(contorno.columns):
+            contorno = contorno.dropna(subset=["X", "Y"])
+            if not contorno.empty:
+                contorno_plot = pd.concat([contorno, contorno.iloc[[0]]], ignore_index=True)
+                fig.add_trace(go.Scatter(
+                    x=contorno_plot["X"],
+                    y=contorno_plot["Y"],
+                    mode="lines",
+                    name="Campo",
+                    line=dict(color="black", width=3),
+                    hoverinfo="skip"
+                ))
+
+        if {"X", "Y"}.issubset(asignacion.columns):
+            asignacion = asignacion.dropna(subset=["X", "Y"])
+            if not asignacion.empty:
+                asignacion_plot = pd.concat([asignacion, asignacion.iloc[[0]]], ignore_index=True)
+                fig.add_trace(go.Scatter(
+                    x=asignacion_plot["X"],
+                    y=asignacion_plot["Y"],
+                    mode="lines",
+                    name="Asignacion",
+                    line=dict(color="red", width=3, dash="dash"),
+                    hoverinfo="skip"
+                ))
+
+    except Exception as exc:
+        st.warning(f"No se pudo graficar contorno/asignacion: {exc}")
+
+    if alcance_mapa == "Todos los pozos del yacimiento" and not coord_fil_mapa.empty:
+        coord_contexto = coord_fil_mapa.copy()
+        coord_contexto["POZO_MAPA"] = coord_contexto[COL_POZO].astype(str)
+
+        fig.add_trace(go.Scatter(
+            x=coord_contexto["X_MAPA"],
+            y=coord_contexto["Y_MAPA"],
+            mode="markers",
+            name="Todos los pozos del yacimiento",
+            marker=dict(
+                size=8,
+                symbol="circle",
+                color="rgba(120,120,120,0.35)",
+                line=dict(color="rgba(80,80,80,0.8)", width=0.7)
+            ),
+            customdata=coord_contexto[["POZO_MAPA"]],
+            hovertemplate="<b>Pozo:</b> %{customdata[0]}<extra></extra>"
+        ))
+
+    if not mapa_rma.empty:
+        custom_cols = ["POZO_MAPA", "VALOR_VARIABLE", "NP_RMA_MB", "QOI_RMA_BPD", "MESES_ACTIVOS_RMA", "RMA_EVENTOS"]
+        for c in ["YACIMIENTO_RMA_ORIGEN", "INTERVENCIONES_RMA", "ANIOS_RMA"]:
+            if c not in mapa_rma.columns:
+                mapa_rma[c] = ""
+            custom_cols.append(c)
+
+        fig.add_trace(go.Scatter(
+            x=mapa_rma["X_MAPA"],
+            y=mapa_rma["Y_MAPA"],
+            mode="markers",
+            name=f"Burbuja {etiquetas_variable[variable]}",
+            marker=dict(
+                size=mapa_rma["SIZE_BURBUJA"],
+                symbol="circle",
+                color=colores_variable.get(variable, "#1F77B4"),
+                opacity=0.35,
+                line=dict(color=colores_variable.get(variable, "#1F77B4"), width=1.2)
+            ),
+            customdata=mapa_rma[custom_cols],
+            hovertemplate=(
+                "<b>Pozo:</b> %{customdata[0]}<br>" +
+                f"<b>{etiquetas_variable[variable]}:</b> " + "%{customdata[1]:,.2f}<br>" +
+                "<b>Np RMA:</b> %{customdata[2]:,.2f} mb<br>" +
+                "<b>Qoi:</b> %{customdata[3]:,.2f} bpd<br>" +
+                "<b>Meses activo:</b> %{customdata[4]:,.1f}<br>" +
+                "<b>Eventos RMA:</b> %{customdata[5]:,.0f}<br>" +
+                "<b>Origen:</b> %{customdata[6]}<br>" +
+                "<b>Intervencion:</b> %{customdata[7]}<br>" +
+                "<b>Anio:</b> %{customdata[8]}<br>" +
+                "<extra></extra>"
+            )
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=mapa_rma["X_MAPA"],
+            y=mapa_rma["Y_MAPA"],
+            mode="markers+text",
+            text=mapa_rma["ETIQUETA_POZO_VALOR"],
+            textposition="bottom center",
+            textfont=dict(size=10, color="#111827", family="Arial Black"),
+            name="Pozo RMA",
+            marker=dict(
+                size=6,
+                symbol="square",
+                color="red",
+                opacity=1,
+                line=dict(color="black", width=2)
+            ),
+            customdata=mapa_rma[custom_cols],
+            hovertemplate=(
+                "<b>Pozo:</b> %{customdata[0]}<br>" +
+                f"<b>{etiquetas_variable[variable]}:</b> " + "%{customdata[1]:,.2f}<br>" +
+                "<b>Np RMA:</b> %{customdata[2]:,.2f} mb<br>" +
+                "<b>Qoi:</b> %{customdata[3]:,.2f} bpd<br>" +
+                "<b>Meses activo:</b> %{customdata[4]:,.1f}<br>" +
+                "<b>Intervencion:</b> %{customdata[7]}<br>" +
+                "<extra></extra>"
+            )
+        ))
+
+    if not mapa_rma_ubicacion.empty:
+        for col_tmp in ["YACIMIENTO_RMA_ORIGEN", "INTERVENCIONES_RMA"]:
+            if col_tmp not in mapa_rma_ubicacion.columns:
+                mapa_rma_ubicacion[col_tmp] = ""
+
+        fig.add_trace(go.Scatter(
+            x=mapa_rma_ubicacion["X_MAPA"],
+            y=mapa_rma_ubicacion["Y_MAPA"],
+            mode="markers+text",
+            text=mapa_rma_ubicacion["POZO_MAPA"],
+            textposition="top center",
+            textfont=dict(size=10, color="#111827", family="Arial Black"),
+            name="RMA solo ubicacion",
+            marker=dict(
+                size=12,
+                symbol="star",
+                color="#FFD700",
+                line=dict(color="black", width=1)
+            ),
+            customdata=mapa_rma_ubicacion[
+                ["POZO_MAPA", "YACIMIENTO_RMA_ORIGEN", "INTERVENCIONES_RMA", "RMA_UBIC_EVENTOS"]
+            ],
+            hovertemplate=(
+                "<b>Pozo:</b> %{customdata[0]}<br>" +
+                "<b>Origen:</b> %{customdata[1]}<br>" +
+                "<b>Intervencion:</b> %{customdata[2]}<br>" +
+                "<b>Eventos RMA sin datos:</b> %{customdata[3]:,.0f}<br>" +
+                "<extra></extra>"
+            )
+        ))
+
+    fig.update_layout(
+        title=f"<b>Mapa RMA 2011-2020 - {yac_mapa}</b>",
+        dragmode="pan",
+        template="plotly_white",
+        height=1350,
+        margin=dict(l=20, r=20, t=70, b=20),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
+    )
+
+    fig.update_xaxes(
+        title_text="UTM X",
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black"
+    )
+
+    fig.update_yaxes(
+        title_text="UTM Y",
+        scaleanchor="x",
+        scaleratio=1,
+        showgrid=True,
+        gridcolor="#EAECEE",
+        showline=True,
+        linewidth=1,
+        linecolor="black"
+    )
+
+    if pozo_zoom != "Todos":
+        row_zoom = datos_zoom[datos_zoom["POZO_MAPA"].astype(str) == str(pozo_zoom)]
+        if not row_zoom.empty:
+            x0 = row_zoom["X_MAPA"].iloc[0]
+            y0 = row_zoom["Y_MAPA"].iloc[0]
+            radio_zoom = 1000
+            fig.update_xaxes(range=[x0 - radio_zoom, x0 + radio_zoom])
+            fig.update_yaxes(range=[y0 - radio_zoom, y0 + radio_zoom])
+
+            fig.add_trace(go.Scatter(
+                x=[x0],
+                y=[y0],
+                mode="markers+text",
+                text=[str(pozo_zoom)],
+                textposition="top center",
+                marker=dict(
+                    size=18,
+                    symbol="star",
+                    color="#FFD700",
+                    line=dict(color="black", width=2)
+                ),
+                name=f"Zoom: {pozo_zoom}",
+                hovertemplate="<b>Pozo:</b> %{text}<extra></extra>"
+            ))
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={
+            "scrollZoom": True,
+            "displaylogo": False,
+            "modeBarButtonsToRemove": ["lasso2d", "select2d"]
+        }
+    )
+
+    if not mapa_rma.empty:
+        tabla_cols = [
+            "POZO_MAPA",
+            "YACIMIENTO_RMA_ORIGEN",
+            "INTERVENCIONES_RMA",
+            "ANIOS_RMA",
+            "NP_RMA_MB",
+            "QOI_RMA_BPD",
+            "MESES_ACTIVOS_RMA",
+            "RMA_EVENTOS"
+        ]
+        st.markdown("<div class='section-title'>Pozos RMA mostrados en el mapa</div>", unsafe_allow_html=True)
+        st.dataframe(
+            mapa_rma[[c for c in tabla_cols if c in mapa_rma.columns]]
+            .rename(columns={
+                "POZO_MAPA": "Pozo / Terminacion",
+                "YACIMIENTO_RMA_ORIGEN": "Origen",
+                "INTERVENCIONES_RMA": "Intervencion",
+                "ANIOS_RMA": "Anio",
+                "NP_RMA_MB": "Np RMA (mb)",
+                "QOI_RMA_BPD": "Qoi (bpd)",
+                "MESES_ACTIVOS_RMA": "Meses activo",
+                "RMA_EVENTOS": "Eventos RMA"
+            }),
+            use_container_width=True,
+            height=320
+        )
+
 
 try:
     df = load_data()
@@ -7398,6 +8625,21 @@ def analisis_rma():
     rma[col_anio] = pd.to_numeric(rma[col_anio], errors="coerce")
     rma[col_qoi_prog] = pd.to_numeric(rma[col_qoi_prog], errors="coerce")
     rma[col_qoi] = pd.to_numeric(rma[col_qoi], errors="coerce")
+    rma[col_np_rma] = pd.to_numeric(rma[col_np_rma], errors="coerce")
+    rma[col_meses_activos] = pd.to_numeric(rma[col_meses_activos], errors="coerce")
+
+    cols_datos_analisis_rma = [col_anio, col_qoi, col_np_rma, col_meses_activos]
+    mask_solo_ubicacion_rma = rma[cols_datos_analisis_rma].isna().any(axis=1)
+    rma_solo_ubicacion_base = rma[mask_solo_ubicacion_rma].copy()
+    rma = rma[~mask_solo_ubicacion_rma].copy()
+
+    if rma.empty:
+        st.warning("No hay RMA con datos completos para graficar. Las RMA sin datos solo se muestran en el mapa.")
+        return
+
+    rma[col_anio] = pd.to_numeric(rma[col_anio], errors="coerce")
+    rma[col_qoi_prog] = pd.to_numeric(rma[col_qoi_prog], errors="coerce")
+    rma[col_qoi] = pd.to_numeric(rma[col_qoi], errors="coerce")
     rma[col_np_rma] = pd.to_numeric(rma[col_np_rma],errors="coerce").fillna(0)
     rma[col_meses_activos] = pd.to_numeric(rma[col_meses_activos],errors="coerce").fillna(0)
 
@@ -7423,6 +8665,7 @@ def analisis_rma():
         )
 
     rma_f = rma[rma[col_anio].astype("Int64").isin(anio_sel)].copy()
+    rma_solo_ubicacion_f = rma_solo_ubicacion_base.copy()
 
     with c2:
         yacs = sorted(rma_f[col_yac].dropna().astype(str).unique())
@@ -7435,6 +8678,10 @@ def analisis_rma():
 
     if yac_sel:
         rma_f = rma_f[rma_f[col_yac].astype(str).isin(yac_sel)].copy()
+        if col_yac in rma_solo_ubicacion_f.columns:
+            rma_solo_ubicacion_f = rma_solo_ubicacion_f[
+                rma_solo_ubicacion_f[col_yac].astype(str).isin(yac_sel)
+            ].copy()
 
     with c3:
         yacs_rma = sorted(rma_f[col_yac_rma].dropna().astype(str).unique())
@@ -7447,6 +8694,16 @@ def analisis_rma():
 
     if yac_rma_sel:
         rma_f = rma_f[rma_f[col_yac_rma].astype(str).isin(yac_rma_sel)].copy()
+        if col_yac_rma in rma_solo_ubicacion_f.columns:
+            rma_solo_ubicacion_f = rma_solo_ubicacion_f[
+                rma_solo_ubicacion_f[col_yac_rma].astype(str).isin(yac_rma_sel)
+            ].copy()
+
+    yac_mapa_default_rma = (
+        str(yac_rma_sel[0]).strip()
+        if len(yac_rma_sel) == 1
+        else "Todos"
+    )
 
     with c4:
         pozos = sorted(rma_f[COL_POZO].dropna().astype(str).unique())
@@ -7465,10 +8722,31 @@ def analisis_rma():
         st.warning("No hay datos con los filtros seleccionados.")
         return
 
+    col_rma_graficas, col_rma_mapa_grande = st.columns([1.35, 1], gap="medium")
+
+    with col_rma_mapa_grande:
+        df_coord_rma = df_coord.copy()
+
+        if df_coord_rma.empty:
+            st.warning("Los pozos seleccionados en RMA no tienen coordenadas en Coord.")
+        else:
+            mapa_burbujas_rma_modulo(
+                rma_f,
+                df_coord_rma,
+                col_anio,
+                col_yac,
+                col_yac_rma,
+                col_qoi,
+                col_np_rma,
+                col_meses_activos,
+                rma_solo_ubicacion=rma_solo_ubicacion_f,
+                yac_mapa_default=yac_mapa_default_rma
+            )
+
     # =========================
     # MÉTRICAS
     # =========================
-    m1, m2 = st.columns(2)
+    m1, m2 = col_rma_graficas.columns(2)
 
     m1.metric("RMA analizadas", f"{rma_f[COL_POZO].nunique():,.0f}")
     m2.metric("Qoi promedio", f"{rma_f[col_qoi].mean():,.1f} bpd")
@@ -7555,7 +8833,7 @@ def analisis_rma():
         tickfont=dict(size=12, color="black", family="Arial Black")
     )
 
-    st.plotly_chart(fig1, use_container_width=True)
+    col_rma_graficas.plotly_chart(fig1, use_container_width=True)
 
     # =========================
     # 2. QOI PROMEDIO POR AÑO
@@ -7758,7 +9036,7 @@ def analisis_rma():
         tickfont=dict(size=12, color="black", family="Arial Black")
     )
 
-    colg1, colg2 = st.columns(2)
+    colg1, colg2 = col_rma_graficas.columns(2)
 
     with colg1:
         st.plotly_chart(fig2, use_container_width=True)
@@ -7916,7 +9194,7 @@ def analisis_rma():
         tickfont=dict(size=12, color="black", family="Arial Black")
     )
 
-    st.plotly_chart(fig4, use_container_width=True)
+    col_rma_graficas.plotly_chart(fig4, use_container_width=True)
 
     # =========================
     # 5. NP PROMEDIO
@@ -8118,7 +9396,7 @@ def analisis_rma():
         tickfont=dict(size=12, color="black", family="Arial Black")
     )
 
-    colnp1, colnp2 = st.columns(2)
+    colnp1, colnp2 = col_rma_graficas.columns(2)
 
     with colnp1:
         st.plotly_chart(fig5, use_container_width=True)
@@ -8127,33 +9405,10 @@ def analisis_rma():
         st.plotly_chart(fig6, use_container_width=True)
 
 
-     # =========================
-    # =========================
-    # MAPA DE BURBUJAS FILTRADO CON RMA
-    # =========================
-
-    pozos_rma = rma_f[COL_POZO].dropna().astype(str).unique().tolist()
-
-    df_mapa_rma = df.copy()
-    df_coord_rma = df_coord.copy()
-
-    if df_coord_rma.empty:
-        st.warning("Los pozos seleccionados en RMA no tienen coordenadas en Coord.")
-    else:
-
-        #mapa_burbujas(df_mapa_rma, df_coord_rma, modo_mapa="RMA")
-        mapa_burbujas(
-            df_mapa_rma,
-            df_coord_rma,
-            modo_mapa="RMA",
-            pozos_destacados=pozos_rma
-        )
-        #mapa_burbujas(df_mapa_rma, df_coord_rma)
-
 def mapa_presion():
 
     st.markdown(
-        "<div class='section-title'>Mapa de presión, estado de pozos y campañas 2011-2020</div>",
+        "<div class='section-title'>Filtros Mapa de Presión</div>",
         unsafe_allow_html=True
     )
 
@@ -8165,11 +9420,109 @@ def mapa_presion():
         return
 
     # =========================
-    # FILTROS
+    # PANEL LATERAL + FILTROS BASE
     # =========================
-    c1, c2, c3, c4 = st.columns(4)
+    col_panel_presion, col_mapa_presion = st.columns([0.24, 0.76], gap="medium")
 
-    with c1:
+    with col_panel_presion:
+        #st.markdown("#### Controles del mapa")
+        st.markdown(
+            """
+            <div class="presion-filter-panel-marker"></div>
+            <style>
+            div[data-testid="column"]:has(.presion-filter-panel-marker),
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) {
+                background: linear-gradient(180deg, #2F363D 0%, #252B31 100%);
+                border: 1px solid #1F252B;
+                border-radius: 8px;
+                padding: 12px 12px 18px 12px;
+                box-shadow: 0 10px 26px rgba(15, 23, 42, 0.22);
+            }
+            div[data-testid="column"]:has(.presion-filter-panel-marker) .presion-panel-title,
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) .presion-panel-title {
+                background: #20262D;
+                border: 1px solid #111827;
+                border-radius: 6px;
+                color: #E5E7EB;
+                font-size: 15px;
+                font-weight: 800;
+                letter-spacing: .2px;
+                padding: 8px 10px;
+                margin-bottom: 10px;
+            }
+            div[data-testid="column"]:has(.presion-filter-panel-marker) .presion-panel-section,
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) .presion-panel-section {
+                color: #AEB7C2;
+                font-size: 10px;
+                font-weight: 800;
+                text-transform: uppercase;
+                letter-spacing: .65px;
+                margin: 14px 0 6px 0;
+            }
+            div[data-testid="column"]:has(.presion-filter-panel-marker) label,
+            div[data-testid="column"]:has(.presion-filter-panel-marker) p,
+            div[data-testid="column"]:has(.presion-filter-panel-marker) span,
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) label,
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) p,
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) span {
+                color: #DDE4EC !important;
+                font-family: "Segoe UI", Arial, sans-serif;
+                font-size: 12px;
+            }
+            div[data-testid="column"]:has(.presion-filter-panel-marker) div[data-testid="stCheckbox"],
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) div[data-testid="stCheckbox"] {
+                margin-top: -3px;
+                margin-bottom: -4px;
+            }
+            div[data-testid="column"]:has(.presion-filter-panel-marker) div[data-testid="stSelectbox"] label,
+            div[data-testid="column"]:has(.presion-filter-panel-marker) div[data-testid="stDateInput"] label,
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) div[data-testid="stSelectbox"] label,
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) div[data-testid="stDateInput"] label {
+                color: #F3F4F6 !important;
+                font-weight: 700;
+            }
+            div[data-testid="column"]:has(.presion-filter-panel-marker) div[data-baseweb="select"] > div,
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) div[data-baseweb="select"] > div {
+                background-color: #1F252B !important;
+                border-color: #4B5563 !important;
+                border-radius: 6px;
+            }
+            div[data-testid="column"]:has(.presion-filter-panel-marker) div[data-baseweb="select"] span,
+            div[data-testid="column"]:has(.presion-filter-panel-marker) div[data-baseweb="select"] div,
+            div[data-testid="column"]:has(.presion-filter-panel-marker) div[data-baseweb="select"] input,
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) div[data-baseweb="select"] span,
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) div[data-baseweb="select"] div,
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) div[data-baseweb="select"] input {
+                color: #F9FAFB !important;
+            }
+            div[data-testid="column"]:has(.presion-filter-panel-marker) div[data-baseweb="select"] svg,
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) div[data-baseweb="select"] svg {
+                color: #F9FAFB !important;
+                fill: #F9FAFB !important;
+            }
+            div[data-testid="column"]:has(.presion-filter-panel-marker) div[data-baseweb="input"] > div,
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) div[data-baseweb="input"] > div {
+                background-color: #1F252B !important;
+                border-color: #4B5563 !important;
+                border-radius: 6px;
+            }
+            div[data-testid="column"]:has(.presion-filter-panel-marker) div[data-baseweb="input"] input,
+            div[data-testid="column"]:has(.presion-filter-panel-marker) div[data-baseweb="input"] div,
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) div[data-baseweb="input"] input,
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) div[data-baseweb="input"] div {
+                color: #F9FAFB !important;
+            }
+            div[data-testid="column"]:has(.presion-filter-panel-marker) div[data-baseweb="input"] svg,
+            div[data-testid="stColumn"]:has(.presion-filter-panel-marker) div[data-baseweb="input"] svg {
+                color: #F9FAFB !important;
+                fill: #F9FAFB !important;
+            }
+            </style>
+            <div class="presion-panel-title">Presiones</div>
+            """,
+            unsafe_allow_html=True
+        )
+
         yacs = sorted(pres["YACIMIENTO"].dropna().astype(str).unique())
         yac_sel = st.selectbox(
             "Yacimiento",
@@ -8177,31 +9530,113 @@ def mapa_presion():
             key="yac_mapa_presion"
         )
 
-    pres = pres[pres["YACIMIENTO"].astype(str) == str(yac_sel)].copy()
+        pres_yac = pres[pres["YACIMIENTO"].astype(str) == str(yac_sel)].copy()
+        fecha_min = pres_yac["FECHA"].min().date()
+        fecha_max = pres_yac["FECHA"].max().date()
+        key_fecha_presion = "fecha_ref_mapa_presion"
 
-    with c2:
+        if key_fecha_presion in st.session_state:
+            fecha_actual = pd.to_datetime(st.session_state[key_fecha_presion]).date()
+            if fecha_actual < fecha_min or fecha_actual > fecha_max:
+                st.session_state[key_fecha_presion] = fecha_max
+
         fecha_ref = st.date_input(
             "Fecha referencia",
-            value=pres["FECHA"].max().date(),
-            key="fecha_ref_mapa_presion"
+            value=fecha_max,
+            min_value=fecha_min,
+            max_value=fecha_max,
+            key=key_fecha_presion
         )
 
-    with c3:
-        modo_presion = st.selectbox(
-            "Modo presión",
-            ["Última disponible"],
-            key="modo_mapa_presion"
+        st.markdown("<div class='presion-panel-section'>Filtros</div>", unsafe_allow_html=True)
+
+        mostrar_np = st.checkbox(
+            "Producción Acumulada Aceite (mb)",
+            value=False,
+            key="mostrar_np_mapa_presion"
         )
 
-    with c4:
-        dias_promedio = st.number_input(
-            "Promediar ± días",
-            min_value=0,
-            max_value=60,
-            value=30,
-            step=1,
-            key="dias_prom_mapa_presion"
+        mostrar_gp = st.checkbox(
+            "Producción acumulada de gas",
+            value=False,
+            key="mostrar_gp_mapa_presion"
         )
+
+        mostrar_wp = st.checkbox(
+            "Producción acumulada de agua",
+            value=False,
+            key="mostrar_wp_mapa_presion"
+        )
+
+        mostrar_winj = st.checkbox(
+            "Agua inyectada acumulada",
+            value=False,
+            key="mostrar_winj_mapa_presion"
+        )
+
+        mostrar_rga = st.checkbox(
+            "Última RGA",
+            value=False,
+            key="mostrar_rga_mapa_presion"
+        )
+
+        mostrar_estado = st.checkbox(
+            "Estados del pozo",
+            value=False,
+            key="mostrar_estado_mapa_presion"
+        )
+
+        mostrar_campanias = st.checkbox(
+            "Campañas 2011-2020",
+            value=False,
+            key="mostrar_campanias_mapa_presion"
+        )
+
+        #st.markdown("<div class='presion-panel-section'>Capas adicionales</div>", unsafe_allow_html=True)
+
+        mostrar_loc_315_presion = st.checkbox(
+            "315 Localizaciones",
+            value=False,
+            key="mostrar_loc_315_mapa_presion"
+        )
+
+        mostrar_loc_196_presion = st.checkbox(
+            "196 Localizaciones",
+            value=False,
+            key="mostrar_loc_196_mapa_presion"
+        )
+
+        mostrar_inyectores_operando_presion = st.checkbox(
+            "Inyectores Operando",
+            value=False,
+            key="mostrar_inyectores_operando_mapa_presion"
+        )
+
+        mostrar_radios_drene_presion = st.checkbox(
+            "Radios de drene",
+            value=False,
+            key="mostrar_radios_drene_mapa_presion"
+        )
+
+        mostrar_muestreos_agua_presion = st.checkbox(
+            "Muestreos % Agua",
+            value=False,
+            key="mostrar_muestreos_agua_mapa_presion"
+        )
+
+        fecha_inicio_muestreos_presion = None
+        if mostrar_muestreos_agua_presion:
+            fecha_inicio_muestreos_presion = st.date_input(
+                "Muestreos desde",
+                value=pd.to_datetime("2026-05-23").date(),
+                key="fecha_inicio_muestreos_mapa_presion"
+            )
+
+        st.caption("La presión usa internamente la última disponible y promedia ±30 días.")
+
+    pres = pres_yac.copy()
+    modo_presion = "Última disponible"
+    dias_promedio = 30
 
     pres_mapa = seleccionar_presiones_mapa(
         pres,
@@ -8252,13 +9687,32 @@ def mapa_presion():
         .agg({
             COL_ACEITE_BBL: "sum",
             COL_AGUA_BBL: "sum",
-            COL_GAS_PC: "sum"
+            COL_GAS_PC: "sum",
+            COL_INY_BBL: "sum"
         })
         .rename(columns={
             COL_ACEITE_BBL: "NP_BLS",
             COL_AGUA_BBL: "WP_BLS",
-            COL_GAS_PC: "GP_PC"
+            COL_GAS_PC: "GP_PC",
+            COL_INY_BBL: "WINJ_BLS"
         })
+    )
+
+    rga_ult = (
+        prod_calc.sort_values([COL_POZO, COL_FECHA])
+        .dropna(subset=[COL_RGA])
+    )
+    rga_ult = rga_ult[rga_ult[COL_RGA] > 0]
+    rga_ult = (
+        rga_ult.groupby(COL_POZO, as_index=False)
+        .tail(1)[[COL_POZO, COL_RGA]]
+        .rename(columns={COL_RGA: "ULTIMA_RGA"})
+    )
+
+    acum_pozos = acum_pozos.merge(
+        rga_ult,
+        on=COL_POZO,
+        how="left"
     )
 
     mapa_todos = coord.merge(
@@ -8271,13 +9725,165 @@ def mapa_presion():
         mapa_todos["YACIMIENTO"].astype(str) == str(yac_sel)
     ].copy()
 
-    mapa_todos[["NP_BLS", "WP_BLS", "GP_PC"]] = mapa_todos[
-        ["NP_BLS", "WP_BLS", "GP_PC"]
+    mapa_todos[["NP_BLS", "WP_BLS", "GP_PC", "WINJ_BLS", "ULTIMA_RGA"]] = mapa_todos[
+        ["NP_BLS", "WP_BLS", "GP_PC", "WINJ_BLS", "ULTIMA_RGA"]
     ].fillna(0)
 
     mapa_todos = mapa_todos.dropna(
         subset=["CIMA X UTM", "CIMA Y UTM"]
     )
+
+    def preparar_localizaciones_presion(tipo_localizaciones):
+        loc = load_localizaciones()
+
+        if loc.empty:
+            return pd.DataFrame()
+
+        loc = loc[
+            loc["YACIMIENTO"].astype(str).str.upper() == str(yac_sel).upper()
+        ].copy()
+
+        if loc.empty:
+            return pd.DataFrame()
+
+        if tipo_localizaciones == "196":
+            valores_196 = set(
+                v.upper()
+                for v in loc["COLUMNA 1"].dropna().astype(str).str.strip()
+                if v and v.upper() not in ["NAN", "NONE"]
+            ) if "COLUMNA 1" in loc.columns else set()
+
+            if valores_196:
+                loc = loc[
+                    loc["COLUMNA 1"].astype(str).str.strip().str.upper().isin(valores_196)
+                ].copy()
+
+        loc["X_MAPA_PRESION"] = pd.to_numeric(loc["FONDO X"], errors="coerce")
+        loc["Y_MAPA_PRESION"] = pd.to_numeric(loc["FONDO Y"], errors="coerce")
+        loc = loc.dropna(subset=["X_MAPA_PRESION", "Y_MAPA_PRESION"]).copy()
+
+        return loc
+
+    def preparar_inyectores_operando_presion():
+        iny = cargar_inyectores()
+
+        if iny.empty or "Operando" not in iny.columns:
+            return pd.DataFrame()
+
+        iny = iny.copy()
+        iny["Operando"] = iny["Operando"].fillna("").astype(str).str.strip()
+        iny = iny[iny["Operando"] != ""].copy()
+
+        if iny.empty:
+            return pd.DataFrame()
+
+        iny = iny[
+            iny["Yacimiento"].astype(str).str.upper() == str(yac_sel).upper()
+        ].copy()
+
+        if iny.empty or "TERMINACION" not in iny.columns:
+            return pd.DataFrame()
+
+        coord_iny = coord[["TERMINACION", "POZO", "CIMA X UTM", "CIMA Y UTM"]].copy()
+        coord_iny["TERMINACION"] = coord_iny["TERMINACION"].astype(str).str.strip()
+        coord_iny = coord_iny.drop_duplicates(subset=["TERMINACION"])
+
+        iny["TERMINACION"] = iny["TERMINACION"].astype(str).str.strip()
+        iny["POZO_INY"] = iny["Pozo"].astype(str).str.strip()
+
+        iny_mapa = iny.merge(
+            coord_iny,
+            on="TERMINACION",
+            how="left"
+        )
+        iny_mapa["POZO"] = iny_mapa["POZO"].fillna(iny_mapa["POZO_INY"])
+        iny_mapa["CIMA X UTM"] = pd.to_numeric(iny_mapa["CIMA X UTM"], errors="coerce")
+        iny_mapa["CIMA Y UTM"] = pd.to_numeric(iny_mapa["CIMA Y UTM"], errors="coerce")
+
+        return iny_mapa.dropna(subset=["CIMA X UTM", "CIMA Y UTM"]).copy()
+
+    def preparar_muestreos_agua_presion():
+        muestreos = load_muestreos_agua()
+
+        if muestreos.empty:
+            return pd.DataFrame()
+
+        muestreos = muestreos.copy()
+        muestreos["TERMINACION"] = muestreos["TERMINACION"].astype(str).str.strip()
+        muestreos["% AGUA LAB"] = pd.to_numeric(muestreos["% AGUA LAB"], errors="coerce")
+        muestreos["FECHA MUESTREO"] = convertir_fechas(muestreos["FECHA MUESTREO"])
+        muestreos = muestreos.dropna(subset=["TERMINACION", "% AGUA LAB", "FECHA MUESTREO"])
+
+        if fecha_inicio_muestreos_presion is not None:
+            fecha_ini = pd.to_datetime(fecha_inicio_muestreos_presion).normalize()
+            muestreos = muestreos[muestreos["FECHA MUESTREO"] >= fecha_ini].copy()
+
+        if muestreos.empty:
+            return pd.DataFrame()
+
+        muestreos_ult = (
+            muestreos.sort_values(["TERMINACION", "FECHA MUESTREO"])
+            .groupby("TERMINACION", as_index=False)
+            .tail(1)
+        )
+
+        coord_muestreos = mapa_todos[
+            ["TERMINACION", "POZO", "YACIMIENTO", "CIMA X UTM", "CIMA Y UTM"]
+        ].drop_duplicates(subset=["TERMINACION"]).copy()
+        coord_muestreos["TERMINACION"] = coord_muestreos["TERMINACION"].astype(str).str.strip()
+
+        muestreos_mapa = muestreos_ult.merge(
+            coord_muestreos,
+            on="TERMINACION",
+            how="inner",
+            suffixes=("_MUESTREO", "")
+        )
+
+        muestreos_mapa = muestreos_mapa[
+            muestreos_mapa["YACIMIENTO"].astype(str).str.upper() == str(yac_sel).upper()
+        ].copy()
+
+        if muestreos_mapa.empty:
+            return pd.DataFrame()
+
+        max_agua = muestreos_mapa["% AGUA LAB"].max()
+        muestreos_mapa["SIZE_MUESTREO"] = np.where(
+            max_agua > 0,
+            10 + (muestreos_mapa["% AGUA LAB"] / max_agua) * 28,
+            10
+        )
+        muestreos_mapa["ETIQUETA_MUESTREO"] = muestreos_mapa["% AGUA LAB"].map(lambda v: f"{v:,.1f}%")
+
+        return muestreos_mapa.dropna(subset=["CIMA X UTM", "CIMA Y UTM"]).copy()
+
+    localizaciones_presion = []
+    if mostrar_loc_315_presion:
+        loc_315_presion = preparar_localizaciones_presion("315")
+        if not loc_315_presion.empty:
+            loc_315_presion["TIPO_LOCALIZACION"] = "315"
+            localizaciones_presion.append(loc_315_presion)
+
+    if mostrar_loc_196_presion:
+        loc_196_presion = preparar_localizaciones_presion("196")
+        if not loc_196_presion.empty:
+            loc_196_presion["TIPO_LOCALIZACION"] = "196"
+            localizaciones_presion.append(loc_196_presion)
+
+    localizaciones_presion = (
+        pd.concat(localizaciones_presion, ignore_index=True)
+        if localizaciones_presion else pd.DataFrame()
+    )
+
+    inyectores_operando_presion = (
+        preparar_inyectores_operando_presion()
+        if mostrar_inyectores_operando_presion else pd.DataFrame()
+    )
+
+    muestreos_agua_presion = (
+        preparar_muestreos_agua_presion()
+        if mostrar_muestreos_agua_presion else pd.DataFrame()
+    )
+
     if pres_mapa.empty:
         st.warning("Las presiones seleccionadas no tienen coordenadas en Coord.")
         return
@@ -8289,16 +9895,17 @@ def mapa_presion():
     n_terminaciones_presion = pres_mapa["TERMINACION"].nunique()
     n_mediciones_prom = pres_mapa["N_MEDICIONES"].sum()
 
-    k1, k2, k3 = st.columns(3)
+    with col_mapa_presion:
+        k1, k2, k3 = st.columns(3)
 
-    with k1:
-        st.metric("Pozos con presión en mapa", f"{n_pozos_presion:,.0f}")
+        with k1:
+            st.metric("Pozos con presión en mapa", f"{n_pozos_presion:,.0f}")
 
-    with k2:
-        st.metric("Terminaciones graficadas", f"{n_terminaciones_presion:,.0f}")
+        with k2:
+            st.metric("Terminaciones graficadas", f"{n_terminaciones_presion:,.0f}")
 
-    with k3:
-        st.metric("Mediciones usadas/promediadas", f"{n_mediciones_prom:,.0f}")
+        with k3:
+            st.metric("Mediciones usadas/promediadas", f"{n_mediciones_prom:,.0f}")
     # =========================
     # ESTADO DE POZOS
     # =========================
@@ -8325,15 +9932,18 @@ def mapa_presion():
     # =========================
     # CAMPAÑAS 2011-2020
     # =========================
-    term = load_term_perforados()
+    if mostrar_campanias:
+        term = load_term_perforados()
 
-    pres_mapa = pres_mapa.merge(
-        term,
-        on="TERMINACION",
-        how="left"
-    )
+        pres_mapa = pres_mapa.merge(
+            term,
+            on="TERMINACION",
+            how="left"
+        )
 
-    pres_mapa["PERFORADO_TERM"] = pres_mapa["PERFORADO_TERM"].fillna("No")
+        pres_mapa["PERFORADO_TERM"] = pres_mapa["PERFORADO_TERM"].fillna("No")
+    else:
+        pres_mapa["PERFORADO_TERM"] = "No"
 
     # =========================
     # CONTORNO
@@ -8472,55 +10082,288 @@ def mapa_presion():
         showlegend=True
     ))
 
+    if mostrar_np:
+        # =========================
+        # BURBUJA DE ACEITE ACUMULADO
+        # =========================
+        mapa_np = mapa_todos[mapa_todos["NP_BLS"] > 0].copy()
 
-    # =========================
-    # BURBUJA DE ACEITE ACUMULADO
-    # =========================
-    mapa_np = mapa_todos[mapa_todos["NP_BLS"] > 0].copy()
+        max_np = mapa_np["NP_BLS"].max()
 
-    max_np = mapa_np["NP_BLS"].max()
+        if max_np > 0:
+            mapa_np["SIZE_NP"] = 12 + (mapa_np["NP_BLS"] / max_np) * 70
+        else:
+            mapa_np["SIZE_NP"] = 12
 
-    if max_np > 0:
-        mapa_np["SIZE_NP"] = 12 + (mapa_np["NP_BLS"] / max_np) * 70
-    else:
-        mapa_np["SIZE_NP"] = 12
+        mapa_np["ETIQUETA_NP"] = mapa_np["NP_BLS"].map(lambda x: f"{x/1000:,.1f}")
 
-    mapa_np["ETIQUETA_NP"] = mapa_np["NP_BLS"].map(lambda x: f"{x/1000:,.1f}")
+        fig.add_trace(go.Scatter(
+            x=mapa_np["CIMA X UTM"],
+            y=mapa_np["CIMA Y UTM"],
+            mode="markers+text",
+            text=mapa_np["ETIQUETA_NP"],
+            textposition="bottom center",
+            textfont=dict(
+                size=10,
+                color="black",
+                family="Arial"
+            ),
+            marker=dict(
+                size=mapa_np["SIZE_NP"],
+                sizemode="diameter",
+                color="green",
+                opacity=0.45,
+                line=dict(color="black", width=1)
+            ),
+            name="Np (mb)",
+            customdata=mapa_np[
+                ["POZO", "TERMINACION", "YACIMIENTO", "NP_BLS"]
+            ],
+            hovertemplate=
+                "<b>Pozo:</b> %{customdata[0]}<br>" +
+                "<b>Terminación:</b> %{customdata[1]}<br>" +
+                "<b>Yacimiento:</b> %{customdata[2]}<br>" +
+                "<b>Np:</b> %{customdata[3]:,.0f} bls<br>" +
+                "<extra></extra>",
+            showlegend=True
+        ))
 
-    fig.add_trace(go.Scatter(
-        x=mapa_np["CIMA X UTM"],
-        y=mapa_np["CIMA Y UTM"],
-        mode="markers+text",
-        text=mapa_np["ETIQUETA_NP"],
-        textposition="bottom center",
-        textfont=dict(
-            size=10,
-            color="black",
-            family="Arial"
-        ),
-        marker=dict(
-            size=mapa_np["SIZE_NP"],
-            sizemode="diameter",
-            color="green",
-            opacity=0.45,
-            line=dict(color="black", width=1)
-        ),
-        name="Np (mb)",
-        customdata=mapa_np[
-            ["POZO", "TERMINACION", "YACIMIENTO", "NP_BLS"]
-        ],
-        hovertemplate=
-            "<b>Pozo:</b> %{customdata[0]}<br>" +
-            "<b>Terminación:</b> %{customdata[1]}<br>" +
-            "<b>Yacimiento:</b> %{customdata[2]}<br>" +
-            "<b>Np:</b> %{customdata[3]:,.0f} bls<br>" +
-            "<extra></extra>",
-        showlegend=True
-    ))
+    def agregar_burbuja_variable_mapa(
+        df_mapa,
+        columna_valor,
+        nombre_capa,
+        color,
+        unidad,
+        divisor_etiqueta=1.0,
+        decimales_etiqueta=1,
+        opacidad=0.45
+    ):
+        mapa_var = df_mapa[df_mapa[columna_valor] > 0].copy()
+
+        if mapa_var.empty:
+            return
+
+        max_valor = mapa_var[columna_valor].max()
+
+        if max_valor > 0:
+            mapa_var["SIZE_VAR"] = 12 + (mapa_var[columna_valor] / max_valor) * 70
+        else:
+            mapa_var["SIZE_VAR"] = 12
+
+        mapa_var["ETIQUETA_VAR"] = mapa_var[columna_valor].map(
+            lambda x: f"{x / divisor_etiqueta:,.{decimales_etiqueta}f}"
+        )
+
+        fig.add_trace(go.Scatter(
+            x=mapa_var["CIMA X UTM"],
+            y=mapa_var["CIMA Y UTM"],
+            mode="markers+text",
+            text=mapa_var["ETIQUETA_VAR"],
+            textposition="bottom center",
+            textfont=dict(
+                size=10,
+                color="black",
+                family="Arial"
+            ),
+            marker=dict(
+                size=mapa_var["SIZE_VAR"],
+                sizemode="diameter",
+                color=color,
+                opacity=opacidad,
+                line=dict(color="black", width=1)
+            ),
+            name=nombre_capa,
+            customdata=mapa_var[
+                ["POZO", "TERMINACION", "YACIMIENTO", columna_valor]
+            ],
+            hovertemplate=
+                "<b>Pozo:</b> %{customdata[0]}<br>" +
+                "<b>Terminación:</b> %{customdata[1]}<br>" +
+                "<b>Yacimiento:</b> %{customdata[2]}<br>" +
+                f"<b>{nombre_capa}:</b> " + "%{customdata[3]:,.1f} " + unidad + "<br>" +
+                "<extra></extra>",
+            showlegend=True
+        ))
+
+    if mostrar_gp:
+        agregar_burbuja_variable_mapa(
+            mapa_todos,
+            "GP_PC",
+            "Producción acumulada de gas",
+            "#8E44AD",
+            "pc",
+            divisor_etiqueta=1_000_000,
+            decimales_etiqueta=1
+        )
+
+    if mostrar_wp:
+        agregar_burbuja_variable_mapa(
+            mapa_todos,
+            "WP_BLS",
+            "Producción acumulada de agua",
+            "#1F77B4",
+            "bls",
+            divisor_etiqueta=1000,
+            decimales_etiqueta=1
+        )
+
+    if mostrar_winj:
+        agregar_burbuja_variable_mapa(
+            mapa_todos,
+            "WINJ_BLS",
+            "Agua inyectada acumulada",
+            "#00AEEF",
+            "bls",
+            divisor_etiqueta=1000,
+            decimales_etiqueta=1
+        )
+
+    if mostrar_rga:
+        agregar_burbuja_variable_mapa(
+            mapa_todos,
+            "ULTIMA_RGA",
+            "Última RGA",
+            "#FF7F0E",
+            "pc/bl",
+            divisor_etiqueta=1,
+            decimales_etiqueta=0,
+            opacidad=0.55
+        )
 
     # =========================
     # PUNTOS DE PRESIÓN
     # =========================
+    if mostrar_radios_drene_presion and "RADIO DRENE" in mapa_todos.columns:
+        mapa_radios = mapa_todos.copy()
+        mapa_radios["RADIO DRENE"] = pd.to_numeric(mapa_radios["RADIO DRENE"], errors="coerce")
+        mapa_radios = mapa_radios[mapa_radios["RADIO DRENE"] > 0].copy()
+
+        theta = np.linspace(0, 2 * np.pi, 90)
+        radios_x, radios_y, radios_customdata = [], [], []
+
+        for _, row in mapa_radios.iterrows():
+            x0 = row["CIMA X UTM"]
+            y0 = row["CIMA Y UTM"]
+            radio = row["RADIO DRENE"]
+
+            radios_x.extend((x0 + radio * np.cos(theta)).tolist() + [None])
+            radios_y.extend((y0 + radio * np.sin(theta)).tolist() + [None])
+            radios_customdata.extend(
+                [[row.get("POZO", ""), radio]] * len(theta) + [[None, None]]
+            )
+
+        if radios_x:
+            fig.add_trace(go.Scatter(
+                x=radios_x,
+                y=radios_y,
+                mode="lines",
+                line=dict(width=2, color="black", dash="dash"),
+                name="Radios de drene",
+                customdata=radios_customdata,
+                hovertemplate=
+                    "<b>Pozo:</b> %{customdata[0]}<br>" +
+                    "<b>Radio de drene:</b> %{customdata[1]:,.0f} m<br>" +
+                    "<extra></extra>",
+                showlegend=True
+            ))
+
+    if not localizaciones_presion.empty:
+        colores_localizaciones_presion = {
+            "PND": "#00A65A",
+            "PRB": "#FFD700",
+            "POS": "#0057FF"
+        }
+
+        for tipo_loc in localizaciones_presion["TIPO_LOCALIZACION"].dropna().astype(str).unique():
+            loc_tipo = localizaciones_presion[
+                localizaciones_presion["TIPO_LOCALIZACION"].astype(str) == str(tipo_loc)
+            ].copy()
+
+            for categoria, color in colores_localizaciones_presion.items():
+                tmp_loc = loc_tipo[
+                    loc_tipo["CATEGORIA"].astype(str).str.upper() == categoria
+                ].copy()
+
+                if tmp_loc.empty:
+                    continue
+
+                fig.add_trace(go.Scatter(
+                    x=tmp_loc["X_MAPA_PRESION"],
+                    y=tmp_loc["Y_MAPA_PRESION"],
+                    mode="markers+text",
+                    text=tmp_loc["POZO"],
+                    textposition="bottom center",
+                    marker=dict(
+                        size=12,
+                        symbol="diamond",
+                        color=color,
+                        line=dict(color="black", width=1)
+                    ),
+                    name=f"{tipo_loc} Localizaciones {categoria}",
+                    customdata=tmp_loc[["POZO", "TERMINACION", "YACIMIENTO", "CATEGORIA"]],
+                    hovertemplate=
+                        "<b>Localización:</b> %{customdata[0]}<br>" +
+                        "<b>Terminación:</b> %{customdata[1]}<br>" +
+                        "<b>Yacimiento:</b> %{customdata[2]}<br>" +
+                        "<b>Categoría:</b> %{customdata[3]}<br>" +
+                        "<extra></extra>",
+                    showlegend=True
+                ))
+
+    if not inyectores_operando_presion.empty:
+        fig.add_trace(go.Scatter(
+            x=inyectores_operando_presion["CIMA X UTM"],
+            y=inyectores_operando_presion["CIMA Y UTM"],
+            mode="markers",
+            marker=dict(
+                size=22,
+                symbol="circle-open",
+                color="#0057FF",
+                line=dict(color="#0057FF", width=4)
+            ),
+            name="Inyectores Operando",
+            customdata=inyectores_operando_presion[["POZO", "Yacimiento", "Operando", "VI_BLS"]],
+            hovertemplate=
+                "<b>Inyector operando:</b> %{customdata[0]}<br>" +
+                "<b>Yacimiento:</b> %{customdata[1]}<br>" +
+                "<b>Operando:</b> %{customdata[2]}<br>" +
+                "<b>Vi:</b> %{customdata[3]:,.0f} bls<br>" +
+                "<extra></extra>",
+            showlegend=True
+        ))
+
+    if not muestreos_agua_presion.empty:
+        fig.add_trace(go.Scatter(
+            x=muestreos_agua_presion["CIMA X UTM"],
+            y=muestreos_agua_presion["CIMA Y UTM"],
+            mode="markers+text",
+            text=muestreos_agua_presion["ETIQUETA_MUESTREO"],
+            textposition="bottom center",
+            textfont=dict(
+                size=11,
+                color="#0057FF",
+                family="Arial Black"
+            ),
+            marker=dict(
+                size=muestreos_agua_presion["SIZE_MUESTREO"],
+                sizemode="diameter",
+                symbol="circle",
+                color="#8EDBFF",
+                opacity=0.82,
+                line=dict(color="#0057FF", width=2)
+            ),
+            name="Muestreos % Agua",
+            customdata=muestreos_agua_presion[["POZO", "TERMINACION", "YACIMIENTO", "FECHA MUESTREO", "% AGUA LAB"]],
+            hovertemplate=
+                "<b>Pozo:</b> %{customdata[0]}<br>" +
+                "<b>Terminación:</b> %{customdata[1]}<br>" +
+                "<b>Yacimiento:</b> %{customdata[2]}<br>" +
+                "<b>Fecha muestreo:</b> %{customdata[3]|%d/%m/%Y}<br>" +
+                "<b>% Agua Lab:</b> %{customdata[4]:,.1f}%<br>" +
+                "<extra></extra>",
+            showlegend=True
+        ))
+
     fig.add_trace(go.Scatter(
         x=pres_mapa["CIMA X UTM"],
         y=pres_mapa["CIMA Y UTM"],
@@ -8570,71 +10413,72 @@ def mapa_presion():
         showlegend=True
     ))
 
-    # =========================
-    # ESTADO DE POZOS
-    # =========================
-    color_estado = {
-        "OPERANDO": "#000000",
-        "CCP": "#FFD700",
-        "CSP": "#DC143C",
-        "INY": "#0000FF",
-        "PROG. TAPONAMIENTO": "#BA55D3",
-        "TAPONADO": "#808080"
-    }
+    if mostrar_estado:
+        # =========================
+        # ESTADO DE POZOS
+        # =========================
+        color_estado = {
+            "OPERANDO": "#000000",
+            "CCP": "#FFD700",
+            "CSP": "#DC143C",
+            "INY": "#0000FF",
+            "PROG. TAPONAMIENTO": "#BA55D3",
+            "TAPONADO": "#808080"
+        }
 
-    pres_mapa["COLOR_ESTADO"] = (
-        pres_mapa["ESTADO"]
-        .astype(str)
-        .str.upper()
-        .map(color_estado)
-        .fillna("#7F8C8D")
-    )
+        pres_mapa["COLOR_ESTADO"] = (
+            pres_mapa["ESTADO"]
+            .astype(str)
+            .str.upper()
+            .map(color_estado)
+            .fillna("#7F8C8D")
+        )
 
-    fig.add_trace(go.Scatter(
-        x=pres_mapa["CIMA X UTM"],
-        y=pres_mapa["CIMA Y UTM"],
-        mode="markers",
-        marker=dict(
-            size=8,
-            symbol="circle",
-            color=pres_mapa["COLOR_ESTADO"],
-            line=dict(color="white", width=1.2),
-            opacity=1
-        ),
-        name="Estado del pozo",
-        customdata=pres_mapa[["POZO", "ESTADO", "SAP"]],
-        hovertemplate=
-            "<b>Pozo:</b> %{customdata[0]}<br>" +
-            "<b>Estado:</b> %{customdata[1]}<br>" +
-            "<b>SAP:</b> %{customdata[2]}<br>" +
-            "<extra></extra>",
-        showlegend=True
-    ))
+        fig.add_trace(go.Scatter(
+            x=pres_mapa["CIMA X UTM"],
+            y=pres_mapa["CIMA Y UTM"],
+            mode="markers",
+            marker=dict(
+                size=8,
+                symbol="circle",
+                color=pres_mapa["COLOR_ESTADO"],
+                line=dict(color="white", width=1.2),
+                opacity=1
+            ),
+            name="Estado del pozo",
+            customdata=pres_mapa[["POZO", "ESTADO", "SAP"]],
+            hovertemplate=
+                "<b>Pozo:</b> %{customdata[0]}<br>" +
+                "<b>Estado:</b> %{customdata[1]}<br>" +
+                "<b>SAP:</b> %{customdata[2]}<br>" +
+                "<extra></extra>",
+            showlegend=True
+        ))
 
-    
-    # =========================
-    # POZOS CAMPAÑAS 2011-2020
-    # =========================
-    mapa_term = pres_mapa[pres_mapa["PERFORADO_TERM"] == "Sí"].copy()
+    if mostrar_campanias:
+        # =========================
+        # POZOS CAMPAÑAS 2011-2020
+        # =========================
+        mapa_term = pres_mapa[pres_mapa["PERFORADO_TERM"] == "Sí"].copy()
 
-    fig.add_trace(go.Scatter(
-        x=mapa_term["CIMA X UTM"],
-        y=mapa_term["CIMA Y UTM"],
-        mode="markers",
-        marker=dict(
-            size=17,
-            symbol="circle-open",
-            color="red",
-            line=dict(color="red", width=3)
-        ),
-        name="Campañas 2011-2020",
-        customdata=mapa_term[["POZO", "TERMINACION"]],
-        hovertemplate=
-            "<b>Pozo:</b> %{customdata[0]}<br>" +
-            "<b>Terminación:</b> %{customdata[1]}<br>" +
-            "<extra></extra>",
-        showlegend=True
-    ))
+        fig.add_trace(go.Scatter(
+            x=mapa_term["CIMA X UTM"],
+            y=mapa_term["CIMA Y UTM"],
+            mode="markers",
+            marker=dict(
+                size=17,
+                symbol="circle-open",
+                color="red",
+                line=dict(color="red", width=3)
+            ),
+            name="Campañas 2011-2020",
+            customdata=mapa_term[["POZO", "TERMINACION"]],
+            hovertemplate=
+                "<b>Pozo:</b> %{customdata[0]}<br>" +
+                "<b>Terminación:</b> %{customdata[1]}<br>" +
+                "<extra></extra>",
+            showlegend=True
+        ))
 
     fig.update_layout(
         title=f"<b>Mapa de presión - {yac_sel}</b>",
@@ -8675,39 +10519,886 @@ def mapa_presion():
         linecolor="black"
     )
 
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-        config={
-            "scrollZoom": True,
-            "displaylogo": False,
-            "modeBarButtonsToRemove": ["lasso2d", "select2d"]
+    with col_mapa_presion:
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            config={
+                "scrollZoom": True,
+                "displaylogo": False,
+                "modeBarButtonsToRemove": ["lasso2d", "select2d"]
+            }
+        )
+
+        with st.expander("Ver datos usados para el mapa de presión"):
+            st.dataframe(
+                pres_mapa.sort_values("PRESION_MAPA", ascending=False),
+                use_container_width=True,
+                height=350
+            )
+def reservas():
+    def _normalizar_txt_reservas(valor):
+        valor = "" if pd.isna(valor) else str(valor)
+        valor = unicodedata.normalize("NFKD", valor)
+        valor = "".join(c for c in valor if not unicodedata.combining(c))
+        return valor.strip().upper()
+
+    def _preparar_tabla_reservas():
+        raw = load_table(TABLA_RESERVAS).copy()
+        if raw.empty:
+            return pd.DataFrame()
+
+        # La hoja Reservas puede venir con encabezados reales en la primera fila
+        # cuando Excel genera columnas tipo "Unnamed".
+        cols_norm = [_normalizar_txt_reservas(c) for c in raw.columns]
+        if not any("YACIMIENTO" in c for c in cols_norm):
+            fila_header = None
+            for idx, row in raw.iterrows():
+                valores = [_normalizar_txt_reservas(v) for v in row.tolist()]
+                if any("YACIMIENTO" in v for v in valores) and any(v == "CAT" for v in valores):
+                    fila_header = idx
+                    break
+
+            if fila_header is not None:
+                nuevos_cols = [
+                    str(v).strip() if pd.notna(v) and str(v).strip() else f"COL_{i}"
+                    for i, v in enumerate(raw.iloc[fila_header].tolist())
+                ]
+                raw = raw.iloc[fila_header + 1:].copy()
+                raw.columns = nuevos_cols
+
+        mapa_cols = {}
+        for col in raw.columns:
+            n = _normalizar_txt_reservas(col)
+            if "YACIMIENTO" in n:
+                mapa_cols[col] = "Yacimiento"
+            elif n == "CAT" or "CATEGORIA" in n:
+                mapa_cols[col] = "Cat"
+            elif "ORIGINAL" in n and ("MMB" in n or "ACEITE" in n or "PETROLEO" in n):
+                mapa_cols[col] = "Original aceite (mmb)"
+            elif "ORIGINAL" in n and ("MMMPC" in n or "GAS" in n):
+                mapa_cols[col] = "Original gas (mmmpc)"
+            elif "ORIGINAL" not in n and ("MMB" in n or "ACEITE" in n or "PETROLEO" in n):
+                mapa_cols[col] = "Reserva aceite (mmb)"
+            elif "ORIGINAL" not in n and ("MMMPC" in n or "GAS" in n):
+                mapa_cols[col] = "Reserva gas (mmmpc)"
+
+        df_res = raw.rename(columns=mapa_cols)
+        df_res = df_res.loc[:, ~df_res.columns.duplicated()].copy()
+        columnas_req = ["Yacimiento", "Cat", "Reserva aceite (mmb)", "Reserva gas (mmmpc)"]
+        if not all(c in df_res.columns for c in columnas_req):
+            st.error(
+                "No pude identificar todas las columnas de Reservas. "
+                "Se requieren: Yacimiento, Cat, Reserva (mmb) y Reserva (mmmpc)."
+            )
+            st.dataframe(raw.head(20), use_container_width=True)
+            return pd.DataFrame()
+
+        columnas_opt = ["Original aceite (mmb)", "Original gas (mmmpc)"]
+        for col_opt in columnas_opt:
+            if col_opt not in df_res.columns:
+                df_res[col_opt] = 0
+
+        df_res = df_res[columnas_req + columnas_opt].copy()
+        df_res["Yacimiento"] = df_res["Yacimiento"].astype(str).str.strip()
+        df_res["Cat"] = df_res["Cat"].astype(str).str.strip().str.upper()
+        df_res["Reserva aceite (mmb)"] = pd.to_numeric(df_res["Reserva aceite (mmb)"], errors="coerce").fillna(0)
+        df_res["Reserva gas (mmmpc)"] = pd.to_numeric(df_res["Reserva gas (mmmpc)"], errors="coerce").fillna(0)
+        df_res["Original aceite (mmb)"] = pd.to_numeric(df_res["Original aceite (mmb)"], errors="coerce").fillna(0)
+        df_res["Original gas (mmmpc)"] = pd.to_numeric(df_res["Original gas (mmmpc)"], errors="coerce").fillna(0)
+        df_res = df_res[(df_res["Yacimiento"].ne("")) & (df_res["Cat"].ne(""))].copy()
+        return df_res
+
+    colores_cat = {
+        "PDP": "#008A2E",
+        "PDNP": "#7CB342",
+        "PND": "#F2A900",
+        "PB": "#FF4B00",
+        "POS": "#9E9E9E",
+        "1P": "#4F9F38",
+        "2P": "#FF4B00",
+        "3P": "#8E24AA",
+    }
+    definiciones = {
+        "PDP": "Probadas Desarrolladas Produciendo",
+        "PDNP": "Probadas Desarrolladas No Produciendo",
+        "PND": "Probadas No Desarrolladas",
+        "PB": "Probables",
+        "POS": "Posibles",
+    }
+    orden_base = ["PDP", "PDNP", "PND", "PB", "POS"]
+
+    def _valor_cat(df_cat, cat, col_valor):
+        s = df_cat.loc[df_cat["Cat"].eq(cat), col_valor]
+        return float(s.iloc[0]) if not s.empty else 0.0
+
+    def _totales_desde_base(df_cat, col_valor):
+        vals = {cat: _valor_cat(df_cat, cat, col_valor) for cat in orden_base}
+        vals["1P"] = _valor_cat(df_cat, "1P", col_valor) or (vals["PDP"] + vals["PDNP"] + vals["PND"])
+        vals["2P"] = _valor_cat(df_cat, "2P", col_valor) or (vals["1P"] + vals["PB"])
+        vals["3P"] = _valor_cat(df_cat, "3P", col_valor) or (vals["2P"] + vals["POS"])
+        return vals
+
+    def _totales_originales(df_cat, col_valor):
+        vals = {cat: _valor_cat(df_cat, cat, col_valor) for cat in ["1P", "2P", "3P"]}
+        if not any(vals.values()):
+            vals_reserva = _totales_desde_base(df_cat, col_valor)
+            vals = {cat: vals_reserva.get(cat, 0) for cat in ["1P", "2P", "3P"]}
+        return vals
+
+    def _fig_reserva_yacimiento(yacimiento, df_yac, col_valor, unidad, y_max=None):
+        vals = _totales_desde_base(df_yac, col_valor)
+        y_vals = [vals[c] for c in orden_base] + [vals["3P"]]
+        medidas = ["relative", "relative", "relative", "relative", "relative", "total"]
+        x_vals = orden_base + ["3P TOTAL"]
+        colores = [colores_cat[c] for c in orden_base] + [colores_cat["3P"]]
+
+        bases, altos, acumulados = [], [], []
+        acumulado = 0.0
+        for valor, medida in zip(y_vals, medidas):
+            if medida == "total":
+                bases.append(0)
+                altos.append(valor)
+                acumulado = valor
+            else:
+                bases.append(acumulado)
+                altos.append(valor)
+                acumulado += valor
+            acumulados.append(acumulado)
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Bar(
+                x=x_vals,
+                y=altos,
+                base=bases,
+                marker=dict(
+                    color=colores,
+                    opacity=0.96,
+                    line=dict(color="rgba(255,255,255,0.95)", width=1.2),
+                ),
+                text=[f"{v:,.3f}" for v in y_vals],
+                textposition="outside",
+                textfont=dict(color="#111827", size=11, family="Segoe UI"),
+                customdata=np.array(y_vals).reshape(-1, 1),
+                hovertemplate="<b>%{x}</b><br>Reserva: %{customdata[0]:,.3f} " + unidad + "<extra></extra>",
+            )
+        )
+        for i in range(len(x_vals) - 1):
+            fig.add_shape(
+                type="line",
+                xref="x", yref="y",
+                x0=i + 0.36, x1=i + 0.64,
+                y0=acumulados[i], y1=acumulados[i],
+                line=dict(color="rgba(50,50,50,0.35)", width=1, dash="dot"),
+            )
+        fig.update_layout(
+            title=dict(
+                text="",
+                font=dict(size=13, color="#FFFFFF"),
+            ),
+            height=315,
+            margin=dict(l=42, r=18, t=92, b=44),
+            paper_bgcolor="#FFFFFF",
+            plot_bgcolor="#F8FAFC",
+            font=dict(size=10, color="#0B1F4D", family="Segoe UI"),
+            showlegend=False,
+            bargap=0.32,
+            hoverlabel=dict(bgcolor="#252B31", font=dict(color="#FFFFFF")),
+        )
+        fig.update_xaxes(
+            tickfont=dict(size=9, color="#0B1F4D"),
+            showline=True,
+            linewidth=1,
+            linecolor="rgba(11,31,77,0.25)",
+        )
+        fig.update_yaxes(
+            title=unidad,
+            gridcolor="rgba(11,31,77,0.10)",
+            zerolinecolor="rgba(11,31,77,0.25)",
+            range=[0, y_max] if y_max else None,
+            rangemode="tozero" if not y_max else None,
+            showline=True,
+            linewidth=1,
+            linecolor="rgba(11,31,77,0.25)",
+        )
+        fig.add_shape(
+            type="rect",
+            xref="paper", yref="paper",
+            x0=0, x1=1, y0=1.03, y1=1.32,
+            fillcolor="#061B65",
+            line=dict(color="#061B65"),
+            layer="below",
+        )
+        fig.add_annotation(
+            x=0.5, y=1.235,
+            xref="paper", yref="paper",
+            text=f"<b>{yacimiento.upper()}</b> | Reserva ({unidad})",
+            showarrow=False,
+            font=dict(size=13, color="#FFFFFF", family="Segoe UI"),
+            align="center",
+        )
+        fig.add_annotation(
+            x=0.5, y=1.105,
+            xref="paper", yref="paper",
+            text=f"<b>3P = {vals['3P']:,.3f} {unidad}</b>",
+            showarrow=False,
+            font=dict(size=13, color="#FFFFFF", family="Segoe UI"),
+            align="center",
+        )
+        return fig
+
+    def _fig_resumen_total(titulo, x_vals, y_vals, medidas, colores, unidad, y_max=None):
+        bases, altos, acumulados = [], [], []
+        acumulado = 0.0
+        for valor, medida in zip(y_vals, medidas):
+            if medida == "total":
+                bases.append(0)
+                altos.append(valor)
+                acumulado = valor
+            else:
+                bases.append(acumulado)
+                altos.append(valor)
+                acumulado += valor
+            acumulados.append(acumulado)
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Bar(
+                x=x_vals,
+                y=altos,
+                base=bases,
+                marker=dict(
+                    color=colores,
+                    opacity=0.96,
+                    line=dict(color="rgba(255,255,255,0.95)", width=1.2),
+                ),
+                text=[f"{v:,.3f}" for v in y_vals],
+                textposition="outside",
+                textfont=dict(color="#111827", size=11, family="Segoe UI"),
+                customdata=np.array(y_vals).reshape(-1, 1),
+                hovertemplate="<b>%{x}</b><br>Reserva: %{customdata[0]:,.3f} " + unidad + "<extra></extra>",
+            )
+        )
+        for i in range(len(x_vals) - 1):
+            fig.add_shape(
+                type="line",
+                xref="x", yref="y",
+                x0=i + 0.36, x1=i + 0.64,
+                y0=acumulados[i], y1=acumulados[i],
+                line=dict(color="rgba(50,50,50,0.38)", width=1, dash="dot"),
+            )
+        fig.update_layout(
+            title=dict(text=titulo, x=0.5, font=dict(size=15, color=colores[-1])),
+            height=270,
+            margin=dict(l=42, r=18, t=58, b=44),
+            paper_bgcolor="#FFFFFF",
+            plot_bgcolor="#F8FAFC",
+            font=dict(size=10, color="#0B1F4D", family="Segoe UI"),
+            showlegend=False,
+            bargap=0.34,
+            hoverlabel=dict(bgcolor="#252B31", font=dict(color="#FFFFFF")),
+        )
+        fig.update_yaxes(
+            title=unidad,
+            gridcolor="rgba(11,31,77,0.10)",
+            range=[0, y_max] if y_max else None,
+            rangemode="tozero" if not y_max else None,
+            showline=True,
+            linewidth=1,
+            linecolor="rgba(11,31,77,0.25)",
+        )
+        fig.update_xaxes(
+            tickfont=dict(size=9, color="#0B1F4D"),
+            showline=True,
+            linewidth=1,
+            linecolor="rgba(11,31,77,0.25)",
+        )
+        return fig
+
+    df_reservas = _preparar_tabla_reservas()
+    if df_reservas.empty:
+        st.warning("No hay datos disponibles en la tabla Reservas.")
+        return
+
+    st.markdown(
+        """
+        <style>
+        .reservas-hero {
+            background: linear-gradient(90deg, #F8FAFC 0%, #FFFFFF 45%, #F8FAFC 100%);
+            border: 1px solid #E5E7EB;
+            border-radius: 14px;
+            padding: 10px 14px;
+            margin-bottom: 10px;
+            text-align: center;
         }
+        .reservas-hero h1 {
+            color: #061B65;
+            margin: 0;
+            font-size: 28px;
+            line-height: 1.0;
+            font-weight: 900;
+            letter-spacing: .8px;
+        }
+        .reservas-hero p {
+            color: #4B5563;
+            margin: 2px 0 0 0;
+            font-size: 16px;
+            font-weight: 750;
+        }
+        .reservas-card {
+            border-radius: 12px;
+            color: white;
+            padding: 16px 18px;
+            text-align: center;
+            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
+            min-height: 88px;
+        }
+        .reservas-card .label {font-size: 13px; font-weight: 800;}
+        .reservas-card .value {font-size: 28px; font-weight: 900; line-height: 1.0;}
+        .reservas-card .unit {font-size: 12px; font-weight: 800;}
+        .reservas-general-label {
+            background: linear-gradient(135deg, #061B65, #0B2C83);
+            border-radius: 12px;
+            color: white;
+            padding: 16px 18px;
+            min-height: 88px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            font-size: 18px;
+            font-weight: 900;
+            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
+        }
+        .reservas-yac-card {
+            background: #FFFFFF;
+            border: 1px solid #E5E7EB;
+            border-radius: 14px;
+            padding: 10px 10px 4px 10px;
+            margin-bottom: 10px;
+            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.07);
+        }
+        .reservas-yac-title {
+            background: linear-gradient(90deg, #061B65, #0B2C83);
+            color: white;
+            border-radius: 10px;
+            padding: 8px 10px;
+            text-align: center;
+            font-size: 13px;
+            font-weight: 900;
+            letter-spacing: .2px;
+            margin-bottom: 8px;
+        }
+        .reservas-chip-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 5px;
+            margin-bottom: 6px;
+        }
+        .reservas-chip {
+            border-radius: 8px;
+            padding: 5px 4px;
+            color: white;
+            text-align: center;
+            line-height: 1.05;
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,0.18);
+        }
+        .reservas-chip .cat {font-size: 10px; font-weight: 900;}
+        .reservas-chip .val {font-size: 11px; font-weight: 900;}
+        .reservas-chip .unit {font-size: 8px; font-weight: 800;}
+        .reservas-table-wrap {
+            border: 1px solid #1F252B;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+            margin-bottom: 14px;
+        }
+        table.reservas-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-family: "Segoe UI", Arial, sans-serif;
+            font-size: 13px;
+            background: #FFFFFF;
+        }
+        table.reservas-table thead th {
+            background: linear-gradient(90deg, #2F363D 0%, #252B31 100%);
+            color: #FFFFFF;
+            font-weight: 850;
+            text-align: center;
+            padding: 9px 10px;
+            border: 1px solid #1F252B;
+        }
+        table.reservas-table tbody td {
+            padding: 8px 10px;
+            border: 1px solid #E5E7EB;
+            color: #111827;
+            text-align: right;
+        }
+        table.reservas-table tbody td:first-child,
+        table.reservas-table tbody td:nth-child(2) {
+            text-align: left;
+            font-weight: 650;
+        }
+        table.reservas-table tbody tr:nth-child(even) {
+            background: #F8FAFC;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
     )
 
-    with st.expander("Ver datos usados para el mapa de presión"):
-        st.dataframe(
-            pres_mapa.sort_values("PRESION_MAPA", ascending=False),
-            use_container_width=True,
-            height=350
+    fluido_actual = st.session_state.get("reservas_fluido", "Aceite")
+    tipo_volumen_actual = st.session_state.get("reservas_tipo_volumen", "Reserva")
+    fluido = fluido_actual
+    titulo_banner_reservas = "RESERVAS POR YACIMIENTO" if tipo_volumen_actual == "Reserva" else "VOLUMEN ORIGINAL POR YACIMIENTO"
+    subtitulo_actual = (
+        "Millones de barriles de petróleo (mmb)"
+        if fluido_actual == "Aceite"
+        else "Miles de millones de pies cúbicos (mmmpc)"
+    )
+
+    st.markdown(
+        f"""
+        <div class="reservas-hero">
+            <h1>{titulo_banner_reservas}</h1>
+            <p>{subtitulo_actual}</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1.25, 1.45, 2.3])
+    with col_ctrl1:
+        fluido = st.radio(
+            "Filtro Fluido",
+            ["Aceite", "Gas"],
+            horizontal=True,
+            key="reservas_fluido"
         )
+    with col_ctrl2:
+        tipo_volumen = st.radio(
+            "Categoría",
+            ["Reserva", "Volumen original"],
+            horizontal=True,
+            key="reservas_tipo_volumen"
+        )
+
+    if tipo_volumen == "Volumen original":
+        col_valor = "Original aceite (mmb)" if fluido == "Aceite" else "Original gas (mmmpc)"
+    else:
+        col_valor = "Reserva aceite (mmb)" if fluido == "Aceite" else "Reserva gas (mmmpc)"
+    unidad = "mmb" if fluido == "Aceite" else "mmmpc"
+
+    def _mostrar_tabla_reservas(df_tabla, columnas_numericas=None, columnas_pct=None):
+        df_html = df_tabla.copy()
+        columnas_numericas = columnas_numericas or []
+        columnas_pct = columnas_pct or []
+        for col in columnas_numericas:
+            if col in df_html.columns:
+                df_html[col] = pd.to_numeric(df_html[col], errors="coerce").map(
+                    lambda v: "" if pd.isna(v) else f"{v:,.3f}"
+                )
+        for col in columnas_pct:
+            if col in df_html.columns:
+                df_html[col] = pd.to_numeric(df_html[col], errors="coerce").map(
+                    lambda v: "" if pd.isna(v) else f"{v:,.1f}%"
+                )
+        html_tabla = df_html.to_html(index=False, escape=False, classes="reservas-table", border=0)
+        st.markdown(f"<div class='reservas-table-wrap'>{html_tabla}</div>", unsafe_allow_html=True)
+
+    if tipo_volumen == "Volumen original":
+        yac_original = []
+        for yac in df_reservas["Yacimiento"].dropna().unique():
+            vals_yac = _totales_originales(df_reservas[df_reservas["Yacimiento"].eq(yac)], col_valor)
+            yac_original.append({"Yacimiento": yac, **vals_yac})
+
+        df_yac_original = pd.DataFrame(yac_original).sort_values("3P", ascending=False).reset_index(drop=True)
+        vals_total_original = {
+            "1P": float(df_yac_original["1P"].sum()) if "1P" in df_yac_original.columns else 0,
+            "2P": float(df_yac_original["2P"].sum()) if "2P" in df_yac_original.columns else 0,
+            "3P": float(df_yac_original["3P"].sum()) if "3P" in df_yac_original.columns else 0,
+        }
+
+        st.markdown("### Volumen original por campo")
+        col_lbl, col_1p, col_2p, col_3p = st.columns([0.9, 1.15, 1.15, 1.15])
+        with col_lbl:
+            st.markdown("<div class='reservas-general-label'>VOLUMEN<br>ORIGINAL</div>", unsafe_allow_html=True)
+
+        cards_original = [
+            (col_1p, "Original 1P", vals_total_original["1P"], "#67A83B"),
+            (col_2p, "Original 2P", vals_total_original["2P"], "#FF4B00"),
+            (col_3p, "Original 3P", vals_total_original["3P"], "#8E24AA"),
+        ]
+        for col, label, val, color in cards_original:
+            with col:
+                st.markdown(
+                    f"""
+                    <div class="reservas-card" style="background: linear-gradient(135deg, {color}, {color}CC);">
+                        <div class="label">{label}</div>
+                        <div class="value">{val:,.3f}</div>
+                        <div class="unit">{unidad}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+        st.markdown("### Volumen original por yacimiento")
+        _mostrar_tabla_reservas(
+            df_yac_original[["Yacimiento", "1P", "2P", "3P"]],
+            columnas_numericas=["1P", "2P", "3P"],
+        )
+        st.caption("Volumen original mostrado únicamente para categorías 1P, 2P y 3P.")
+        return
+
+    resumen_base = (
+        df_reservas[df_reservas["Cat"].isin(orden_base)]
+        .groupby("Cat", as_index=False)[col_valor]
+        .sum()
+    )
+    vals_total = {cat: float(resumen_base.loc[resumen_base["Cat"].eq(cat), col_valor].sum()) for cat in orden_base}
+    vals_total["1P"] = vals_total["PDP"] + vals_total["PDNP"] + vals_total["PND"]
+    vals_total["2P"] = vals_total["1P"] + vals_total["PB"]
+    vals_total["3P"] = vals_total["2P"] + vals_total["POS"]
+    y_max_resumen_total = vals_total["3P"] * 1.18 if vals_total["3P"] else 1
+
+    st.markdown("### Resumen general")
+    col_lbl, col_1p, col_2p, col_3p = st.columns([0.9, 1.15, 1.15, 1.15])
+    with col_lbl:
+        st.markdown("<div class='reservas-general-label'>RESUMEN<br>GENERAL</div>", unsafe_allow_html=True)
+    resumen_cards = [
+        (col_1p, "1P (PDP+PDNP+PND)", vals_total["1P"], "#67A83B"),
+        (col_2p, "2P (1P+PB)", vals_total["2P"], "#FF4B00"),
+        (col_3p, "3P (2P+POS)", vals_total["3P"], "#8E24AA"),
+    ]
+    for col, label, val, color in resumen_cards:
+        with col:
+            st.markdown(
+                f"""
+                <div class="reservas-card" style="background: linear-gradient(135deg, {color}, {color}CC);">
+                    <div class="label">{label}</div>
+                    <div class="value">{val:,.3f}</div>
+                    <div class="unit">{unidad}</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+    yac_resumen = []
+    for yac in df_reservas["Yacimiento"].dropna().unique():
+        vals_yac = _totales_desde_base(df_reservas[df_reservas["Yacimiento"].eq(yac)], col_valor)
+        yac_resumen.append({"Yacimiento": yac, **vals_yac})
+    df_yac_resumen = pd.DataFrame(yac_resumen).sort_values("3P", ascending=False).reset_index(drop=True)
+    yacimientos = df_yac_resumen["Yacimiento"].tolist()
+    y_max_yacimientos = float(df_yac_resumen["3P"].max()) * 1.18 if not df_yac_resumen.empty else 1
+
+    def _mostrar_tabla_reservas(df_tabla, columnas_numericas=None, columnas_pct=None):
+        df_html = df_tabla.copy()
+        columnas_numericas = columnas_numericas or []
+        columnas_pct = columnas_pct or []
+        for col in columnas_numericas:
+            if col in df_html.columns:
+                df_html[col] = pd.to_numeric(df_html[col], errors="coerce").map(
+                    lambda v: "" if pd.isna(v) else f"{v:,.3f}"
+                )
+        for col in columnas_pct:
+            if col in df_html.columns:
+                df_html[col] = pd.to_numeric(df_html[col], errors="coerce").map(
+                    lambda v: "" if pd.isna(v) else f"{v:,.1f}%"
+                )
+        html_tabla = df_html.to_html(index=False, escape=False, classes="reservas-table", border=0)
+        st.markdown(f"<div class='reservas-table-wrap'>{html_tabla}</div>", unsafe_allow_html=True)
+
+    st.markdown("### Resumen general por yacimiento")
+    columnas_resumen_yac = ["Yacimiento", "PDP", "PDNP", "PND", "1P", "PB", "2P", "POS", "3P"]
+    _mostrar_tabla_reservas(
+        df_yac_resumen[columnas_resumen_yac],
+        columnas_numericas=["PDP", "PDNP", "PND", "1P", "PB", "2P", "POS", "3P"],
+    )
+
+    st.markdown("### Resumen total por categoría")
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
+        st.plotly_chart(
+            _fig_resumen_total(
+                f"<b>1P (PDP + PDNP + PND)</b><br>{vals_total['1P']:,.3f} {unidad}",
+                ["PDP", "PDNP", "PND", "1P TOTAL"],
+                [vals_total["PDP"], vals_total["PDNP"], vals_total["PND"], vals_total["1P"]],
+                ["relative", "relative", "relative", "total"],
+                [colores_cat["PDP"], colores_cat["PDNP"], colores_cat["PND"], colores_cat["1P"]],
+                unidad,
+                y_max_resumen_total,
+            ),
+            use_container_width=True
+        )
+    with c2:
+        st.plotly_chart(
+            _fig_resumen_total(
+                f"<b>2P (1P + PB)</b><br>{vals_total['2P']:,.3f} {unidad}",
+                ["1P TOTAL", "PB", "2P TOTAL"],
+                [vals_total["1P"], vals_total["PB"], vals_total["2P"]],
+                ["relative", "relative", "total"],
+                [colores_cat["1P"], colores_cat["PB"], colores_cat["2P"]],
+                unidad,
+                y_max_resumen_total,
+            ),
+            use_container_width=True
+        )
+    with c3:
+        st.plotly_chart(
+            _fig_resumen_total(
+                f"<b>3P (2P + POS)</b><br>{vals_total['3P']:,.3f} {unidad}",
+                ["2P TOTAL", "POS", "3P TOTAL"],
+                [vals_total["2P"], vals_total["POS"], vals_total["3P"]],
+                ["relative", "relative", "total"],
+                [colores_cat["2P"], colores_cat["POS"], colores_cat["3P"]],
+                unidad,
+                y_max_resumen_total,
+            ),
+            use_container_width=True
+        )
+
+    st.markdown("### Reservas por yacimiento")
+    cols_por_fila = min(3, max(1, len(yacimientos)))
+    for inicio in range(0, len(yacimientos), cols_por_fila):
+        cols_yac = st.columns(cols_por_fila)
+        for col, yac in zip(cols_yac, yacimientos[inicio:inicio + cols_por_fila]):
+            df_yac = df_reservas[df_reservas["Yacimiento"].eq(yac)]
+            with col:
+                fig_y = _fig_reserva_yacimiento(yac, df_yac, col_valor, unidad, y_max_yacimientos)
+                st.plotly_chart(fig_y, use_container_width=True)
+
+    tabla_desglose = pd.DataFrame({
+        "Categoría": orden_base,
+        "Definición": [definiciones[c] for c in orden_base],
+        f"Total ({unidad})": [vals_total[c] for c in orden_base],
+    })
+    total_3p = vals_total["3P"] if vals_total["3P"] else 1
+    tabla_desglose["% del total 3P"] = tabla_desglose[f"Total ({unidad})"] / total_3p * 100
+
+    col_tabla = st.container()
+    with col_tabla:
+        st.markdown("### Desglose total por categoría (3P)")
+        _mostrar_tabla_reservas(
+            tabla_desglose,
+            columnas_numericas=[f"Total ({unidad})"],
+            columnas_pct=["% del total 3P"],
+        )
+    st.caption("Notas: 1P = PDP + PDNP + PND  |  2P = 1P + PB  |  3P = 2P + POS")
+
+
 # =========================================================
 # SELECTOR GENERAL DE MÓDULO
 # =========================================================
+
+st.markdown(
+    """
+    <div class="main-module-nav-marker"></div>
+    <style>
+    div[data-testid="stElementContainer"]:has(.st-key-vista_principal) {
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+    .st-key-vista_principal {
+        background: linear-gradient(90deg, #2F363D 0%, #252B31 100%);
+        border: 1px solid #1F252B;
+        border-radius: 12px;
+        padding: 12px 14px 10px 14px;
+        margin: 4px 0 18px 0;
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
+        width: 100% !important;
+        max-width: 100% !important;
+        box-sizing: border-box;
+    }
+    .st-key-vista_principal > label {
+        color: #AEB7C2 !important;
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: .7px;
+        margin-bottom: 8px;
+    }
+    .st-key-vista_principal label,
+    .st-key-vista_principal p,
+    .st-key-vista_principal span {
+        color: #E5E7EB !important;
+        font-family: "Segoe UI", Arial, sans-serif;
+        font-size: 13px;
+        font-weight: 650;
+    }
+    .st-key-vista_principal [role="radiogroup"] {
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+    .st-key-vista_principal [role="radio"] {
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 999px;
+        padding: 6px 10px;
+        transition: all .15s ease-in-out;
+    }
+    .st-key-vista_principal [role="radio"][aria-checked="true"] {
+        background: rgba(255,255,255,0.14);
+        border-color: rgba(255,255,255,0.35);
+        box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12);
+    }
+    div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]),
+    div[data-testid="stRadio"]:has(input[aria-label="Mapa"]),
+    div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) {
+        background: linear-gradient(90deg, #2F363D 0%, #252B31 100%);
+        border: 1px solid #1F252B;
+        border-radius: 12px;
+        padding: 12px 14px 10px 14px;
+        margin: 4px 0 18px 0;
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
+    }
+    div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) > label,
+    div[data-testid="stRadio"]:has(input[aria-label="Mapa"]) > label,
+    div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) > label {
+        color: #AEB7C2 !important;
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: .7px;
+        margin-bottom: 8px;
+    }
+    div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) label,
+    div[data-testid="stRadio"]:has(input[aria-label="Mapa"]) label,
+    div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) label,
+    div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) p,
+    div[data-testid="stRadio"]:has(input[aria-label="Mapa"]) p,
+    div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) p,
+    div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) span,
+    div[data-testid="stRadio"]:has(input[aria-label="Mapa"]) span,
+    div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) span {
+        color: #E5E7EB !important;
+        font-family: "Segoe UI", Arial, sans-serif;
+        font-size: 13px;
+        font-weight: 650;
+    }
+    div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) [role="radiogroup"],
+    div[data-testid="stRadio"]:has(input[aria-label="Mapa"]) [role="radiogroup"],
+    div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) [role="radiogroup"] {
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+    }
+    div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) [role="radio"],
+    div[data-testid="stRadio"]:has(input[aria-label="Mapa"]) [role="radio"],
+    div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) [role="radio"] {
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 999px;
+        padding: 6px 10px;
+        transition: all .15s ease-in-out;
+    }
+    div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) [role="radio"][aria-checked="true"],
+    div[data-testid="stRadio"]:has(input[aria-label="Mapa"]) [role="radio"][aria-checked="true"],
+    div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) [role="radio"][aria-checked="true"] {
+        background: rgba(255,255,255,0.14);
+        border-color: rgba(255,255,255,0.35);
+        box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+st.sidebar.markdown(
+    """
+    <style>
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #2F363D 0%, #252B31 100%);
+        border-right: 1px solid #1F252B;
+        box-shadow: 10px 0 24px rgba(15, 23, 42, 0.10);
+    }
+    section[data-testid="stSidebar"] > div {
+        padding-top: 1rem;
+    }
+    section[data-testid="stSidebar"] .nav-sidebar-title {
+        background: #20262D;
+        border: 1px solid #111827;
+        border-radius: 8px;
+        color: #E5E7EB;
+        font-size: 15px;
+        font-weight: 850;
+        letter-spacing: .2px;
+        padding: 10px 12px;
+        margin: 0 0 12px 0;
+        font-family: "Segoe UI", Arial, sans-serif;
+    }
+    section[data-testid="stSidebar"] .nav-sidebar-section {
+        color: #AEB7C2;
+        font-size: 10px;
+        font-weight: 850;
+        text-transform: uppercase;
+        letter-spacing: .7px;
+        margin: 10px 0 8px 2px;
+        font-family: "Segoe UI", Arial, sans-serif;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stRadio"] > label {
+        display: none;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stRadio"] label,
+    section[data-testid="stSidebar"] div[data-testid="stRadio"] p,
+    section[data-testid="stSidebar"] div[data-testid="stRadio"] span {
+        color: #E5E7EB !important;
+        font-family: "Segoe UI", Arial, sans-serif;
+        font-size: 13px;
+        font-weight: 700;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stRadio"] [role="radiogroup"] {
+        gap: 4px;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stRadio"] [role="radio"] {
+        width: 100%;
+        background: rgba(255,255,255,0.045);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 8px;
+        padding: 7px 10px;
+        margin: 2px 0;
+        transition: all .15s ease-in-out;
+        justify-content: flex-start;
+        align-items: center;
+        text-align: left;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stRadio"] [role="radio"] > div {
+        margin-left: 0 !important;
+        padding-left: 0 !important;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stRadio"] [role="radio"] p {
+        margin-left: 0 !important;
+        text-align: left !important;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stRadio"] [role="radio"][aria-checked="true"] {
+        background: rgba(255,255,255,0.14);
+        border-color: rgba(255,255,255,0.35);
+        box-shadow: inset 3px 0 0 #FF4B4B;
+    }
+    </style>
+    <div class="nav-sidebar-title">Tamaulipas-Constituciones</div>
+    <div class="nav-sidebar-section">Panel de Navegación</div>
+    """,
+    unsafe_allow_html=True
+)
 
 vista = st.radio(
     "Seleccionar opción",
     [
         "Producción por pozo",
         "Comparativa por pozo",
-        "Mapa de burbujas",
+        "Mapa",
         "Campañas 2011-2020",
         "RMA 2011-2020",
         "Operación Campo",
         "Producción Campo",
         "Presiones",
         "Estadística",
-        "Inyección"
+        "Inyección",
+        "Reservas"
     ],
     horizontal=True,
     key="vista_principal"
@@ -8775,6 +11466,11 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
                 pozos,
                 key="prod_pozo_sel"
             )
+            mostrar_seguimiento_pozo = st.checkbox(
+                "Mostrar seguimiento",
+                value=False,
+                key="prod_mostrar_seguimiento_pozo"
+            )
 
         # Base real del pozo seleccionado.
         if modo_vista_pozo == "Historia completa por pozo":
@@ -8831,15 +11527,50 @@ if vista == "Producción por pozo":
 
     muestreos_agua = load_muestreos_agua()
     if modo_vista_pozo == "Historia completa por pozo":
+        clave_pozo_sel = normalizar_clave_texto(pd.Series([pozo_sel])).iloc[0]
+        claves_terminaciones_pozo = set(
+            normalizar_clave_texto(df_pozo_raw[COL_POZO].dropna()).tolist()
+        )
+        clave_muestreos_pozo = normalizar_clave_texto(muestreos_agua["POZO"])
+        clave_muestreos_terminacion = normalizar_clave_texto(muestreos_agua["TERMINACION"])
         df_muestreos_pozo = muestreos_agua[
-            muestreos_agua["POZO"].astype(str).str.strip() == str(pozo_sel).strip()
+            (clave_muestreos_pozo == clave_pozo_sel) |
+            (clave_muestreos_terminacion.isin(claves_terminaciones_pozo))
         ].copy()
     else:
+        clave_pozo_sel = normalizar_clave_texto(pd.Series([pozo_sel])).iloc[0]
+        clave_muestreos_terminacion = normalizar_clave_texto(muestreos_agua["TERMINACION"])
         df_muestreos_pozo = muestreos_agua[
-            muestreos_agua["TERMINACION"].astype(str).str.strip() == str(pozo_sel).strip()
+            clave_muestreos_terminacion == clave_pozo_sel
         ].copy()
 
     df_muestreos_pozo = df_muestreos_pozo.sort_values("FECHA MUESTREO").reset_index(drop=True)
+
+    if mostrar_seguimiento_pozo:
+        seguimiento_actividades = load_seguimiento_actividades()
+        if not seguimiento_actividades.empty:
+            clave_seg_terminacion = normalizar_clave_texto(seguimiento_actividades["TERMINACION"])
+            clave_seg_pozo = normalizar_clave_texto(seguimiento_actividades["POZO"])
+            clave_pozo_sel_seg = normalizar_clave_texto(pd.Series([pozo_sel])).iloc[0]
+
+            if modo_vista_pozo == "Historia completa por pozo":
+                claves_terminaciones_seguimiento = set(
+                    normalizar_clave_texto(df_pozo_raw[COL_POZO].dropna()).tolist()
+                )
+                df_seguimiento_pozo = seguimiento_actividades[
+                    clave_seg_terminacion.isin(claves_terminaciones_seguimiento) |
+                    (clave_seg_pozo == clave_pozo_sel_seg)
+                ].copy()
+            else:
+                df_seguimiento_pozo = seguimiento_actividades[
+                    clave_seg_terminacion == clave_pozo_sel_seg
+                ].copy()
+        else:
+            df_seguimiento_pozo = pd.DataFrame(columns=["TERMINACION", "YACIMIENTO", "POZO", "FECHA", "ACTIVIDAD"])
+    else:
+        df_seguimiento_pozo = pd.DataFrame(columns=["TERMINACION", "YACIMIENTO", "POZO", "FECHA", "ACTIVIDAD"])
+
+    df_seguimiento_pozo = df_seguimiento_pozo.sort_values("FECHA").reset_index(drop=True)
 # =========================================================
 # KPIs
 # =========================================================
@@ -9273,6 +12004,97 @@ if vista == "Producción por pozo":
                 yanchor="top"
             )
 
+    def marcar_eventos_seguimiento(fig):
+        if df_seguimiento_pozo.empty:
+            return
+
+        eventos = df_seguimiento_pozo.copy()
+        eventos["FECHA_EVENTO"] = pd.to_datetime(eventos["FECHA"]).dt.normalize()
+        eventos = eventos.sort_values(["FECHA_EVENTO", "ACTIVIDAD"]).reset_index(drop=True)
+
+        colores_evento = [
+            "#111827",
+            "#7C3AED",
+            "#F97316",
+            "#0891B2",
+            "#BE123C",
+            "#4B5563",
+        ]
+        niveles_por_fecha = {}
+
+        for i, (_, evento) in enumerate(eventos.iterrows()):
+            fecha_evento = evento["FECHA_EVENTO"]
+            actividad = str(evento["ACTIVIDAD"]).strip()
+            terminacion_evento = str(evento.get("TERMINACION", "")).strip()
+            pozo_evento = str(evento.get("POZO", "")).strip()
+            yac_evento = str(evento.get("YACIMIENTO", "")).strip()
+            color = colores_evento[i % len(colores_evento)]
+            nivel_fecha = niveles_por_fecha.get(fecha_evento, 0)
+            niveles_por_fecha[fecha_evento] = nivel_fecha + 1
+            y_etiqueta = 0.96 - (nivel_fecha * 0.075)
+            y_etiqueta = max(y_etiqueta, 0.70)
+
+            fig.add_vline(
+                x=fecha_evento,
+                line_width=1.25,
+                line_dash="dot",
+                line_color=color,
+                opacity=0.38,
+            )
+            continue
+            fig.add_annotation(
+                x=fecha_evento,
+                y=y_etiqueta,
+                xref="x",
+                yref="paper",
+                text=f"📌 {actividad}",
+                showarrow=True,
+                arrowhead=2,
+                arrowsize=0.7,
+                arrowwidth=1,
+                arrowcolor=color,
+                ax=0,
+                ay=-22,
+                font=dict(size=11, color="#FFFFFF", family="Arial"),
+                bgcolor=color,
+                bordercolor="#FFFFFF",
+                borderwidth=1,
+                borderpad=4,
+                align="center",
+                hovertext=(
+                    f"Actividad: {actividad}<br>"
+                    f"Fecha: {fecha_evento:%d/%m/%Y}<br>"
+                    f"Terminación: {terminacion_evento}<br>"
+                    f"Pozo: {pozo_evento}<br>"
+                    f"Yacimiento: {yac_evento}"
+                ),
+            )
+
+        fig.add_trace(
+            go.Scatter(
+                x=eventos["FECHA_EVENTO"],
+                y=[0] * len(eventos),
+                mode="markers",
+                name="Seguimiento",
+                marker=dict(
+                    symbol="diamond",
+                    size=9,
+                    color="#111827",
+                    line=dict(color="#FFFFFF", width=1.2),
+                ),
+                customdata=eventos[["ACTIVIDAD", "TERMINACION", "POZO", "YACIMIENTO"]],
+                hovertemplate=
+                    "<b>Actividad:</b> %{customdata[0]}<br>" +
+                    "<b>Fecha:</b> %{x|%d/%m/%Y}<br>" +
+                    "<b>Terminación:</b> %{customdata[1]}<br>" +
+                    "<b>Pozo:</b> %{customdata[2]}<br>" +
+                    "<b>Yacimiento:</b> %{customdata[3]}<br>" +
+                    "<extra></extra>",
+                showlegend=True,
+            ),
+            secondary_y=False
+        )
+
     fig1.add_trace(
         go.Scatter(
             x=dfp[COL_FECHA],
@@ -9300,30 +12122,6 @@ if vista == "Producción por pozo":
         ),
         secondary_y=False
     )
-
-    if not df_muestreos_pozo.empty:
-        fig1.add_trace(
-            go.Scatter(
-                x=df_muestreos_pozo["FECHA MUESTREO"],
-                y=df_muestreos_pozo["% AGUA LAB"],
-                mode="markers",
-                name="% Agua Lab",
-                marker=dict(
-                    size=7,
-                    color="white",
-                    symbol="square",
-                    line=dict(color="black", width=1.2)
-                ),
-                customdata=df_muestreos_pozo[["TERMINACION", "POZO"]],
-                hovertemplate=
-                    "<b>% Agua Lab:</b> %{y:,.2f}%<br>" +
-                    "<b>Fecha:</b> %{x|%d/%m/%Y}<br>" +
-                    "<b>Terminacion:</b> %{customdata[0]}<br>" +
-                    "<b>Pozo:</b> %{customdata[1]}<br>" +
-                    "<extra></extra>"
-            ),
-            secondary_y=False
-        )
 
     fig1.add_trace(
         go.Scatter(
@@ -9391,7 +12189,7 @@ if vista == "Producción por pozo":
         linewidth=1,
         linecolor='black')
 
-    fig1.update_yaxes(title_text="<b>Qo (bpd) / % Agua</b>",title_font=dict(size=22),
+    fig1.update_yaxes(title_text="<b>Qo (bpd) / Qb (bpd) / % Agua</b>",title_font=dict(size=22),
         secondary_y=False, tickfont=dict(
         size=16,
         color="black",      
@@ -9418,6 +12216,7 @@ if vista == "Producción por pozo":
         linecolor='black')
 
     marcar_inicios_yacimiento(fig1)
+    marcar_eventos_seguimiento(fig1)
 
     st.plotly_chart(fig1, use_container_width=True)
 
@@ -9452,6 +12251,30 @@ if vista == "Producción por pozo":
         secondary_y=False
     )
 
+    if not df_muestreos_pozo.empty:
+        fig2.add_trace(
+            go.Scatter(
+                x=df_muestreos_pozo["FECHA MUESTREO"],
+                y=df_muestreos_pozo["% AGUA LAB"],
+                mode="markers",
+                name="% Agua Lab",
+                marker=dict(
+                    size=6,
+                    color="#0000FF",
+                    symbol="circle",
+                    line=dict(color="black", width=1)
+                ),
+                customdata=df_muestreos_pozo[["TERMINACION", "POZO"]],
+                hovertemplate=
+                    "<b>% Agua Lab:</b> %{y:,.2f}%<br>" +
+                    "<b>Fecha:</b> %{x|%d/%m/%Y}<br>" +
+                    "<b>Terminacion:</b> %{customdata[0]}<br>" +
+                    "<b>Pozo:</b> %{customdata[1]}<br>" +
+                    "<extra></extra>"
+            ),
+            secondary_y=False
+        )
+
     fig2.add_trace(
         go.Scatter(
             x=dfp[COL_FECHA],
@@ -9466,7 +12289,7 @@ if vista == "Producción por pozo":
     )
 
     fig2.update_layout(
-        title="Agua producida y acumulada de agua",
+        title="Producción Agua / Muestreos % Agua / Acumulada de Agua",
         template="plotly_white",
         hovermode="x unified",
         height=520,
@@ -9486,7 +12309,7 @@ if vista == "Producción por pozo":
         linewidth=1,
         linecolor='black')
 
-    fig2.update_yaxes(title_text="Qw (bpd)", title_font=dict(size=22),
+    fig2.update_yaxes(title_text="Qw (bpd) / % Agua", title_font=dict(size=22),
         secondary_y=False, tickfont=dict(
         size=16,
         color="black",
@@ -10289,8 +13112,8 @@ elif vista == "Comparativa por pozo":
 
 # VISTA MAPA DE BURBUJAS
 # =========================================================
-elif vista == "Mapa de burbujas":
-    mapa_burbujas(df, df_coord)
+elif vista == "Mapa":
+    mapa_burbujas(df, df_coord, mostrar_instalaciones_gis=True)
 elif vista == "Campañas 2011-2020":
     analisis_term()
 elif vista == "RMA 2011-2020":
@@ -10305,5 +13128,7 @@ elif vista == "Estadística":
     estadistica()
 elif vista == "Inyección":
     inyeccion()
+elif vista == "Reservas":
+    reservas()
 
 #st.caption("Desarrollado en Python + Streamlit.")
