@@ -10,6 +10,10 @@ from pathlib import Path
 import os
 import re
 import unicodedata
+import json
+import urllib.parse
+import urllib.request
+from io import BytesIO
 
 
 # =========================================================
@@ -48,6 +52,19 @@ TABLA_RESERVAS = "Reservas"
 
 URL_MUESTREOS_AGUA = "https://raw.githubusercontent.com/victormgtzs5m/tamaulipas-constituciones/main/Muestreos.xlsx"
 URL_SEGUIMIENTO = "https://raw.githubusercontent.com/victormgtzs5m/tamaulipas-constituciones/main/Seguimiento.xlsx"
+URL_LINEAS_GITHUB_API = "https://api.github.com/repos/victormgtzs5m/tamaulipas-constituciones/contents/Lineas?ref=main"
+CACHE_TTL_ARCHIVOS_DINAMICOS = 3000  # segundos; refresca Muestreos.xlsx y Seguimiento.xlsx cada 5 minutos
+
+DIR_SHAPEFILES_LINEAS_2D = Path("shapefiles")
+USAR_LINEAS_2D_GITHUB = True
+CAPAS_LINEAS_2D = [
+    {
+        "nombre": "Línea 2D L_214",
+        "archivo": "218770_4_ALNO_MIGPRESTMCFCG_COMESA_L_214.shp",
+        "color": "#7C3AED",
+        "width": 3
+    }
+]
 
 #Leer archivo db
 @st.cache_data(show_spinner=False)
@@ -1868,7 +1885,7 @@ def load_presiones() -> pd.DataFrame:
 
     return pres
 
-@st.cache_data(show_spinner="Cargando muestreos de agua...")
+@st.cache_data(ttl=CACHE_TTL_ARCHIVOS_DINAMICOS, show_spinner="Cargando muestreos de agua...")
 def load_muestreos_agua() -> pd.DataFrame:
     cols_req = ["TERMINACION", "POZO", "FECHA MUESTREO", "% AGUA LAB"]
 
@@ -1941,7 +1958,7 @@ def load_muestreos_agua() -> pd.DataFrame:
 
     return muestreos.sort_values(["POZO", "TERMINACION", "FECHA MUESTREO"]).reset_index(drop=True)
 
-@st.cache_data(show_spinner="Cargando seguimiento de actividades...")
+@st.cache_data(ttl=CACHE_TTL_ARCHIVOS_DINAMICOS, show_spinner="Cargando seguimiento de actividades...")
 def load_seguimiento_actividades(cache_version=2) -> pd.DataFrame:
     cols_req = ["TERMINACION", "POZO", "FECHA", "ACTIVIDAD"]
 
@@ -2038,7 +2055,7 @@ def load_seguimiento_actividades(cache_version=2) -> pd.DataFrame:
     return seguimiento.sort_values(["POZO", "TERMINACION", "FECHA", "ACTIVIDAD"]).reset_index(drop=True)
 
 @st.cache_data(show_spinner="Cargando estado de pozos...")
-def load_estado_pozos() -> pd.DataFrame:
+def load_estado_pozos(cache_version=3) -> pd.DataFrame:
     estado = load_table(TABLA_ESTADO_POZOS)
     estado = estado.loc[:, ~estado.columns.astype(str).str.startswith("Unnamed")]
     estado = normalizar_columnas(estado)
@@ -2540,6 +2557,289 @@ def convertir_utm_a_latlon(df_mapa, x_col, y_col):
     )
 
     return df_mapa
+
+def _normalizar_nombre_columna_lineas(col):
+    texto = "" if pd.isna(col) else str(col)
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    texto = re.sub(r"[^A-Z0-9]+", " ", texto.upper())
+    return re.sub(r"\s+", " ", texto).strip()
+
+def _extraer_xy_desde_texto(valor):
+    if pd.isna(valor):
+        return (np.nan, np.nan)
+
+    texto = str(valor).strip()
+    numeros = re.findall(r"-?\d+(?:\.\d+)?", texto.replace(",", " "))
+
+    if len(numeros) < 2:
+        return (np.nan, np.nan)
+
+    return (float(numeros[0]), float(numeros[1]))
+
+def _preparar_dataframe_linea_2d(df_linea: pd.DataFrame) -> pd.DataFrame:
+    if df_linea.empty:
+        return pd.DataFrame(columns=["X", "Y", "YACIMIENTO"])
+
+    df_linea = df_linea.copy()
+    df_linea = df_linea.loc[:, ~df_linea.columns.astype(str).str.startswith("Unnamed")]
+
+    cols_norm = {_normalizar_nombre_columna_lineas(c): c for c in df_linea.columns}
+
+    candidatos_x = [
+        "X", "UTM X", "X UTM", "COORD X", "COORDENADA X",
+        "PRIMERA COORDENADA", "COORDENADA 1", "COORD 1"
+    ]
+    candidatos_y = [
+        "Y", "UTM Y", "Y UTM", "COORD Y", "COORDENADA Y",
+        "SEGUNDA COORDENADA", "COORDENADA 2", "COORD 2"
+    ]
+
+    col_x = next((cols_norm[c] for c in candidatos_x if c in cols_norm), None)
+    col_y = next((cols_norm[c] for c in candidatos_y if c in cols_norm), None)
+
+    if col_x is None or col_y is None:
+        columnas_numericas = []
+        for col in df_linea.columns:
+            serie_num = pd.to_numeric(df_linea[col], errors="coerce")
+            if serie_num.notna().sum() >= max(2, int(len(df_linea) * 0.5)):
+                columnas_numericas.append(col)
+
+        if len(columnas_numericas) >= 2:
+            col_x, col_y = columnas_numericas[:2]
+
+    if col_x is not None and col_y is not None:
+        salida = pd.DataFrame({
+            "X": pd.to_numeric(df_linea[col_x], errors="coerce"),
+            "Y": pd.to_numeric(df_linea[col_y], errors="coerce")
+        })
+    else:
+        col_coord = next(
+            (
+                cols_norm[c]
+                for c in ["COORDENADA", "COORDENADAS", "XY", "PUNTO", "VERTICE"]
+                if c in cols_norm
+            ),
+            None
+        )
+
+        if col_coord is None:
+            return pd.DataFrame(columns=["X", "Y", "YACIMIENTO"])
+
+        xy = df_linea[col_coord].map(_extraer_xy_desde_texto)
+        salida = pd.DataFrame(xy.tolist(), columns=["X", "Y"])
+
+    col_yac = next((cols_norm[c] for c in ["YACIMIENTO", "YAC", "RESERVORIO"] if c in cols_norm), None)
+    salida["YACIMIENTO"] = df_linea[col_yac].astype(str).str.upper().str.strip() if col_yac else ""
+    salida = salida.dropna(subset=["X", "Y"])
+
+    return salida
+
+def _leer_linea_2d_txt_url(url_descarga: str) -> pd.DataFrame:
+    try:
+        with urllib.request.urlopen(url_descarga, timeout=30) as resp:
+            texto = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        with urllib.request.urlopen(url_descarga, timeout=30) as resp:
+            texto = resp.read().decode("latin-1", errors="ignore")
+
+    registros = []
+
+    for linea in texto.splitlines():
+        linea = linea.strip()
+
+        if not linea or linea.startswith("FF") or linea.startswith("->"):
+            continue
+
+        numeros = re.findall(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", linea.replace(",", " "))
+
+        if len(numeros) < 2:
+            continue
+
+        try:
+            x = float(numeros[0])
+            y = float(numeros[1])
+        except Exception:
+            continue
+
+        if not (100000 <= abs(x) <= 1000000 and 1000000 <= abs(y) <= 10000000):
+            continue
+
+        registros.append({"X": x, "Y": y, "YACIMIENTO": ""})
+
+    return pd.DataFrame(registros, columns=["X", "Y", "YACIMIENTO"])
+
+@st.cache_data(ttl=CACHE_TTL_ARCHIVOS_DINAMICOS, show_spinner=False)
+def load_lineas_2d_github(cache_version=2) -> pd.DataFrame:
+    columnas = ["CAPA", "X", "Y", "LON", "LAT", "COLOR", "WIDTH", "YACIMIENTO"]
+    registros = []
+
+    try:
+        with urllib.request.urlopen(URL_LINEAS_GITHUB_API, timeout=20) as resp:
+            archivos = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        st.warning(f"No se pudo listar la carpeta Lineas de GitHub: {exc}")
+        return pd.DataFrame(columns=columnas)
+
+    if not isinstance(archivos, list):
+        return pd.DataFrame(columns=columnas)
+
+    transformer = Transformer.from_crs(
+        "EPSG:26714",
+        "EPSG:4326",
+        always_xy=True
+    )
+
+    colores_lineas = [
+        "#7C3AED", "#2563EB", "#059669", "#F97316", "#DC2626", "#0891B2",
+        "#9333EA", "#16A34A", "#EA580C", "#4F46E5", "#BE123C", "#0D9488"
+    ]
+
+    archivos_validos = [
+        a for a in archivos
+        if a.get("type") == "file"
+        and Path(a.get("name", "")).suffix.lower() in [".xlsx", ".xls", ".csv", ".txt"]
+    ]
+
+    archivos_txt = [
+        a for a in archivos_validos
+        if Path(a.get("name", "")).suffix.lower() == ".txt"
+    ]
+
+    if archivos_txt:
+        archivos_validos = archivos_txt
+
+    for idx, archivo in enumerate(archivos_validos):
+        nombre_archivo = archivo.get("name", "")
+        url_descarga = archivo.get("download_url")
+        extension = Path(nombre_archivo).suffix.lower()
+
+        if not url_descarga:
+            continue
+
+        try:
+            if extension in [".xlsx", ".xls"]:
+                with urllib.request.urlopen(url_descarga, timeout=30) as resp:
+                    contenido = BytesIO(resp.read())
+                df_linea_raw = pd.read_excel(contenido)
+                df_linea = _preparar_dataframe_linea_2d(df_linea_raw)
+            elif extension == ".txt":
+                df_linea = _leer_linea_2d_txt_url(url_descarga)
+            else:
+                df_linea_raw = pd.read_csv(url_descarga, sep=None, engine="python")
+                df_linea = _preparar_dataframe_linea_2d(df_linea_raw)
+        except Exception as exc:
+            st.warning(f"No se pudo leer {nombre_archivo} desde GitHub: {exc}")
+            continue
+
+        if df_linea.empty:
+            continue
+
+        nombre_capa = Path(nombre_archivo).stem
+        color = colores_lineas[idx % len(colores_lineas)]
+        lon, lat = transformer.transform(
+            df_linea["X"].astype(float).values,
+            df_linea["Y"].astype(float).values
+        )
+
+        df_linea["LON"] = lon
+        df_linea["LAT"] = lat
+
+        for _, row in df_linea.iterrows():
+            registros.append({
+                "CAPA": nombre_capa,
+                "X": row["X"],
+                "Y": row["Y"],
+                "LON": row["LON"],
+                "LAT": row["LAT"],
+                "COLOR": color,
+                "WIDTH": 3,
+                "YACIMIENTO": row.get("YACIMIENTO", "")
+            })
+
+        registros.append({
+            "CAPA": nombre_capa,
+            "X": None,
+            "Y": None,
+            "LON": None,
+            "LAT": None,
+            "COLOR": color,
+            "WIDTH": 3,
+            "YACIMIENTO": ""
+        })
+
+    return pd.DataFrame(registros, columns=columnas)
+
+@st.cache_data(show_spinner=False)
+def load_lineas_2d_shapefiles(cache_version=2) -> pd.DataFrame:
+    columnas = ["CAPA", "X", "Y", "LON", "LAT", "COLOR", "WIDTH"]
+    registros = []
+
+    try:
+        import shapefile as pyshp
+        from pyproj import CRS
+    except Exception as exc:
+        st.warning(f"No se pudieron cargar las líneas 2D. Falta instalar pyshp/pyproj: {exc}")
+        return pd.DataFrame(columns=columnas)
+
+    transformer_default = Transformer.from_crs(
+        "EPSG:26714",
+        "EPSG:4326",
+        always_xy=True
+    )
+
+    for capa in CAPAS_LINEAS_2D:
+        shp_path = DIR_SHAPEFILES_LINEAS_2D / capa["archivo"]
+
+        if not shp_path.exists():
+            continue
+
+        transformer = transformer_default
+        prj_path = shp_path.with_suffix(".prj")
+
+        if prj_path.exists():
+            try:
+                crs_origen = CRS.from_wkt(prj_path.read_text(encoding="utf-8", errors="ignore"))
+                transformer = Transformer.from_crs(crs_origen, "EPSG:4326", always_xy=True)
+            except Exception:
+                transformer = transformer_default
+
+        try:
+            reader = pyshp.Reader(str(shp_path))
+        except Exception as exc:
+            st.warning(f"No se pudo leer el shapefile {shp_path.name}: {exc}")
+            continue
+
+        for shape in reader.shapes():
+            puntos = shape.points
+            partes = list(shape.parts) + [len(puntos)]
+
+            for i in range(len(partes) - 1):
+                parte = puntos[partes[i]:partes[i + 1]]
+
+                for x, y in parte:
+                    lon, lat = transformer.transform(float(x), float(y))
+                    registros.append({
+                        "CAPA": capa["nombre"],
+                        "X": float(x),
+                        "Y": float(y),
+                        "LON": lon,
+                        "LAT": lat,
+                        "COLOR": capa.get("color", "#7C3AED"),
+                        "WIDTH": capa.get("width", 3)
+                    })
+
+                registros.append({
+                    "CAPA": capa["nombre"],
+                    "X": None,
+                    "Y": None,
+                    "LON": None,
+                    "LAT": None,
+                    "COLOR": capa.get("color", "#7C3AED"),
+                    "WIDTH": capa.get("width", 3)
+                })
+
+    return pd.DataFrame(registros, columns=columnas)
 #######Mapa con tiempo
 #def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM"):
 
@@ -2791,10 +3091,14 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     # =====================================================
     def normalizar_estado(valor):
         v = str(valor).strip().upper()
+        v = unicodedata.normalize("NFKD", v)
+        v = "".join(c for c in v if not unicodedata.combining(c))
         v = v.replace(".", "")
         v = " ".join(v.split())
 
-        if v in ["OP", "OPERANDO"]:
+        if v in ["", "NAN", "NONE", "SIN ESTADO"]:
+            return "SIN ESTADO"
+        elif v in ["OP", "OPERANDO"]:
             return "OP"
         elif v in ["NOP", "NO OPERANDO"]:
             return "NOP"
@@ -2802,27 +3106,105 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             return "CCP"
         elif v == "CSP":
             return "CSP"
+        elif v in ["IA", "INY", "INYECTOR", "INYECTOR DE AGUA", "INYECCION"]:
+            return "IA"
+        elif v in ["IA OPERANDO", "INYECTOR DE AGUA OPERANDO"]:
+            return "IA OPERANDO"
         elif v in ["INY", "INYECTOR", "INYECCION", "INYECCIÓN"]:
             return "INY"
         elif v in ["PROG TAPONAMIENTO", "PROG TAPONADO", "PROG. TAPONAMIENTO"]:
             return "PROG TAPONAMIENTO"
         elif v in ["TAPONADO", "TAP"]:
             return "TAPONADO"
+        elif v in ["IMPRODUCTIVO", "IMPROD"]:
+            return "IMPRODUCTIVO"
         else:
-            return "SIN ESTADO"
+            return v
 
     mapa["ESTADO_MAPA"] = mapa["ESTADO"].apply(normalizar_estado)
 
-    leyenda_estados = {
+    colores_estado_base = {
         "OP": "#00A65A",
         "NOP": "#000000",
         "CCP": "#FFD700",
         "CSP": "#DC143C",
         "INY": "#0000FF",
+        "IA": "#0000FF",
+        "IA OPERANDO": "#00BFFF",
         "PROG TAPONAMIENTO": "#BA55D3",
         "TAPONADO": "#808080",
+        "IMPRODUCTIVO": "#8B4513",
         "SIN ESTADO": "#7F8C8D"
     }
+
+    colores_estado_extra = [
+        "#E67E22",
+        "#9B59B6",
+        "#1ABC9C",
+        "#34495E",
+        "#E84393",
+        "#2ECC71",
+        "#D35400",
+        "#5DADE2",
+        "#8E44AD",
+        "#A3A500",
+        "#C0392B",
+        "#16A085",
+        "#2E86C1",
+        "#6C3483",
+    ]
+
+    def etiqueta_estado_mapa(estado):
+        estado_txt = str(estado).strip()
+        etiquetas = {
+            "OP": "Operando",
+            "NOP": "Nop",
+            "CCP": "Cerrado C/Posibilidades",
+            "CSP": "Cerrado S/Posibilidades",
+            "INY": "Inyector de Agua",
+            "IA": "Inyector de Agua",
+            "IA OPERANDO": "Inyector de Agua Operando",
+            "PROG TAPONAMIENTO": "Prog. Taponamiento",
+            "TAPONADO": "Taponado",
+            "IMPRODUCTIVO": "Improductivo",
+            "SIN ESTADO": "Sin Estado",
+        }
+        return etiquetas.get(estado_txt, estado_txt.title())
+
+    def generar_leyenda_estados(estados):
+        orden_preferido = [
+            "OP",
+            "NOP",
+            "CCP",
+            "CSP",
+            "IA",
+            "IA OPERANDO",
+            "INY",
+            "PROG TAPONAMIENTO",
+            "TAPONADO",
+            "IMPRODUCTIVO",
+        ]
+        estados_limpios = [
+            str(e).strip()
+            for e in pd.Series(estados).dropna().unique()
+            if str(e).strip() and str(e).strip() != "SIN ESTADO"
+        ]
+        estados_ordenados = [
+            e for e in orden_preferido
+            if e in estados_limpios
+        ] + sorted([e for e in estados_limpios if e not in orden_preferido])
+
+        leyenda = {}
+        idx_extra = 0
+        for estado in estados_ordenados:
+            if estado in colores_estado_base:
+                leyenda[estado] = colores_estado_base[estado]
+            else:
+                leyenda[estado] = colores_estado_extra[idx_extra % len(colores_estado_extra)]
+                idx_extra += 1
+        return leyenda
+
+    leyenda_estados = generar_leyenda_estados(mapa["ESTADO_MAPA"])
 
     leyenda_sap = {
         "BH": "#1F77B4",
@@ -3023,6 +3405,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     else:
 
         mapa = mapa[mapa[COL_YAC].astype(str) == str(yac_mapa)].copy()
+
+    leyenda_estados = generar_leyenda_estados(mapa["ESTADO_MAPA"])
 
     # =====================================================
     # COORDENADAS
@@ -3426,6 +3810,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     mostrar_localizaciones_196 = False
     mostrar_inyectores_operando = False
     mostrar_radio_drene = False
+    mostrar_lineas_2d = False
+    lineas_2d_seleccionadas = []
     mostrar_muestreos_agua = False
     fecha_inicio_muestreos_agua = None
     mostrar_perforados_term = False
@@ -3469,6 +3855,29 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     key=f"mostrar_radio_drene_chk_{modo_mapa}"
                 )
 
+                mostrar_lineas_2d = st.checkbox(
+                    "Líneas sísmicas 2D",
+                    value=False,
+                    key=f"mostrar_lineas_2d_chk_{modo_mapa}"
+                )
+
+                if mostrar_lineas_2d:
+                    lineas_2d_preview = (
+                        load_lineas_2d_github()
+                        if USAR_LINEAS_2D_GITHUB
+                        else load_lineas_2d_shapefiles()
+                    )
+                    nombres_lineas_2d = sorted(
+                        lineas_2d_preview["CAPA"].dropna().astype(str).unique()
+                    ) if not lineas_2d_preview.empty else []
+
+                    lineas_2d_seleccionadas = st.multiselect(
+                        "Seleccionar líneas 2D",
+                        nombres_lineas_2d,
+                        default=nombres_lineas_2d,
+                        key=f"lineas_2d_seleccionadas_{modo_mapa}_{yac_mapa}"
+                    )
+
                 mostrar_muestreos_agua = st.checkbox(
                     "Muestreos % Agua",
                     value=False,
@@ -3487,20 +3896,16 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
                 estados_activos_mapa = set()
                 estados_panel_mapa = [
-                    ("OP", "Op"),
-                    ("CCP", "Ccp"),
-                    ("CSP", "Csp"),
-                    ("INY", "Iny"),
-                    ("PROG TAPONAMIENTO", "Prog. Taponamiento"),
-                    ("TAPONADO", "Taponado"),
-                    ("SIN ESTADO", "Sin Estado"),
+                    (estado_key, etiqueta_estado_mapa(estado_key))
+                    for estado_key in leyenda_estados.keys()
                 ]
 
                 for estado_key, estado_label in estados_panel_mapa:
+                    estado_key_safe = re.sub(r"[^A-Za-z0-9_]+", "_", str(estado_key))
                     if st.checkbox(
                         estado_label,
                         value=True,
-                        key=f"estado_mapa_chk_{estado_key}_{modo_mapa}"
+                        key=f"estado_mapa_chk_{estado_key_safe}_{modo_mapa}"
                     ):
                         estados_activos_mapa.add(estado_key)
 
@@ -3577,6 +3982,51 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             fecha_inicio=fecha_inicio_muestreos_agua
         )
 
+    if mostrar_lineas_2d:
+        lineas_2d_mapa = (
+            load_lineas_2d_github()
+            if USAR_LINEAS_2D_GITHUB
+            else load_lineas_2d_shapefiles()
+        )
+
+        if lineas_2d_seleccionadas and not lineas_2d_mapa.empty:
+            lineas_2d_mapa = lineas_2d_mapa[
+                lineas_2d_mapa["CAPA"].astype(str).isin(lineas_2d_seleccionadas)
+            ].copy()
+
+        if (
+            not lineas_2d_mapa.empty
+            and not ver_todos_campo
+            and "YACIMIENTO" in lineas_2d_mapa.columns
+            and lineas_2d_mapa["YACIMIENTO"].astype(str).str.strip().ne("").any()
+        ):
+            lineas_2d_mapa = lineas_2d_mapa[
+                lineas_2d_mapa["YACIMIENTO"].astype(str).str.upper().str.strip().isin(["", str(yac_mapa).upper()])
+            ].copy()
+
+        if not lineas_2d_mapa.empty and not ver_todos_campo and {x_col, y_col}.issubset(mapa.columns):
+            margen_lineas_2d = 1500
+            x_min_linea = pd.to_numeric(mapa[x_col], errors="coerce").min() - margen_lineas_2d
+            x_max_linea = pd.to_numeric(mapa[x_col], errors="coerce").max() + margen_lineas_2d
+            y_min_linea = pd.to_numeric(mapa[y_col], errors="coerce").min() - margen_lineas_2d
+            y_max_linea = pd.to_numeric(mapa[y_col], errors="coerce").max() + margen_lineas_2d
+
+            mascara_lineas_2d = (
+                lineas_2d_mapa["X"].isna() |
+                (
+                    lineas_2d_mapa["X"].between(x_min_linea, x_max_linea) &
+                    lineas_2d_mapa["Y"].between(y_min_linea, y_max_linea)
+                )
+            )
+            lineas_2d_mapa = lineas_2d_mapa[mascara_lineas_2d].copy()
+    else:
+        lineas_2d_mapa = pd.DataFrame()
+
+    if mostrar_lineas_2d and lineas_2d_mapa.empty:
+        st.warning(
+            "No se cargaron líneas sísmicas 2D. Revisa que la carpeta Lineas exista en GitHub y que los archivos tengan columnas de coordenadas X/Y."
+        )
+
     if "NP_BLS" in mapa.columns:
         pozos_np_mapa = mapa.loc[
             pd.to_numeric(mapa["NP_BLS"], errors="coerce").fillna(0) > 0,
@@ -3594,31 +4044,13 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         pozos_iny_mapa = 0
 
     contadores_mapa = [
-        ("Productores", pozos_np_mapa, "green"),
+        ("Productores Históricos", pozos_np_mapa, "green"),
         ("Inyectores Históricos", pozos_iny_mapa, "blue"),
     ]
 
-    if mostrar_muestreos_agua:
-        contadores_mapa.append((
-            "Muestreos % Agua",
-            muestreos_agua_mapa["POZO"].dropna().astype(str).nunique() if not muestreos_agua_mapa.empty else 0,
-            "#0057FF"
-        ))
-
-    if mostrar_inyectores_operando:
-        contadores_mapa.append((
-            "Iny. operando",
-            inyectores_operando_mapa["POZO"].dropna().astype(str).nunique() if not inyectores_operando_mapa.empty else 0,
-            "#0057FF"
-        ))
-
     with resumen_tipo_mapa:
-        if usar_panel_filtros_mapa:
-            columnas_contadores = st.columns(len(contadores_mapa))
-        else:
-            c6_tipo, *columnas_contadores = st.columns([2.4] + [1] * len(contadores_mapa))
-
         if not usar_panel_filtros_mapa:
+            c6_tipo, *columnas_contadores = st.columns([2.4] + [1] * len(contadores_mapa))
             with c6_tipo:
                 if ver_todos_campo:
                     opciones_tipo_mapa = ["Mapa GIS"]
@@ -3646,14 +4078,28 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     solo_pozos_con_acum = False
                     mostrar_etiquetas_burbujas = False
 
-        for col_contador, (titulo_contador, valor_contador, color_contador) in zip(columnas_contadores, contadores_mapa):
-            with col_contador:
-                st.markdown(
-                    f"<div style='text-align:center; font-size:12px; color:#64748B;'>{titulo_contador}</div>"
-                    f"<div style='text-align:center; font-size:22px; font-weight:800; color:{color_contador};'>{valor_contador:,.0f}</div>"
-                    f"<div style='text-align:center; font-size:11px; color:#64748B;'>pozos</div>",
-                    unsafe_allow_html=True
-                )
+            filas_contadores = [columnas_contadores]
+        else:
+            max_cols_contadores = 6
+            filas_contadores = [
+                st.columns(min(max_cols_contadores, len(contadores_mapa[i:i + max_cols_contadores])))
+                for i in range(0, len(contadores_mapa), max_cols_contadores)
+            ]
+
+        idx_contador = 0
+        for fila_columnas in filas_contadores:
+            for col_contador in fila_columnas:
+                if idx_contador >= len(contadores_mapa):
+                    break
+                titulo_contador, valor_contador, color_contador = contadores_mapa[idx_contador]
+                idx_contador += 1
+                with col_contador:
+                    st.markdown(
+                        f"<div style='text-align:center; font-size:12px; color:#64748B;'>{titulo_contador}</div>"
+                        f"<div style='text-align:center; font-size:22px; font-weight:800; color:{color_contador};'>{valor_contador:,.0f}</div>"
+                        f"<div style='text-align:center; font-size:11px; color:#64748B;'>pozos</div>",
+                        unsafe_allow_html=True
+                    )
         
     if mapa.empty:
         st.warning("No hay pozos para mostrar con los filtros seleccionados.")
@@ -3729,7 +4175,12 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     # =====================================================
     # TAMAÑO Y ETIQUETAS DE BURBUJAS
     # =====================================================
-    mapa_uirevision = f"{modo_mapa}|{yac_mapa}|{tipo_mapa}|{variable}|{pozo_zoom}"
+    mapa_uirevision = f"{modo_mapa}|{yac_mapa}|{tipo_mapa}|{pozo_zoom}"
+    mapa_plot_key = re.sub(r"[^A-Za-z0-9_]+", "_", f"mapa_plot_{modo_mapa}_{yac_mapa}_{tipo_mapa}_{pozo_zoom}")
+    mapa_zoom_state_key = re.sub(r"[^A-Za-z0-9_]+", "_", f"mapa_zoom_state_{modo_mapa}_{yac_mapa}_{tipo_mapa}")
+    pozo_zoom_anterior = st.session_state.get(mapa_zoom_state_key)
+    aplicar_zoom_pozo = pozo_zoom != "Todos" and pozo_zoom_anterior != pozo_zoom
+    st.session_state[mapa_zoom_state_key] = pozo_zoom
     color_burbuja = color_variable.get(variable, "green")
 
     if not ver_todos_campo and not animar_tiempo:
@@ -4382,7 +4833,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 centro_gis_anim = dict(lat=mapa_gis["LAT"].mean(), lon=mapa_gis["LON"].mean())
                 zoom_gis_anim = 12
 
-                if pozo_zoom != "Todos" and "POZO" in mapa_gis.columns:
+                if aplicar_zoom_pozo and "POZO" in mapa_gis.columns:
                     row_zoom_gis = mapa_gis[mapa_gis["POZO"].astype(str) == str(pozo_zoom)]
                     if not row_zoom_gis.empty:
                         centro_gis_anim = dict(
@@ -4394,7 +4845,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 fig_anim_gis.update_layout(
                     title=f"<b>Animación acumulada Np / Winj - {yac_mapa}</b>",
                     dragmode="pan",
-                    mapbox=dict(style="open-street-map", center=centro_gis_anim, zoom=zoom_gis_anim),
+                    mapbox=dict(style="open-street-map", center=centro_gis_anim, zoom=zoom_gis_anim, uirevision=mapa_uirevision),
                     height=850,
                     margin=dict(l=0, r=0, t=125, b=35),
                     showlegend=True,
@@ -4437,6 +4888,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 salida_mapa_burbujas.plotly_chart(
                     fig_anim_gis,
                     use_container_width=True,
+                    key=f"{mapa_plot_key}_anim_gis",
                     config={"scrollZoom": True, "displaylogo": False}
                 )
 
@@ -4549,7 +5001,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                             size=9 if ver_todos_campo else 7,
                             color=color
                         ),
-                        name=estado.title(),
+                        name=etiqueta_estado_mapa(estado),
                         customdata=tmp[["POZO", COL_YAC, "ESTADO", "SAP"]],
                         hovertemplate=
                             "<b>Pozo:</b> %{customdata[0]}<br>" +
@@ -4659,6 +5111,25 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 showlegend=True
             ))
 
+        if not lineas_2d_mapa.empty:
+            for nombre_linea in lineas_2d_mapa["CAPA"].dropna().astype(str).unique():
+                linea = lineas_2d_mapa[
+                    lineas_2d_mapa["CAPA"].astype(str) == nombre_linea
+                ].copy()
+
+                fig_gis.add_trace(go.Scattermapbox(
+                    lat=linea["LAT"],
+                    lon=linea["LON"],
+                    mode="lines",
+                    line=dict(
+                        color=linea["COLOR"].dropna().iloc[0] if linea["COLOR"].notna().any() else "#7C3AED",
+                        width=float(linea["WIDTH"].dropna().iloc[0]) if linea["WIDTH"].notna().any() else 3
+                    ),
+                    name=nombre_linea,
+                    hovertemplate=f"<b>{nombre_linea}</b><extra></extra>",
+                    showlegend=True
+                ))
+
         if ver_todos_campo and mostrar_instalaciones_gis:
             instalaciones_gis = load_instalaciones_gis()
 
@@ -4726,8 +5197,9 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             if not row_zoom_gis.empty:
                 lat0 = row_zoom_gis["LAT"].iloc[0]
                 lon0 = row_zoom_gis["LON"].iloc[0]
-                centro_gis = dict(lat=lat0, lon=lon0)
-                zoom_gis = 15
+                if aplicar_zoom_pozo:
+                    centro_gis = dict(lat=lat0, lon=lon0)
+                    zoom_gis = 15
 
                 fig_gis.add_trace(go.Scattermapbox(
                     lat=[lat0],
@@ -4762,7 +5234,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             mapbox=dict(
                 style="open-street-map",
                 center=centro_gis,
-                zoom=zoom_gis
+                zoom=zoom_gis,
+                uirevision=mapa_uirevision
             ),
             height=850,
             uirevision=mapa_uirevision,
@@ -4781,6 +5254,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         salida_mapa_burbujas.plotly_chart(
             fig_gis,
             use_container_width=True,
+            key=f"{mapa_plot_key}_gis",
             config={
                 "scrollZoom": True,
                 "displaylogo": False
@@ -4910,6 +5384,25 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 hoverinfo="skip"
             ))
 
+        if not lineas_2d_mapa.empty:
+            for nombre_linea in lineas_2d_mapa["CAPA"].dropna().astype(str).unique():
+                linea = lineas_2d_mapa[
+                    lineas_2d_mapa["CAPA"].astype(str) == nombre_linea
+                ].copy()
+
+                fig_heat.add_trace(go.Scatter(
+                    x=linea["X"],
+                    y=linea["Y"],
+                    mode="lines",
+                    line=dict(
+                        color=linea["COLOR"].dropna().iloc[0] if linea["COLOR"].notna().any() else "#7C3AED",
+                        width=float(linea["WIDTH"].dropna().iloc[0]) if linea["WIDTH"].notna().any() else 3
+                    ),
+                    name=nombre_linea,
+                    hovertemplate=f"<b>{nombre_linea}</b><extra></extra>",
+                    showlegend=True
+                ))
+
         # Puntos usados para interpolar
         fig_heat.add_trace(go.Scatter(
             x=datos_heat[x_col],
@@ -4959,7 +5452,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             gridcolor="#EAECEE",
             showline=True,
             linewidth=1,
-            linecolor="black"
+            linecolor="black",
+            uirevision=mapa_uirevision
         )
 
         fig_heat.update_yaxes(
@@ -4970,10 +5464,11 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             gridcolor="#EAECEE",
             showline=True,
             linewidth=1,
-            linecolor="black"
+            linecolor="black",
+            uirevision=mapa_uirevision
         )
 
-        if pozo_zoom != "Todos" and "POZO" in datos_heat.columns:
+        if aplicar_zoom_pozo and "POZO" in datos_heat.columns:
 
             row_zoom = datos_heat[datos_heat["POZO"].astype(str) == str(pozo_zoom)]
 
@@ -4991,6 +5486,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         salida_mapa_burbujas.plotly_chart(
             fig_heat,
             use_container_width=True,
+            key=f"{mapa_plot_key}_heat",
             config={
                 "scrollZoom": True,
                 "displaylogo": False,
@@ -5055,6 +5551,25 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     except Exception as e:
         st.warning(f"No se pudo graficar contorno/asignación: {e}")
 
+
+    if not lineas_2d_mapa.empty:
+        for nombre_linea in lineas_2d_mapa["CAPA"].dropna().astype(str).unique():
+            linea = lineas_2d_mapa[
+                lineas_2d_mapa["CAPA"].astype(str) == nombre_linea
+            ].copy()
+
+            fig.add_trace(go.Scatter(
+                x=linea["X"],
+                y=linea["Y"],
+                mode="lines",
+                line=dict(
+                    color=linea["COLOR"].dropna().iloc[0] if linea["COLOR"].notna().any() else "#7C3AED",
+                    width=float(linea["WIDTH"].dropna().iloc[0]) if linea["WIDTH"].notna().any() else 3
+                ),
+                name=nombre_linea,
+                hovertemplate=f"<b>{nombre_linea}</b><extra></extra>",
+                showlegend=True
+            ))
 
     if not ver_todos_campo and not animar_tiempo and mostrar_radio_drene:
 
@@ -5298,7 +5813,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     gridcolor="#EAECEE",
                     showline=True,
                     linewidth=1,
-                    linecolor="black"
+                    linecolor="black",
+                    uirevision=mapa_uirevision
                 ),
                 yaxis=dict(
                     domain=[0.0, 1.0],
@@ -5309,11 +5825,12 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     gridcolor="#EAECEE",
                     showline=True,
                     linewidth=1,
-                    linecolor="black"
+                    linecolor="black",
+                    uirevision=mapa_uirevision
                 )
             )
 
-            if pozo_zoom != "Todos" and "POZO" in mapa.columns:
+            if aplicar_zoom_pozo and "POZO" in mapa.columns:
                 row_zoom = mapa[mapa["POZO"].astype(str) == str(pozo_zoom)]
                 if not row_zoom.empty:
                     x0 = row_zoom[x_col].iloc[0]
@@ -5331,6 +5848,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 st.plotly_chart(
                     fig,
                     use_container_width=True,
+                    key=f"{mapa_plot_key}_anim_utm",
                     config={
                         "scrollZoom": True,
                         "displaylogo": False,
@@ -5548,7 +6066,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 x=tmp[x_col],
                 y=tmp[y_col],
                 mode="markers",
-                name=estado.title(),
+                name=etiqueta_estado_mapa(estado),
                 marker=dict(
                     size=8 if ver_todos_campo else 7,
                     color=color,
@@ -5578,7 +6096,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                         size=10 if ver_todos_campo else 12,
                         family="Arial"
                     ),
-                    name=f"Nombres {estado.title()}",
+                    name=f"Nombres {etiqueta_estado_mapa(estado)}",
                     legendgroup=estado,
                     showlegend=False,
                     hoverinfo="skip"
@@ -5723,7 +6241,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         gridcolor="#EAECEE",
         showline=True,
         linewidth=1,
-        linecolor="black"
+        linecolor="black",
+        uirevision=mapa_uirevision
     )
 
     fig.update_yaxes(
@@ -5734,7 +6253,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         gridcolor="#EAECEE",
         showline=True,
         linewidth=1,
-        linecolor="black"
+        linecolor="black",
+        uirevision=mapa_uirevision
     )
 
     if pozo_zoom != "Todos" and "POZO" in mapa.columns:
@@ -5747,8 +6267,9 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
             radio_zoom = 1000
 
-            fig.update_xaxes(range=[x0 - radio_zoom, x0 + radio_zoom])
-            fig.update_yaxes(range=[y0 - radio_zoom, y0 + radio_zoom])
+            if aplicar_zoom_pozo:
+                fig.update_xaxes(range=[x0 - radio_zoom, x0 + radio_zoom])
+                fig.update_yaxes(range=[y0 - radio_zoom, y0 + radio_zoom])
 
             fig.add_trace(go.Scatter(
                 x=[x0],
@@ -5777,6 +6298,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     salida_mapa_burbujas.plotly_chart(
         fig,
         use_container_width=True,
+        key=f"{mapa_plot_key}_utm",
         config={
             "scrollZoom": True,
             "displaylogo": False,
@@ -9965,6 +10487,7 @@ def mapa_presion():
     )
 
     fig = go.Figure()
+    color_etiqueta_pozo_presion = "black"
 
     fig.add_trace(go.Scatter(
         x=contorno_plot["X"],
@@ -10056,8 +10579,8 @@ def mapa_presion():
         text=mapa_todos["POZO"],
         textposition="top center",
         textfont=dict(
-            size=10,
-            color="black",
+            size=13,
+            color=color_etiqueta_pozo_presion,
             family="Arial"
         ),
         marker=dict(
@@ -10293,6 +10816,11 @@ def mapa_presion():
                     mode="markers+text",
                     text=tmp_loc["POZO"],
                     textposition="bottom center",
+                    textfont=dict(
+                        size=13,
+                        color=color_etiqueta_pozo_presion,
+                        family="Arial"
+                    ),
                     marker=dict(
                         size=12,
                         symbol="diamond",
@@ -10371,8 +10899,8 @@ def mapa_presion():
         text=pres_mapa["POZO"],
         textposition="bottom center",
         textfont=dict(
-            size=8,
-            color="black",
+            size=11,
+            color=color_etiqueta_pozo_presion,
             family="Arial Black"
         ),
         marker=dict(
@@ -10501,8 +11029,7 @@ def mapa_presion():
 
     fig.update_xaxes(
         title_text="UTM X",
-        showgrid=True,
-        gridcolor="#EAECEE",
+        showgrid=False,
         showline=True,
         linewidth=1,
         linecolor="black"
@@ -10512,8 +11039,7 @@ def mapa_presion():
         title_text="UTM Y",
         scaleanchor="x",
         scaleratio=1,
-        showgrid=True,
-        gridcolor="#EAECEE",
+        showgrid=False,
         showline=True,
         linewidth=1,
         linecolor="black"
