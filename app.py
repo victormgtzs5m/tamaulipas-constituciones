@@ -13467,6 +13467,12 @@ elif vista == "Comparativa por pozo":
 
     usar_semilog = modo_escala == "Semilog"
 
+    mostrar_salinidad_comp = st.checkbox(
+        "Mostrar salinidad",
+        value=False,
+        key="comparativa_mostrar_salinidad"
+    )
+
     if pozos_sel_comp:
 
         df_comp_raw = df[
@@ -13919,7 +13925,7 @@ elif vista == "Comparativa por pozo":
             # =========================
             # 6. COMPARATIVO SALINIDAD
             # =========================
-            salinidad_comp = load_salinidad()
+            salinidad_comp = load_salinidad() if mostrar_salinidad_comp else pd.DataFrame()
 
             if not salinidad_comp.empty:
                 claves_sal_terminacion = normalizar_clave_texto(salinidad_comp["TERMINACION"])
