@@ -15,7 +15,6 @@ import urllib.parse
 import urllib.request
 from io import BytesIO
 
-
 # =========================================================
 # CONFIGURACIÓN GENERAL
 # =========================================================
@@ -37,6 +36,7 @@ ruta_db = "prodcoord.db"
 # Tablas"""  """
 TABLA_PROD = "Produccion"
 TABLA_COORD = "Coord"
+TABLA_LISTADO = "Listado"
 TABLA_CONTORNO = "Contorno"
 TABLA_ASIGNACION = "Asignacion"
 TABLA_TERM = "TERM"
@@ -52,8 +52,9 @@ TABLA_RESERVAS = "Reservas"
 
 URL_MUESTREOS_AGUA = "https://raw.githubusercontent.com/victormgtzs5m/tamaulipas-constituciones/main/Muestreos.xlsx"
 URL_SEGUIMIENTO = "https://raw.githubusercontent.com/victormgtzs5m/tamaulipas-constituciones/main/Seguimiento.xlsx"
+URL_SALINIDAD = "https://raw.githubusercontent.com/victormgtzs5m/tamaulipas-constituciones/main/Salinidad.xlsx"
 URL_LINEAS_GITHUB_API = "https://api.github.com/repos/victormgtzs5m/tamaulipas-constituciones/contents/Lineas?ref=main"
-CACHE_TTL_ARCHIVOS_DINAMICOS = 3000  # segundos; refresca Muestreos.xlsx y Seguimiento.xlsx cada 5 minutos
+CACHE_TTL_ARCHIVOS_DINAMICOS = 100000  # segundos; refresca Muestreos.xlsx y Seguimiento.xlsx cada 5 minutos
 
 DIR_SHAPEFILES_LINEAS_2D = Path("shapefiles")
 USAR_LINEAS_2D_GITHUB = True
@@ -1724,6 +1725,32 @@ def load_coord() -> pd.DataFrame:
 
     return coord
 
+@st.cache_data(show_spinner="Cargando listado de pozos...")
+def load_listado() -> pd.DataFrame:
+    """Carga la tabla Listado para mapas por yacimiento cuando se requiere usar cimas del listado."""
+    with sqlite3.connect(ruta_db) as conn:
+        listado = pd.read_sql_query(f'SELECT * FROM "{TABLA_LISTADO}"', conn)
+
+    listado = listado.loc[:, ~listado.columns.astype(str).str.startswith("Unnamed")]
+    listado = normalizar_columnas(listado)
+
+    for c in [
+        "CIMA X UTM", "CIMA Y UTM",
+        "FONDO X UTM", "FONDO Y UTM",
+        "RADIO DRENE"
+    ]:
+        if c in listado.columns:
+            listado[c] = pd.to_numeric(listado[c], errors="coerce")
+
+    if COL_POZO in listado.columns:
+        listado[COL_POZO] = listado[COL_POZO].astype(str).str.strip()
+    if COL_YAC in listado.columns:
+        listado[COL_YAC] = listado[COL_YAC].astype(str).str.strip()
+    if "POZO" in listado.columns:
+        listado["POZO"] = listado["POZO"].astype(str).str.strip()
+
+    return listado
+
 #Aqui van los pozos historicos del campo del 2011 al 2020
 @st.cache_data(show_spinner="Cargando pozos perforados históricos...")
 def load_term_perforados() -> pd.DataFrame:
@@ -1885,7 +1912,7 @@ def load_presiones() -> pd.DataFrame:
 
     return pres
 
-@st.cache_data(ttl=CACHE_TTL_ARCHIVOS_DINAMICOS, show_spinner="Cargando muestreos de agua...")
+@st.cache_data(ttl=CACHE_TTL_ARCHIVOS_DINAMICOS, show_spinner=False)
 def load_muestreos_agua() -> pd.DataFrame:
     cols_req = ["TERMINACION", "POZO", "FECHA MUESTREO", "% AGUA LAB"]
 
@@ -1958,7 +1985,7 @@ def load_muestreos_agua() -> pd.DataFrame:
 
     return muestreos.sort_values(["POZO", "TERMINACION", "FECHA MUESTREO"]).reset_index(drop=True)
 
-@st.cache_data(ttl=CACHE_TTL_ARCHIVOS_DINAMICOS, show_spinner="Cargando seguimiento de actividades...")
+@st.cache_data(ttl=CACHE_TTL_ARCHIVOS_DINAMICOS, show_spinner=False)
 def load_seguimiento_actividades(cache_version=2) -> pd.DataFrame:
     cols_req = ["TERMINACION", "POZO", "FECHA", "ACTIVIDAD"]
 
@@ -2053,6 +2080,150 @@ def load_seguimiento_actividades(cache_version=2) -> pd.DataFrame:
     ].copy()
 
     return seguimiento.sort_values(["POZO", "TERMINACION", "FECHA", "ACTIVIDAD"]).reset_index(drop=True)
+
+@st.cache_data(ttl=CACHE_TTL_ARCHIVOS_DINAMICOS, show_spinner=False)
+def load_salinidad(cache_version=2) -> pd.DataFrame:
+    columnas_salida = ["TERMINACION", "POZO", "FECHA MUESTREO", "SALINIDAD_PPM", "FUENTE"]
+
+    def clave_columna(col):
+        texto = "" if pd.isna(col) else str(col).strip().upper()
+        texto = unicodedata.normalize("NFKD", texto)
+        texto = "".join(c for c in texto if not unicodedata.combining(c))
+        texto = re.sub(r"[^A-Z0-9]+", " ", texto)
+        return re.sub(r"\s+", " ", texto).strip()
+
+    def preparar_hoja_salinidad(raw: pd.DataFrame, fuente: str) -> pd.DataFrame:
+        if raw.empty:
+            return pd.DataFrame(columns=columnas_salida)
+
+        datos_sin_unnamed = raw.loc[:, ~raw.columns.astype(str).str.startswith("Unnamed")].copy()
+        datos = datos_sin_unnamed if not datos_sin_unnamed.empty else raw.copy()
+        datos = normalizar_columnas(datos)
+
+        claves_columnas_iniciales = [clave_columna(c) for c in datos.columns]
+        necesita_detectar_header = (
+            "TERMINACION" not in claves_columnas_iniciales
+            or "POZO" not in claves_columnas_iniciales
+            or not any("SALINIDAD" in c for c in claves_columnas_iniciales)
+        )
+
+        if necesita_detectar_header:
+            for idx in range(min(25, len(raw))):
+                fila = raw.iloc[idx].tolist()
+                claves_fila = [clave_columna(v) for v in fila]
+
+                if (
+                    "TERMINACION" in claves_fila
+                    and "POZO" in claves_fila
+                    and any("SALINIDAD" in c for c in claves_fila)
+                ):
+                    datos = raw.iloc[idx + 1:].copy()
+                    datos.columns = raw.iloc[idx].tolist()
+                    datos = datos.loc[:, ~datos.columns.astype(str).str.startswith("Unnamed")]
+                    datos = normalizar_columnas(datos)
+                    break
+
+        columnas_por_clave = {clave_columna(c): c for c in datos.columns}
+        candidatos = {
+            "TERMINACION": ["TERMINACION", "TERMINACIÓN", "TERM"],
+            "POZO": ["POZO", "POZO FISICO", "NOMBRE POZO"],
+            "FECHA MUESTREO": [
+                "FECHA MUESTREO",
+                "FECHA MUESTRO",
+                "FECHA DE MUESTREO",
+                "FECHA MUESTRA",
+                "FECHA DE MUESTRA",
+                "FECHA"
+            ],
+            "SALINIDAD_PPM": [
+                "SALINIDADPPM",
+                "SALINIDAD PPM",
+                "SALINIDAD NACL PPM",
+                "SALINIDAD NACL",
+                "SALINIDAD"
+            ],
+        }
+
+        renombres = {}
+        for col_salida, opciones in candidatos.items():
+            for opcion in opciones:
+                col_real = columnas_por_clave.get(clave_columna(opcion))
+                if col_real is not None:
+                    renombres[col_real] = col_salida
+                    break
+
+        datos = datos.rename(columns=renombres)
+        faltantes = [c for c in ["TERMINACION", "POZO", "FECHA MUESTREO", "SALINIDAD_PPM"] if c not in datos.columns]
+
+        if faltantes:
+            st.warning(
+                f"Faltan columnas en hoja {fuente} de Salinidad.xlsx: {faltantes}. "
+                f"Columnas leídas: {datos.columns.tolist()}"
+            )
+            return pd.DataFrame(columns=columnas_salida)
+
+        datos = datos[["TERMINACION", "POZO", "FECHA MUESTREO", "SALINIDAD_PPM"]].copy()
+        datos["TERMINACION"] = datos["TERMINACION"].astype(str).str.strip()
+        datos["POZO"] = datos["POZO"].astype(str).str.strip()
+        datos["FECHA MUESTREO"] = convertir_fechas(datos["FECHA MUESTREO"])
+        datos["SALINIDAD_PPM"] = pd.to_numeric(datos["SALINIDAD_PPM"], errors="coerce")
+        datos["FUENTE"] = fuente
+
+        datos = datos.dropna(subset=["TERMINACION", "POZO", "FECHA MUESTREO", "SALINIDAD_PPM"])
+        datos = datos[
+            ~datos["TERMINACION"].str.upper().isin(["", "NAN", "NONE"])
+            & ~datos["POZO"].str.upper().isin(["", "NAN", "NONE"])
+        ].copy()
+
+        return datos[columnas_salida]
+
+    try:
+        with urllib.request.urlopen(URL_SALINIDAD, timeout=30) as resp:
+            contenido_bytes = resp.read()
+
+        excel_salinidad = pd.ExcelFile(BytesIO(contenido_bytes))
+    except Exception as exc:
+        st.warning(f"No se pudo cargar Salinidad.xlsx desde GitHub: {exc}")
+        return pd.DataFrame(columns=columnas_salida)
+
+    salinidad = []
+    for hoja, fuente in [("Aceite", "Aceite"), ("Stiff", "Stiff")]:
+        if hoja not in excel_salinidad.sheet_names:
+            st.warning(f"No existe la hoja '{hoja}' en Salinidad.xlsx. Hojas disponibles: {excel_salinidad.sheet_names}")
+            continue
+
+        try:
+            raw_hoja = pd.read_excel(
+                BytesIO(contenido_bytes),
+                sheet_name=hoja,
+                header=0
+            )
+
+            columnas_hoja = [clave_columna(c) for c in raw_hoja.columns]
+            if (
+                "TERMINACION" not in columnas_hoja
+                or "POZO" not in columnas_hoja
+                or not any("SALINIDAD" in c for c in columnas_hoja)
+            ):
+                raw_hoja = pd.read_excel(
+                    BytesIO(contenido_bytes),
+                    sheet_name=hoja,
+                    header=None
+                )
+        except Exception as exc:
+            st.warning(f"No se pudo leer la hoja '{hoja}' de Salinidad.xlsx: {exc}")
+            continue
+
+        salinidad.append(preparar_hoja_salinidad(raw_hoja, fuente))
+
+    if not salinidad:
+        return pd.DataFrame(columns=columnas_salida)
+
+    return (
+        pd.concat(salinidad, ignore_index=True)
+        .sort_values(["TERMINACION", "FUENTE", "FECHA MUESTREO"])
+        .reset_index(drop=True)
+    )
 
 @st.cache_data(show_spinner="Cargando estado de pozos...")
 def load_estado_pozos(cache_version=3) -> pd.DataFrame:
@@ -2669,6 +2840,42 @@ def _leer_linea_2d_txt_url(url_descarga: str) -> pd.DataFrame:
 
     return pd.DataFrame(registros, columns=["X", "Y", "YACIMIENTO"])
 
+def simplificar_lineas_2d_render(lineas_2d: pd.DataFrame, max_puntos_total=18000) -> pd.DataFrame:
+    if lineas_2d.empty:
+        return lineas_2d
+
+    datos = lineas_2d.dropna(subset=["X", "Y"]).copy()
+    total_puntos = len(datos)
+
+    if total_puntos <= max_puntos_total:
+        return lineas_2d
+
+    capas = datos["CAPA"].dropna().astype(str).unique()
+    max_puntos_por_capa = max(250, int(max_puntos_total / max(1, len(capas))))
+    salida = []
+
+    for nombre_capa in capas:
+        linea = datos[datos["CAPA"].astype(str) == nombre_capa].copy()
+
+        if linea.empty:
+            continue
+
+        paso = max(1, int(np.ceil(len(linea) / max_puntos_por_capa)))
+        linea_simple = linea.iloc[::paso].copy()
+
+        if not linea_simple.empty and linea_simple.index[-1] != linea.index[-1]:
+            linea_simple = pd.concat([linea_simple, linea.tail(1)], ignore_index=True)
+
+        salida.append(linea_simple)
+        separador = linea_simple.tail(1).copy()
+        separador[["X", "Y", "LON", "LAT"]] = np.nan
+        salida.append(separador)
+
+    if not salida:
+        return lineas_2d.iloc[0:0].copy()
+
+    return pd.concat(salida, ignore_index=True)
+
 @st.cache_data(ttl=CACHE_TTL_ARCHIVOS_DINAMICOS, show_spinner=False)
 def load_lineas_2d_github(cache_version=2) -> pd.DataFrame:
     columnas = ["CAPA", "X", "Y", "LON", "LAT", "COLOR", "WIDTH", "YACIMIENTO"]
@@ -3247,6 +3454,12 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
     ver_todos_campo = yac_mapa == "Todos"
     usar_panel_filtros_mapa = (not ver_todos_campo) and (not es_movil())
+    solo_acum_key = f"solo_pozos_con_acum_mapa_{modo_mapa}"
+    usar_listado_solo_prod = (
+        not ver_todos_campo
+        and modo_mapa != "RMA"
+        and bool(st.session_state.get(solo_acum_key, False))
+    )
 
     if usar_panel_filtros_mapa:
         panel_filtros_mapa, salida_mapa_burbujas = st.columns([0.24, 0.76], gap="medium")
@@ -3403,6 +3616,68 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         mapa["ESTADO_MAPA"] = mapa["ESTADO"].apply(normalizar_estado)
 
     else:
+
+        if usar_listado_solo_prod:
+            listado = load_listado()
+
+            if listado.empty:
+                st.warning("La tabla Listado está vacía; se mantiene la información de Coord.")
+            else:
+                if COL_YAC in listado.columns:
+                    listado = listado[
+                        listado[COL_YAC].astype(str).str.strip() == str(yac_mapa).strip()
+                    ].copy()
+
+                mapa = listado.merge(acum, on=COL_POZO, how="left")
+
+                if not estado_pozos.empty and "POZO" in mapa.columns:
+                    mapa = mapa.merge(
+                        estado_pozos,
+                        on="POZO",
+                        how="left"
+                    )
+                    mapa["ESTADO"] = mapa["ESTADO"].fillna("Sin estado")
+                    mapa["SAP"] = mapa["SAP"].fillna("Sin SAP")
+                else:
+                    mapa["ESTADO"] = "Sin estado"
+                    mapa["SAP"] = "Sin SAP"
+
+                mapa = mapa.merge(
+                    ultimo_wc,
+                    on=COL_POZO,
+                    how="left"
+                )
+
+                term_listado = load_term_perforados()
+                mapa = mapa.merge(
+                    term_listado,
+                    on=COL_POZO,
+                    how="left"
+                )
+
+                mapa["PERFORADO_TERM"] = mapa["PERFORADO_TERM"].fillna("No")
+                mapa["POZO_RMA"] = "No"
+                mapa["ULTIMO_WC"] = mapa["ULTIMO_WC"].fillna(0)
+
+                cols_acum_listado = [
+                    "NP_BLS",
+                    "WP_BLS",
+                    "GP_PC",
+                    "WINJ_BLS",
+                    "MESES_OPERANDO",
+                    "NP_NORM_MB"
+                ]
+                mapa[cols_acum_listado] = mapa[cols_acum_listado].fillna(0)
+
+                if "RADIO DRENE" in mapa.columns:
+                    mapa["RADIO DRENE"] = pd.to_numeric(mapa["RADIO DRENE"], errors="coerce")
+                else:
+                    mapa["RADIO DRENE"] = np.nan
+
+                if "POZO" not in mapa.columns:
+                    mapa["POZO"] = mapa[COL_POZO]
+
+                mapa["ESTADO_MAPA"] = mapa["ESTADO"].apply(normalizar_estado)
 
         mapa = mapa[mapa[COL_YAC].astype(str) == str(yac_mapa)].copy()
 
@@ -3927,7 +4202,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             mostrar_etiquetas_burbujas = False
         else:
             solo_pozos_con_acum = st.checkbox(
-                "Solo pozos con producción",
+                "Mostrar Pozos (All)",
                 value=False,
                 key=solo_acum_key
             )
@@ -3967,12 +4242,12 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             )
             localizaciones_mapa = pd.concat(locs_panel, ignore_index=True)
 
-    if solo_pozos_con_acum and {"NP_BLS", "WINJ_BLS"}.issubset(mapa.columns):
+    if solo_pozos_con_acum and not usar_listado_solo_prod and {"NP_BLS", "WINJ_BLS"}.issubset(mapa.columns):
         mapa = mapa[
             (pd.to_numeric(mapa["NP_BLS"], errors="coerce").fillna(0) > 0) |
             (pd.to_numeric(mapa["WINJ_BLS"], errors="coerce").fillna(0) > 0)
         ].copy()
-    elif solo_pozos_con_acum:
+    elif solo_pozos_con_acum and not usar_listado_solo_prod:
         st.warning("No se encontraron columnas NP_BLS y WINJ_BLS para aplicar el filtro de acumuladas.")
 
     muestreos_agua_mapa = pd.DataFrame()
@@ -4026,6 +4301,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         st.warning(
             "No se cargaron líneas sísmicas 2D. Revisa que la carpeta Lineas exista en GitHub y que los archivos tengan columnas de coordenadas X/Y."
         )
+
+    lineas_2d_render = simplificar_lineas_2d_render(lineas_2d_mapa) if not lineas_2d_mapa.empty else lineas_2d_mapa
 
     if "NP_BLS" in mapa.columns:
         pozos_np_mapa = mapa.loc[
@@ -5111,10 +5388,10 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 showlegend=True
             ))
 
-        if not lineas_2d_mapa.empty:
-            for nombre_linea in lineas_2d_mapa["CAPA"].dropna().astype(str).unique():
-                linea = lineas_2d_mapa[
-                    lineas_2d_mapa["CAPA"].astype(str) == nombre_linea
+        if not lineas_2d_render.empty:
+            for nombre_linea in lineas_2d_render["CAPA"].dropna().astype(str).unique():
+                linea = lineas_2d_render[
+                    lineas_2d_render["CAPA"].astype(str) == nombre_linea
                 ].copy()
 
                 fig_gis.add_trace(go.Scattermapbox(
@@ -5384,13 +5661,13 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 hoverinfo="skip"
             ))
 
-        if not lineas_2d_mapa.empty:
-            for nombre_linea in lineas_2d_mapa["CAPA"].dropna().astype(str).unique():
-                linea = lineas_2d_mapa[
-                    lineas_2d_mapa["CAPA"].astype(str) == nombre_linea
+        if not lineas_2d_render.empty:
+            for nombre_linea in lineas_2d_render["CAPA"].dropna().astype(str).unique():
+                linea = lineas_2d_render[
+                    lineas_2d_render["CAPA"].astype(str) == nombre_linea
                 ].copy()
 
-                fig_heat.add_trace(go.Scatter(
+                fig_heat.add_trace(go.Scattergl(
                     x=linea["X"],
                     y=linea["Y"],
                     mode="lines",
@@ -5552,13 +5829,13 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         st.warning(f"No se pudo graficar contorno/asignación: {e}")
 
 
-    if not lineas_2d_mapa.empty:
-        for nombre_linea in lineas_2d_mapa["CAPA"].dropna().astype(str).unique():
-            linea = lineas_2d_mapa[
-                lineas_2d_mapa["CAPA"].astype(str) == nombre_linea
+    if not lineas_2d_render.empty:
+        for nombre_linea in lineas_2d_render["CAPA"].dropna().astype(str).unique():
+            linea = lineas_2d_render[
+                lineas_2d_render["CAPA"].astype(str) == nombre_linea
             ].copy()
 
-            fig.add_trace(go.Scatter(
+            fig.add_trace(go.Scattergl(
                 x=linea["X"],
                 y=linea["Y"],
                 mode="lines",
@@ -11940,16 +12217,19 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
     if vista == "Producción por pozo":
         f1, f_modo, f2 = st.columns([1.4, 1.5, 2.1])
     else:
-        f1, f2 = st.columns([1.7, 2.3])
+        f2 = st.container()
 
-    with f1:
-        yacs = sorted(df[COL_YAC].dropna().astype(str).unique())
-        yac_sel = st.multiselect(
-            "Filtro por Yacimiento",
-            yacs,
-            default=yacs,
-            key="prod_yac_sel"
-        )
+    if vista == "Producción por pozo":
+        with f1:
+            yacs = sorted(df[COL_YAC].dropna().astype(str).unique())
+            yac_sel = st.multiselect(
+                "Filtro por Yacimiento",
+                yacs,
+                default=yacs,
+                key="prod_yac_sel"
+            )
+    else:
+        yac_sel = None
 
     if vista == "Producción por pozo":
         with f_modo:
@@ -11965,7 +12245,7 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
     df_prod_pozo_fisico = agregar_pozo_fisico(df, df_coord)
     df_base_filtro = (
         df_prod_pozo_fisico[df_prod_pozo_fisico[COL_YAC].astype(str).isin(yac_sel)].copy()
-        if yac_sel else df_prod_pozo_fisico.copy()
+        if vista == "Producción por pozo" and yac_sel else df_prod_pozo_fisico.copy()
     )
 
     if vista == "Producción por pozo":
@@ -13174,7 +13454,7 @@ elif vista == "Comparativa por pozo":
 
     modo_escala = st.radio(
     "Escala de gráficos",
-    ["Semilog", "Lineal"],
+    ["Lineal", "Semilog"],
     horizontal=True
     )
 
@@ -13628,6 +13908,172 @@ elif vista == "Comparativa por pozo":
                     st.info("No hay datos de presión para los pozos seleccionados.")
             else:
                 st.info("No hay datos disponibles en la tabla Presiones.")
+
+            # =========================
+            # 6. COMPARATIVO SALINIDAD
+            # =========================
+            salinidad_comp = load_salinidad()
+
+            if not salinidad_comp.empty:
+                claves_sal_terminacion = normalizar_clave_texto(salinidad_comp["TERMINACION"])
+                claves_sal_pozo = normalizar_clave_texto(salinidad_comp["POZO"])
+                claves_pozos_sel_sal = set(
+                    normalizar_clave_texto(pd.Series(pozos_sel_comp)).tolist()
+                )
+
+                salinidad_comp = salinidad_comp[
+                    claves_sal_terminacion.isin(claves_pozos_sel_sal) |
+                    claves_sal_pozo.isin(claves_pozos_sel_sal)
+                ].copy()
+
+                salinidad_comp["FECHA MUESTREO"] = pd.to_datetime(
+                    salinidad_comp["FECHA MUESTREO"],
+                    errors="coerce"
+                )
+                salinidad_comp["SALINIDAD_PPM"] = pd.to_numeric(
+                    salinidad_comp["SALINIDAD_PPM"],
+                    errors="coerce"
+                )
+                salinidad_comp = salinidad_comp.dropna(
+                    subset=["FECHA MUESTREO", "SALINIDAD_PPM"]
+                ).copy()
+                salinidad_comp = salinidad_comp.sort_values(["TERMINACION", "FUENTE", "FECHA MUESTREO"])
+
+                if not salinidad_comp.empty:
+                    fig_sal = go.Figure()
+                    simbolo_fuente_sal = {
+                        "Aceite": "circle",
+                        "Stiff": "diamond"
+                    }
+
+                    for pozo in pozos_sel_comp:
+                        clave_pozo_sal = normalizar_clave_texto(pd.Series([pozo])).iloc[0]
+
+                        for fuente_sal in ["Aceite", "Stiff"]:
+                            dfi_sal = salinidad_comp[
+                                (
+                                    (normalizar_clave_texto(salinidad_comp["TERMINACION"]) == clave_pozo_sal) |
+                                    (normalizar_clave_texto(salinidad_comp["POZO"]) == clave_pozo_sal)
+                                ) &
+                                (salinidad_comp["FUENTE"].astype(str) == fuente_sal)
+                            ].copy()
+
+                            if dfi_sal.empty:
+                                continue
+
+                            if normalizar_tiempo:
+                                dfi_sal[COL_TIEMPO_NORM] = range(len(dfi_sal))
+                                x_values = dfi_sal[COL_TIEMPO_NORM]
+                                hover_x = "Muestreo normalizado: %{x}"
+                                x_title = "Tiempo normalizado, muestreos"
+                            else:
+                                x_values = dfi_sal["FECHA MUESTREO"]
+                                hover_x = "Fecha muestreo: %{x|%d/%m/%Y}"
+                                x_title = "Fecha"
+
+                            nombre_traza = (
+                                f"{pozo} - Salinidad"
+                                if fuente_sal == "Aceite"
+                                else f"{pozo} - Salinidad Stiff"
+                            )
+
+                            fig_sal.add_trace(
+                                go.Scatter(
+                                    x=x_values,
+                                    y=dfi_sal["SALINIDAD_PPM"],
+                                    mode="markers",
+                                    name=nombre_traza,
+                                    marker=dict(
+                                        size=8,
+                                        symbol=simbolo_fuente_sal.get(fuente_sal, "circle"),
+                                        color=color_por_pozo_comp.get(str(pozo).strip()),
+                                        line=dict(color="black", width=0.8)
+                                    ),
+                                    connectgaps=False,
+                                    customdata=dfi_sal[["POZO", "FUENTE"]],
+                                    hovertemplate=
+                                        f"<b>Terminación: {pozo}</b><br>" +
+                                        "<b>Pozo:</b> %{customdata[0]}<br>" +
+                                        "<b>Fuente:</b> %{customdata[1]}<br>" +
+                                        hover_x + "<br>" +
+                                        "Salinidad: %{y:,.0f} ppm<extra></extra>"
+                                )
+                            )
+
+                    fig_sal.update_layout(
+                        title=dict(
+                            text="<b>Salinidad por pozo</b>",
+                            x=0.02,
+                            xanchor="left",
+                            font=dict(size=20, family="Arial Black", color="#111827")
+                        ),
+                        template="plotly_white",
+                        hovermode="x unified",
+                        height=450,
+                        plot_bgcolor="#F8F8FF",
+                        paper_bgcolor="white",
+                        font=dict(family="Arial", size=13, color="#111827"),
+                        margin=dict(l=70, r=40, t=90, b=70),
+                        legend=dict(
+                            orientation="h",
+                            yanchor="bottom",
+                            y=1.02,
+                            xanchor="center",
+                            x=0.5,
+                            font=dict(size=14, family="Arial", color="#111827"),
+                            bgcolor="rgba(255,255,255,0.8)",
+                            bordercolor="#D1D5DB",
+                            borderwidth=1
+                        )
+                    )
+
+                    fig_sal.update_xaxes(
+                        title_text=f"<b>{x_title}</b>",
+                        tickformat="%d/%m/%Y" if not normalizar_tiempo else None,
+                        showgrid=True,
+                        gridcolor="#E5E7EB",
+                        gridwidth=0.7,
+                        zeroline=False,
+                        showline=True,
+                        linewidth=1.2,
+                        linecolor="#111827",
+                        mirror=True,
+                        ticks="outside",
+                        tickfont=dict(size=18, color="#111827"),
+                        title=dict(
+                            text=f"<b>{x_title}</b>",
+                            font=dict(size=18, color="#374151")
+                        ),
+                        rangeslider=dict(visible=False)
+                    )
+
+                    fig_sal.update_yaxes(
+                        title_text="<b>Salinidad (ppm)</b>",
+                        showgrid=True,
+                        gridcolor="#E5E7EB",
+                        gridwidth=0.7,
+                        zeroline=False,
+                        separatethousands=True,
+                        showline=True,
+                        linewidth=1.2,
+                        linecolor="#111827",
+                        mirror=True,
+                        ticks="outside",
+                        tickfont=dict(size=18, color="#111827"),
+                        title=dict(
+                            text="<b>Salinidad (ppm)</b>",
+                            font=dict(size=18, color="#374151")
+                        )
+                    )
+
+                    if not normalizar_tiempo:
+                        fig_sal.update_xaxes(range=[fecha_min, fecha_max])
+
+                    st.plotly_chart(fig_sal, use_container_width=True)
+                else:
+                    st.info("No hay datos de salinidad para los pozos seleccionados.")
+            else:
+                pass
 
         else:
             st.warning("No hay datos disponibles para los pozos seleccionados.")
