@@ -2082,8 +2082,8 @@ def load_seguimiento_actividades(cache_version=2) -> pd.DataFrame:
     return seguimiento.sort_values(["POZO", "TERMINACION", "FECHA", "ACTIVIDAD"]).reset_index(drop=True)
 
 @st.cache_data(ttl=CACHE_TTL_ARCHIVOS_DINAMICOS, show_spinner=False)
-def load_salinidad(cache_version=2) -> pd.DataFrame:
-    columnas_salida = ["TERMINACION", "POZO", "FECHA MUESTREO", "SALINIDAD_PPM", "FUENTE"]
+def load_salinidad(cache_version=3) -> pd.DataFrame:
+    columnas_salida = ["TERMINACION", "POZO", "FECHA MUESTREO", "SALINIDAD_PPM", "API", "FUENTE"]
 
     def clave_columna(col):
         texto = "" if pd.isna(col) else str(col).strip().upper()
@@ -2142,6 +2142,13 @@ def load_salinidad(cache_version=2) -> pd.DataFrame:
                 "SALINIDAD NACL",
                 "SALINIDAD"
             ],
+            "API": [
+                "API",
+                "°API",
+                "ºAPI",
+                "GRADOS API",
+                "DENSIDAD API"
+            ],
         }
 
         renombres = {}
@@ -2162,11 +2169,15 @@ def load_salinidad(cache_version=2) -> pd.DataFrame:
             )
             return pd.DataFrame(columns=columnas_salida)
 
-        datos = datos[["TERMINACION", "POZO", "FECHA MUESTREO", "SALINIDAD_PPM"]].copy()
+        if "API" not in datos.columns:
+            datos["API"] = np.nan
+
+        datos = datos[["TERMINACION", "POZO", "FECHA MUESTREO", "SALINIDAD_PPM", "API"]].copy()
         datos["TERMINACION"] = datos["TERMINACION"].astype(str).str.strip()
         datos["POZO"] = datos["POZO"].astype(str).str.strip()
         datos["FECHA MUESTREO"] = convertir_fechas(datos["FECHA MUESTREO"])
         datos["SALINIDAD_PPM"] = pd.to_numeric(datos["SALINIDAD_PPM"], errors="coerce")
+        datos["API"] = pd.to_numeric(datos["API"], errors="coerce")
         datos["FUENTE"] = fuente
 
         datos = datos.dropna(subset=["TERMINACION", "POZO", "FECHA MUESTREO", "SALINIDAD_PPM"])
@@ -2568,7 +2579,7 @@ def estadistica():
     )
 
     fig_box_np.update_layout(
-        height=560,
+        height=620,
         xaxis_title="Yacimiento",
         yaxis_title=f"{nombre_np} (mbl)",
         font=dict(size=14, color="black", family="Arial Black"),
@@ -11990,6 +12001,944 @@ def reservas():
     st.caption("Notas: 1P = PDP + PDNP + PND  |  2P = 1P + PB  |  3P = 2P + POS")
 
 
+def pronostico_pozos():
+    st.markdown(
+        """
+        <div style="
+            background: linear-gradient(90deg, #2F363D 0%, #252B31 100%);
+            color: white;
+            padding: 16px 20px;
+            border-radius: 12px;
+            margin-bottom: 18px;
+            box-shadow: 0 10px 24px rgba(15,23,42,.16);
+        ">
+            <div style="font-size:24px; font-weight:850;">Pronóstico de producción por pozo</div>
+            <div style="font-size:13px; color:#CBD5E1; margin-top:4px;">
+                Curvas por pozo con dos etapas de declinación y corte por límite económico.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.info(
+        "Primera versión del módulo: captura/edita los pozos, fechas y parámetros de declinación; "
+        "la aplicación calcula las curvas mensuales, acumuladas y el resumen por pozo."
+    )
+
+    col_fecha, col_horizonte = st.columns([1, 1])
+    with col_fecha:
+        fecha_partida = st.date_input(
+            "Fecha de partida del pronóstico",
+            value=pd.Timestamp.today().normalize().replace(day=1).date(),
+            key="pronostico_fecha_partida"
+        )
+    with col_horizonte:
+        horizonte_meses = st.number_input(
+            "Horizonte máximo (meses)",
+            min_value=12,
+            max_value=600,
+            value=240,
+            step=12,
+            key="pronostico_horizonte_meses"
+        )
+
+    if "pronostico_pozos_df" not in st.session_state:
+        st.session_state["pronostico_pozos_df"] = pd.DataFrame({
+            "Pozo": ["POZO-01", "POZO-02"],
+            "Fecha inicio": [
+                pd.Timestamp(fecha_partida),
+                pd.Timestamp(fecha_partida) + pd.DateOffset(months=1),
+            ],
+            "Qo inicial (bpd)": [300.0, 220.0],
+            "Di 1 (% mensual)": [4.0, 3.5],
+            "Duración etapa 1 (meses)": [12, 12],
+            "Di 2 (% mensual)": [1.5, 1.2],
+            "Límite económico (bpd)": [15.0, 15.0],
+            "Tipo de obra": ["", ""],
+            "Estación": ["", ""],
+            "Base/Incremental": ["Incremental", "Incremental"],
+            "Zona": ["", ""],
+        })
+    if "pronostico_editor_version" not in st.session_state:
+        st.session_state["pronostico_editor_version"] = 0
+
+    columnas_base_pronostico = [
+        "Pozo", "Fecha inicio", "Qo inicial (bpd)", "Di 1 (% mensual)",
+        "Duración etapa 1 (meses)", "Di 2 (% mensual)", "Límite económico (bpd)",
+        "Tipo de obra", "Estación", "Base/Incremental", "Zona"
+    ]
+    df_pronostico_base = st.session_state["pronostico_pozos_df"]
+    necesita_normalizar_pronostico = (
+        "Di 1 (% anual)" in df_pronostico_base.columns
+        or "Di 2 (% anual)" in df_pronostico_base.columns
+        or "Reserva" in df_pronostico_base.columns
+        or any(col not in df_pronostico_base.columns for col in columnas_base_pronostico)
+        or list(df_pronostico_base.columns) != columnas_base_pronostico
+    )
+    if necesita_normalizar_pronostico:
+        df_pronostico_base = df_pronostico_base.rename(columns={
+            "Di 1 (% anual)": "Di 1 (% mensual)",
+            "Di 2 (% anual)": "Di 2 (% mensual)",
+        })
+        if "Reserva" in df_pronostico_base.columns:
+            df_pronostico_base = df_pronostico_base.drop(columns=["Reserva"])
+        for col in columnas_base_pronostico:
+            if col not in df_pronostico_base.columns:
+                df_pronostico_base[col] = ""
+        st.session_state["pronostico_pozos_df"] = df_pronostico_base[columnas_base_pronostico].copy()
+
+    columnas_config = {
+        "Pozo": st.column_config.TextColumn("Pozo", required=True),
+        "Fecha inicio": st.column_config.DateColumn("Fecha inicio", format="DD/MM/YYYY", required=True),
+        "Qo inicial (bpd)": st.column_config.NumberColumn("Qo inicial (bpd)", min_value=0.0, step=10.0, format="%.2f"),
+        "Di 1 (% mensual)": st.column_config.NumberColumn("Di 1 (% mensual)", min_value=0.0, max_value=100.0, step=0.10, format="%.2f"),
+        "Duración etapa 1 (meses)": st.column_config.NumberColumn("Duración etapa 1 (meses)", min_value=0, max_value=100, step=1),
+        "Di 2 (% mensual)": st.column_config.NumberColumn("Di 2 (% mensual)", min_value=0.0, max_value=100.0, step=0.10, format="%.2f"),
+        "Límite económico (bpd)": st.column_config.NumberColumn("Límite económico (bpd)", min_value=0.0, max_value=1000.0, step=1.0, format="%.2f"),
+    }
+
+    st.markdown(
+        """
+        <style>
+        .pronostico-card {
+            background: #FFFFFF;
+            border: 1px solid #D8DEE9;
+            border-radius: 14px;
+            padding: 14px 16px 18px 16px;
+            box-shadow: 0 8px 22px rgba(15, 23, 42, .08);
+            margin-bottom: 16px;
+        }
+        .pronostico-subtitle {
+            color: #111827;
+            font-size: 18px;
+            font-weight: 800;
+            margin: 0 0 6px 0;
+        }
+        .pronostico-help {
+            color: #64748B;
+            font-size: 12px;
+            margin-bottom: 12px;
+        }
+        div[data-testid="stDataEditor"] {
+            border: 1px solid #CBD5E1;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 6px 16px rgba(15, 23, 42, .06);
+        }
+        </style>
+        <div class="pronostico-card">
+            <div class="pronostico-subtitle">Pozos y parámetros de pronóstico</div>
+            <div class="pronostico-help">
+                Las declinaciones se capturan como porcentaje mensual. La reserva se calcula automáticamente con la curva.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    col_add, _ = st.columns([1, 5])
+    with col_add:
+        if st.button("➕ Agregar pozo", key="pronostico_agregar_pozo", use_container_width=True):
+            nuevo = pd.DataFrame([{
+                "Pozo": f"POZO-{len(st.session_state['pronostico_pozos_df']) + 1:02d}",
+                "Fecha inicio": pd.Timestamp(fecha_partida),
+                "Qo inicial (bpd)": 0.0,
+                "Di 1 (% mensual)": 0.0,
+                "Duración etapa 1 (meses)": 0,
+                "Di 2 (% mensual)": 0.0,
+                "Límite económico (bpd)": 0.0,
+                "Tipo de obra": "",
+                "Estación": "",
+                "Base/Incremental": "Incremental",
+                "Zona": "",
+            }])
+            st.session_state["pronostico_pozos_df"] = pd.concat(
+                [st.session_state["pronostico_pozos_df"], nuevo],
+                ignore_index=True
+            )
+            st.session_state["pronostico_editor_version"] += 1
+
+    tabla_pozos = st.data_editor(
+        st.session_state["pronostico_pozos_df"],
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config=columnas_config,
+        key=f"pronostico_editor_pozos_{st.session_state['pronostico_editor_version']}"
+    )
+    st.session_state["pronostico_pozos_df"] = tabla_pozos.copy()
+
+    def _valor_num(v, default=0.0):
+        val = pd.to_numeric(pd.Series([v]), errors="coerce").iloc[0]
+        return default if pd.isna(val) else float(val)
+
+    def _fecha_mes(fecha):
+        f = pd.to_datetime(fecha, errors="coerce")
+        if pd.isna(f):
+            return pd.NaT
+        return f.to_period("M").to_timestamp()
+
+    def _fecha_real(fecha):
+        f = pd.to_datetime(fecha, errors="coerce")
+        if pd.isna(f):
+            return pd.NaT
+        return f.normalize()
+
+    def _di_mensual(di_mensual_pct):
+        return min(max(_valor_num(di_mensual_pct), 0.0) / 100.0, 0.999999)
+
+    registros = []
+    resumen = []
+    fecha_partida_ts = _fecha_mes(fecha_partida)
+
+    for _, pozo_row in tabla_pozos.iterrows():
+        pozo = str(pozo_row.get("Pozo", "")).strip()
+        if not pozo or pozo.lower() == "nan":
+            continue
+
+        fecha_inicio_real = _fecha_real(pozo_row.get("Fecha inicio"))
+        if pd.isna(fecha_inicio_real):
+            fecha_inicio_real = pd.to_datetime(fecha_partida).normalize()
+        fecha_partida_real = pd.to_datetime(fecha_partida).normalize()
+        fecha_inicio_real = max(fecha_inicio_real, fecha_partida_real)
+        fecha_inicio = _fecha_mes(fecha_inicio_real)
+
+        qi = max(_valor_num(pozo_row.get("Qo inicial (bpd)")), 0.0)
+        di1_m = _di_mensual(pozo_row.get("Di 1 (% mensual)"))
+        dur1 = int(min(max(_valor_num(pozo_row.get("Duración etapa 1 (meses)")), 0), 100))
+        di2_m = _di_mensual(pozo_row.get("Di 2 (% mensual)"))
+        limite = min(max(_valor_num(pozo_row.get("Límite económico (bpd)")), 0.0), 1000.0)
+
+        qo = qi
+        aceite_acum_bls = 0.0
+        mes_corte = None
+
+        for mes in range(int(horizonte_meses)):
+            fecha = fecha_inicio + pd.DateOffset(months=mes)
+            dias_mes_cal = int(pd.Period(fecha, freq="M").days_in_month)
+            if mes == 0:
+                dias_mes = max(dias_mes_cal - int(fecha_inicio_real.day) + 1, 0)
+                factor_mes_entrada = dias_mes / dias_mes_cal if dias_mes_cal else 0
+            else:
+                dias_mes = dias_mes_cal
+                factor_mes_entrada = 1.0
+
+            if mes == 0:
+                qo_nominal = qi
+                qo = qo_nominal * factor_mes_entrada
+            elif mes < dur1:
+                qo_nominal = qi * np.exp(-di1_m * mes)
+                qo = qo_nominal
+            else:
+                qo_etapa_2 = qi * np.exp(-di1_m * max(dur1 - 1, 0))
+                qo_nominal = qo_etapa_2 * np.exp(-di2_m * (mes - dur1 + 1))
+                qo = qo_nominal
+
+            aceite_mes = qo * dias_mes_cal
+            aceite_acum_bls += aceite_mes
+
+            registros.append({
+                "Pozo": pozo,
+                "Fecha": fecha,
+                "Mes pronóstico": mes + 1,
+                "Qo (bpd)": qo,
+                "Días activos mes": dias_mes,
+                "Aceite mensual (bls)": aceite_mes,
+                "Np acumulada (mb)": aceite_acum_bls / 1000.0,
+                "Tipo de obra": pozo_row.get("Tipo de obra", ""),
+                "Reserva calculada (mb)": aceite_acum_bls / 1000.0,
+                "Estación": pozo_row.get("Estación", ""),
+                "Base/Incremental": pozo_row.get("Base/Incremental", ""),
+                "Zona": pozo_row.get("Zona", ""),
+            })
+
+            if qo_nominal < limite:
+                mes_corte = fecha
+                break
+
+        resumen.append({
+            "Pozo": pozo,
+            "Fecha inicio": fecha_inicio_real,
+            "Qo inicial (bpd)": qi,
+            "Di 1 (% mensual)": _valor_num(pozo_row.get("Di 1 (% mensual)")),
+            "Duración etapa 1 (meses)": dur1,
+            "Di 2 (% mensual)": _valor_num(pozo_row.get("Di 2 (% mensual)")),
+            "Límite económico (bpd)": limite,
+            "Mes corte LE": mes_corte,
+            "Reserva calculada (mb)": aceite_acum_bls / 1000.0,
+        })
+
+    curvas = pd.DataFrame(registros)
+    resumen = pd.DataFrame(resumen)
+
+    if curvas.empty:
+        st.warning("No hay curvas calculadas. Revisa que exista al menos un pozo con Qo inicial mayor al límite económico.")
+        return
+
+    total_mensual = (
+        curvas.groupby("Fecha", as_index=False)
+        .agg({"Qo (bpd)": "sum", "Aceite mensual (bls)": "sum"})
+        .sort_values("Fecha")
+    )
+    total_mensual["Np total (mb)"] = total_mensual["Aceite mensual (bls)"].cumsum() / 1000.0
+
+    fig = go.Figure()
+    for pozo in tabla_pozos["Pozo"].dropna().astype(str).unique():
+        dfi = curvas[curvas["Pozo"].astype(str) == pozo].copy()
+        dfi = dfi[dfi["Qo (bpd)"] > 0]
+        if dfi.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=dfi["Fecha"],
+            y=dfi["Qo (bpd)"],
+            mode="lines",
+            name=pozo,
+            line=dict(width=2),
+            hovertemplate="<b>%{fullData.name}</b><br>Fecha: %{x|%d/%m/%Y}<br>Qo: %{y:,.2f} bpd<extra></extra>"
+        ))
+
+    fig.add_trace(go.Scatter(
+        x=total_mensual["Fecha"],
+        y=total_mensual["Qo (bpd)"],
+        mode="lines",
+        name="Total campo",
+        line=dict(width=4, color="#16A34A"),
+        fill="tozeroy",
+        fillcolor="rgba(22, 163, 74, 0.20)",
+        hovertemplate="<b>Total campo</b><br>Fecha: %{x|%d/%m/%Y}<br>Qo: %{y:,.2f} bpd<extra></extra>"
+    ))
+
+    fig.update_layout(
+        title="<b>Pronóstico de producción de aceite</b>",
+        template="plotly_white",
+        height=560,
+        hovermode="x unified",
+        plot_bgcolor="#F8F8FF",
+        paper_bgcolor="white",
+        margin=dict(l=70, r=40, t=80, b=70),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
+    )
+    fig.update_xaxes(title_text="<b>Fecha</b>", tickformat="%d/%m/%Y", showgrid=True, gridcolor="#E5E7EB")
+    fig.update_yaxes(title_text="<b>Qo aceite (bpd)</b>", showgrid=True, gridcolor="#E5E7EB", separatethousands=True)
+    st.plotly_chart(fig, use_container_width=True)
+
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.metric("Qo inicial total", f"{total_mensual['Qo (bpd)'].iloc[0]:,.1f} bpd")
+    with col_b:
+        st.metric("Np total final", f"{total_mensual['Np total (mb)'].iloc[-1]:,.1f} mb")
+    with col_c:
+        st.metric("Pozos activos", f"{curvas.loc[curvas['Qo (bpd)'] > 0, 'Pozo'].nunique():,.0f}")
+
+    st.markdown("### Resumen por pozo")
+    if not resumen.empty:
+        resumen_show = resumen.copy()
+        resumen_show["Fecha inicio"] = pd.to_datetime(resumen_show["Fecha inicio"]).dt.strftime("%d/%m/%Y")
+        resumen_show["Mes corte LE"] = pd.to_datetime(resumen_show["Mes corte LE"], errors="coerce").dt.strftime("%d/%m/%Y")
+        st.dataframe(resumen_show, use_container_width=True, height=260)
+
+    with st.expander("Ver tabla mensual tipo Prod_Petróleo"):
+        tabla_mensual = curvas.copy()
+        tabla_mensual["Fecha"] = pd.to_datetime(tabla_mensual["Fecha"]).dt.strftime("%d/%m/%Y")
+        st.dataframe(tabla_mensual, use_container_width=True, height=420)
+
+    st.download_button(
+        "Descargar pronóstico mensual CSV",
+        data=curvas.to_csv(index=False).encode("utf-8-sig"),
+        file_name="pronostico_produccion_pozos.csv",
+        mime="text/csv"
+    )
+
+
+@st.cache_data(show_spinner="Preparando datos DCA...")
+def load_prod_dca():
+    prod = load_data().copy()
+    if prod.empty:
+        return prod
+
+    prod[COL_FECHA] = pd.to_datetime(prod[COL_FECHA], errors="coerce")
+    prod = prod.dropna(subset=[COL_FECHA, COL_POZO]).copy()
+    prod[COL_POZO] = prod[COL_POZO].astype(str).str.strip()
+
+    if COL_POZO_FISICO in prod.columns:
+        prod[COL_POZO_FISICO] = prod[COL_POZO_FISICO].astype(str).str.strip()
+        prod["POZO_DCA"] = prod[COL_POZO_FISICO].where(
+            prod[COL_POZO_FISICO].notna() &
+            prod[COL_POZO_FISICO].astype(str).str.strip().ne("") &
+            prod[COL_POZO_FISICO].astype(str).str.upper().ne("NAN"),
+            prod[COL_POZO]
+        )
+    else:
+        prod["POZO_DCA"] = prod[COL_POZO]
+
+    prod[COL_YAC] = prod[COL_YAC].astype(str).str.strip()
+    for c in [COL_DIAS, COL_ACEITE]:
+        prod[c] = pd.to_numeric(prod[c], errors="coerce").fillna(0)
+
+    prod[COL_ACEITE_BBL] = prod[COL_ACEITE] * M3_A_BBL
+    prod["MES"] = prod[COL_FECHA].dt.to_period("M").dt.to_timestamp()
+    prod = (
+        prod.groupby(["POZO_DCA", "MES"], as_index=False)
+        .agg({
+            COL_ACEITE_BBL: "sum",
+            COL_DIAS: "max",
+            COL_YAC: "first",
+        })
+        .rename(columns={"POZO_DCA": COL_POZO, "MES": COL_FECHA})
+        .sort_values([COL_POZO, COL_FECHA])
+        .reset_index(drop=True)
+    )
+    prod["MES"] = prod[COL_FECHA].dt.to_period("M").dt.to_timestamp()
+    dias_validos = prod[COL_DIAS].replace(0, np.nan)
+    prod[COL_QO] = (prod[COL_ACEITE_BBL] / dias_validos).replace([np.inf, -np.inf], np.nan).fillna(0)
+    return prod
+
+
+def pronostico_pozos_dca():
+    st.markdown(
+        """
+        <div style="
+            background: linear-gradient(90deg, #2F363D 0%, #252B31 100%);
+            color: white;
+            padding: 16px 20px;
+            border-radius: 12px;
+            margin-bottom: 18px;
+            box-shadow: 0 10px 24px rgba(15,23,42,.16);
+        ">
+            <div style="font-size:24px; font-weight:850;">Curvas de declinación (DCA)</div>
+            <div style="font-size:13px; color:#CBD5E1; margin-top:4px;">
+                Tamaulipas-Constituciones Arps (DCA).
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    prod = load_prod_dca().copy()
+    meses_disponibles = sorted(prod["MES"].dropna().unique())
+    if not meses_disponibles:
+        st.warning("No hay fechas válidas de producción para analizar.")
+        return
+
+    mes_max = pd.Timestamp(max(meses_disponibles))
+    mes_default = pd.Timestamp("2026-05-01")
+    if mes_default not in set(pd.to_datetime(meses_disponibles)):
+        mes_default = mes_max
+
+    st.markdown(
+        """
+        <style>
+        .dca-panel-title {
+            color: #111827;
+            font-size: 15px;
+            font-weight: 850;
+            margin-bottom: 8px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.markdown(
+        """
+        <style>
+        div[data-testid="column"]:has(.dca-filter-panel-marker),
+        div[data-testid="stColumn"]:has(.dca-filter-panel-marker) {
+            background: linear-gradient(180deg, #2F363D 0%, #252B31 100%);
+            border: 1px solid #1F252B;
+            border-radius: 12px;
+            padding: 12px 14px 14px 14px;
+            box-shadow: 0 10px 26px rgba(15, 23, 42, 0.22);
+        }
+        div[data-testid="column"]:has(.dca-filter-panel-marker) label,
+        div[data-testid="column"]:has(.dca-filter-panel-marker) p,
+        div[data-testid="column"]:has(.dca-filter-panel-marker) span,
+        div[data-testid="stColumn"]:has(.dca-filter-panel-marker) label,
+        div[data-testid="stColumn"]:has(.dca-filter-panel-marker) p,
+        div[data-testid="stColumn"]:has(.dca-filter-panel-marker) span {
+            color: #E5E7EB !important;
+            font-family: "Segoe UI", Arial, sans-serif;
+            font-size: 13px;
+            font-weight: 650;
+        }
+        .dca-panel-title {
+            background: #20262D;
+            border: 1px solid #111827;
+            border-radius: 8px;
+            color: #E5E7EB;
+            font-size: 15px;
+            font-weight: 850;
+            padding: 9px 10px;
+            margin-bottom: 10px;
+        }
+        .dca-panel-section {
+            color: #AEB7C2;
+            font-size: 10px;
+            font-weight: 850;
+            text-transform: uppercase;
+            letter-spacing: .7px;
+            margin: 12px 0 7px 2px;
+        }
+        .dca-kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 12px;
+            margin: 12px 0 14px 0;
+        }
+        .dca-kpi-card {
+            background: linear-gradient(180deg, #FFFFFF 0%, #F8FAFC 100%);
+            border: 1px solid #D8DEE9;
+            border-radius: 13px;
+            padding: 13px 14px;
+            box-shadow: 0 7px 18px rgba(15, 23, 42, 0.08);
+        }
+        .dca-kpi-label {
+            color: #64748B;
+            font-size: 11px;
+            font-weight: 850;
+            text-transform: uppercase;
+            letter-spacing: .6px;
+            margin-bottom: 5px;
+            font-family: "Segoe UI", Arial, sans-serif;
+        }
+        .dca-kpi-value {
+            color: #111827;
+            font-size: 22px;
+            font-weight: 900;
+            font-family: "Segoe UI", Arial, sans-serif;
+        }
+        .dca-section-card {
+            background: #FFFFFF;
+            border: 1px solid #D8DEE9;
+            border-radius: 14px;
+            padding: 14px 16px;
+            margin: 14px 0 12px 0;
+            box-shadow: 0 8px 22px rgba(15, 23, 42, .07);
+        }
+        .dca-section-title {
+            color: #111827;
+            font-size: 17px;
+            font-weight: 900;
+            font-family: "Segoe UI", Arial, sans-serif;
+            margin-bottom: 4px;
+        }
+        .dca-section-subtitle {
+            color: #64748B;
+            font-size: 12px;
+            font-family: "Segoe UI", Arial, sans-serif;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+    panel_dca, cuerpo_dca = st.columns([0.24, 0.76], gap="large")
+    with panel_dca:
+        st.markdown('<div class="dca-filter-panel-marker"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="dca-panel-title">Declinacion</div>', unsafe_allow_html=True)
+        st.markdown('<div class="dca-panel-section">Filtros</div>', unsafe_allow_html=True)
+        mes_ref = st.date_input(
+            "Mes de operacion referencia",
+            value=mes_default.date(),
+            key="dca_mes_operando"
+        )
+        mes_ref = pd.Timestamp(mes_ref).to_period("M").to_timestamp()
+        meses_ajuste = st.number_input(
+            "Meses para ajuste",
+            min_value=3,
+            max_value=360,
+            value=12,
+            step=1,
+            key="dca_meses_ajuste"
+        )
+        meses_pronostico = st.number_input(
+            "Meses de extension",
+            min_value=0,
+            max_value=120,
+            value=24,
+            step=1,
+            key="dca_meses_pronostico"
+        )
+        min_puntos = st.number_input(
+            "Minimo puntos ajuste",
+            min_value=2,
+            max_value=24,
+            value=4,
+            step=1,
+            key="dca_min_puntos"
+        )
+        st.markdown('<div class="dca-panel-section">Ajuste manual</div>', unsafe_allow_html=True)
+        ajuste_di_panel = st.empty()
+        st.caption("Comingled consolidado por POZO fisico.")
+
+    with cuerpo_dca:
+        prod_f = prod.copy()
+        operando_mes = prod_f[
+            (prod_f["MES"] == mes_ref) &
+            (prod_f[COL_ACEITE_BBL] > 0) &
+            (prod_f[COL_QO] > 0)
+        ].copy()
+        pozos_operando = sorted(operando_mes[COL_POZO].dropna().astype(str).unique())
+
+        if not pozos_operando:
+            st.warning(f"No encontré pozos operando con aceite positivo en {mes_ref.strftime('%m/%Y')}.")
+            return
+
+        def _ajustar_exponencial_pozo(df_pozo: pd.DataFrame, meses_fit: int, puntos_min: int, fechas_fit_manual=None):
+            d = df_pozo.copy().sort_values(COL_FECHA)
+            d = d[(d[COL_QO] > 0) & (d[COL_ACEITE_BBL] > 0)].copy()
+            if d.empty:
+                return None, pd.DataFrame(), pd.DataFrame()
+
+            fecha_fin = d[COL_FECHA].max()
+            if fechas_fit_manual is not None and len(fechas_fit_manual) > 0:
+                fechas_fit_manual = pd.to_datetime(pd.Series(fechas_fit_manual), errors="coerce").dropna().dt.normalize()
+                fechas_fit_manual = set(fechas_fit_manual.tolist())
+                fit = d[d[COL_FECHA].dt.normalize().isin(fechas_fit_manual)].copy()
+            else:
+                fecha_ini_fit = fecha_fin.to_period("M").to_timestamp() - pd.DateOffset(months=int(meses_fit) - 1)
+                fit = d[d[COL_FECHA] >= fecha_ini_fit].copy()
+            fit = fit[(fit[COL_QO] > 0) & np.isfinite(fit[COL_QO])].copy()
+
+            if len(fit) < int(puntos_min):
+                return None, fit, pd.DataFrame()
+
+            fit = fit.sort_values(COL_FECHA).reset_index(drop=True)
+            fit["T_MES"] = (
+                (fit[COL_FECHA].dt.year - fit[COL_FECHA].iloc[0].year) * 12 +
+                (fit[COL_FECHA].dt.month - fit[COL_FECHA].iloc[0].month)
+            ).astype(float)
+
+            x = fit["T_MES"].to_numpy(dtype=float)
+            y = fit[COL_QO].to_numpy(dtype=float)
+            if len(np.unique(x)) < 2 or np.any(y <= 0):
+                return None, fit, pd.DataFrame()
+
+            pendiente, intercepto = np.polyfit(x, np.log(y), 1)
+            d_mensual = max(-float(pendiente), 0.0)
+            qi_ajuste = float(np.exp(intercepto))
+            fit["Qo ajuste (bpd)"] = qi_ajuste * np.exp(-d_mensual * fit["T_MES"])
+
+            ss_res = float(np.sum((np.log(y) - np.log(fit["Qo ajuste (bpd)"].to_numpy())) ** 2))
+            ss_tot = float(np.sum((np.log(y) - np.mean(np.log(y))) ** 2))
+            r2_log = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+
+            ultima_fecha = d[COL_FECHA].max().to_period("M").to_timestamp()
+            fecha_fit_ini = fit[COL_FECHA].iloc[0].to_period("M").to_timestamp()
+            meses_total = int(((ultima_fecha.year - fecha_fit_ini.year) * 12) + (ultima_fecha.month - fecha_fit_ini.month))
+            meses_curva = list(range(0, meses_total + int(meses_pronostico) + 1))
+            curva = pd.DataFrame({
+                COL_FECHA: [fecha_fit_ini + pd.DateOffset(months=m) for m in meses_curva],
+                "T_MES": meses_curva,
+            })
+            curva["Qo ajuste (bpd)"] = qi_ajuste * np.exp(-d_mensual * curva["T_MES"])
+            curva["TIPO_CURVA"] = np.where(curva[COL_FECHA] <= ultima_fecha, "Ajuste histórico", "Extensión")
+
+            info = {
+                "Pozo": str(df_pozo[COL_POZO].iloc[0]),
+                "Yacimiento": str(df_pozo[COL_YAC].iloc[0]),
+                "Fecha última producción": fecha_fin,
+                "Qo última producción (bpd)": float(d.sort_values(COL_FECHA)[COL_QO].iloc[-1]),
+                "Fecha inicio ajuste": fit[COL_FECHA].min(),
+                "Fecha fin ajuste": fit[COL_FECHA].max(),
+                "Puntos ajuste": int(len(fit)),
+                "Qi ajuste (bpd)": qi_ajuste,
+                "Di mensual nominal": d_mensual,
+                "Di mensual nominal (%)": d_mensual * 100.0,
+                "Di anual equivalente (%)": (1.0 - np.exp(-12.0 * d_mensual)) * 100.0,
+                "R2 log": r2_log,
+                "Modelo": "Arps exponencial, b=0",
+            }
+            return info, fit, curva
+
+        col_sel_pozo, col_metricas = st.columns([1.4, 2.2])
+        with col_sel_pozo:
+            pozo_sel = st.selectbox(
+                "Pozo operando",
+                pozos_operando,
+                key="dca_pozo_sel"
+            )
+        with col_metricas:
+            st.markdown(
+                f"""
+                <div class="dca-kpi-grid" style="grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 0;">
+                    <div class="dca-kpi-card">
+                        <div class="dca-kpi-label">Pozos operando</div>
+                        <div class="dca-kpi-value">{len(pozos_operando):,.0f}</div>
+                    </div>
+                    <div class="dca-kpi-card">
+                        <div class="dca-kpi-label">Mes referencia</div>
+                        <div class="dca-kpi-value">{mes_ref.strftime("%m/%Y")}</div>
+                    </div>
+                    <div class="dca-kpi-card">
+                        <div class="dca-kpi-label">Ventana ajuste</div>
+                        <div class="dca-kpi-value">{int(meses_ajuste)} meses</div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+        df_pozo = prod_f[prod_f[COL_POZO].astype(str) == str(pozo_sel)].copy()
+        hist = df_pozo[(df_pozo[COL_QO] > 0) & (df_pozo[COL_ACEITE_BBL] > 0)].sort_values(COL_FECHA).copy()
+
+        info_sel, fit_sel, curva_sel = _ajustar_exponencial_pozo(
+            df_pozo,
+            int(meses_ajuste),
+            int(min_puntos)
+        )
+
+        if info_sel is not None and not fit_sel.empty and not curva_sel.empty:
+            di_auto_pct = float(info_sel["Di mensual nominal (%)"])
+            di_slider_max = max(10.0, min(100.0, di_auto_pct * 3.0 if di_auto_pct > 0 else 10.0))
+            with ajuste_di_panel.container():
+                st.caption(f"Di automatica: {di_auto_pct:.3f} % mensual")
+                di_manual_pct = st.slider(
+                    "Di mensual ajustada (%)",
+                    min_value=0.0,
+                    max_value=float(di_slider_max),
+                    value=float(min(max(di_auto_pct, 0.0), di_slider_max)),
+                    step=0.01,
+                    key=f"dca_di_manual_pct_{pozo_sel}"
+                )
+                qi_auto = float(info_sel["Qi ajuste (bpd)"])
+                qoi_manual = st.number_input(
+                    "Qoi ajustado (bpd)",
+                    min_value=0.01,
+                    value=max(qi_auto, 0.01),
+                    step=1.0,
+                    format="%.2f",
+                    key=f"dca_qoi_manual_{pozo_sel}",
+                    help="Gasto inicial desde el cual se acomoda verticalmente la curva de ajuste."
+                )
+
+            d_manual = float(di_manual_pct) / 100.0
+            qi_base = float(qoi_manual)
+            fit_sel = fit_sel.copy()
+            curva_sel = curva_sel.copy()
+            fit_sel["Qo ajuste (bpd)"] = qi_base * np.exp(-d_manual * fit_sel["T_MES"])
+            curva_sel["Qo ajuste (bpd)"] = qi_base * np.exp(-d_manual * curva_sel["T_MES"])
+
+            y_fit = fit_sel[COL_QO].to_numpy(dtype=float)
+            y_model = fit_sel["Qo ajuste (bpd)"].to_numpy(dtype=float)
+            valid_r2 = (y_fit > 0) & (y_model > 0) & np.isfinite(y_fit) & np.isfinite(y_model)
+            if valid_r2.sum() >= 2:
+                ss_res_manual = float(np.sum((np.log(y_fit[valid_r2]) - np.log(y_model[valid_r2])) ** 2))
+                ss_tot_manual = float(np.sum((np.log(y_fit[valid_r2]) - np.mean(np.log(y_fit[valid_r2]))) ** 2))
+                r2_manual = 1 - ss_res_manual / ss_tot_manual if ss_tot_manual > 0 else np.nan
+            else:
+                r2_manual = np.nan
+
+            info_sel = dict(info_sel)
+            info_sel["Di automatica mensual (%)"] = di_auto_pct
+            info_sel["Qi automatica (bpd)"] = qi_auto
+            info_sel["Qi ajuste (bpd)"] = qi_base
+            info_sel["Di mensual nominal"] = d_manual
+            info_sel["Di mensual nominal (%)"] = float(di_manual_pct)
+            info_sel["Di anual equivalente (%)"] = (1.0 - np.exp(-12.0 * d_manual)) * 100.0
+            info_sel["R2 log"] = r2_manual
+            info_sel["Modelo"] = "Arps exponencial, b=0 | Di y Qoi ajustados manualmente"
+        else:
+            with ajuste_di_panel.container():
+                st.caption("Sin ajuste disponible para activar los controles manuales de Di y Qoi.")
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=hist[COL_FECHA],
+            y=hist[COL_QO],
+            mode="markers",
+            name="Producción histórica Qo",
+            marker=dict(size=8, color="#16A34A", opacity=0.88, line=dict(color="white", width=1.2)),
+            hovertemplate="<b>Histórico</b><br>Fecha: %{x|%d/%m/%Y}<br>Qo: %{y:,.2f} bpd<extra></extra>"
+        ))
+
+        if info_sel is not None and not fit_sel.empty:
+            fig.add_trace(go.Scatter(
+                x=fit_sel[COL_FECHA],
+                y=fit_sel[COL_QO],
+                mode="markers",
+                name="Puntos usados en ajuste",
+                marker=dict(size=9, color="#F97316", symbol="circle-open", line=dict(width=2, color="#F97316")),
+                hovertemplate="<b>Punto ajuste</b><br>Fecha: %{x|%d/%m/%Y}<br>Qo: %{y:,.2f} bpd<extra></extra>"
+            ))
+            curva_hist = curva_sel[curva_sel["TIPO_CURVA"] == "Ajuste histórico"]
+            curva_ext = curva_sel[curva_sel["TIPO_CURVA"] == "Extensión"]
+            fig.add_trace(go.Scatter(
+                x=curva_hist[COL_FECHA],
+                y=curva_hist["Qo ajuste (bpd)"],
+                mode="lines",
+                name="Ajuste exponencial",
+                line=dict(color="#111827", width=3.5),
+                hovertemplate="<b>Ajuste</b><br>Fecha: %{x|%d/%m/%Y}<br>Qo ajuste: %{y:,.2f} bpd<extra></extra>"
+            ))
+            if not curva_ext.empty:
+                fig.add_trace(go.Scatter(
+                    x=curva_ext[COL_FECHA],
+                    y=curva_ext["Qo ajuste (bpd)"],
+                    mode="lines",
+                    name="Extensión ajuste",
+                    line=dict(color="#111827", width=2.5, dash="dash"),
+                    hovertemplate="<b>Extensión</b><br>Fecha: %{x|%d/%m/%Y}<br>Qo ajuste: %{y:,.2f} bpd<extra></extra>"
+                ))
+        else:
+            st.warning(
+                f"El pozo {pozo_sel} no tiene suficientes puntos positivos para ajustar "
+                f"con la ventana de {int(meses_ajuste)} meses y mínimo {int(min_puntos)} puntos."
+            )
+
+        fig.update_layout(
+            title=f"<b>Produccion y ajuste DCA - {pozo_sel}</b>",
+            template="plotly_white",
+            height=620,
+            hovermode="x unified",
+            margin=dict(l=70, r=35, t=80, b=70),
+            plot_bgcolor="#F8F8FF",
+            paper_bgcolor="white",
+            font=dict(family="Segoe UI, Arial", size=13, color="#111827"),
+            title_font=dict(size=22, family="Arial Black, Segoe UI", color="#111827"),
+            hoverlabel=dict(bgcolor="#252B31", font=dict(color="#FFFFFF", family="Segoe UI")),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="center",
+                x=0.5,
+                font=dict(size=12, family="Segoe UI", color="#111827")
+            )
+        )
+        fig.update_xaxes(
+            title_text="<b>Fecha</b>",
+            tickformat="%d/%m/%Y",
+            showgrid=True,
+            gridcolor="#E5E7EB",
+            showline=True,
+            linewidth=1.3,
+            linecolor="#111827",
+            mirror=True,
+            title_font=dict(size=17, family="Arial Black, Segoe UI", color="#111827"),
+            tickfont=dict(size=13, family="Segoe UI", color="#111827")
+        )
+        fig.update_yaxes(
+            title_text="<b>Qo aceite (bpd)</b>",
+            type="log",
+            showgrid=True,
+            gridcolor="#E5E7EB",
+            minor=dict(showgrid=True, gridcolor="#EEF2F7"),
+            showline=True,
+            linewidth=1.3,
+            linecolor="#111827",
+            mirror=True,
+            title_font=dict(size=17, family="Arial Black, Segoe UI", color="#111827"),
+            tickfont=dict(size=13, family="Segoe UI", color="#111827")
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        if info_sel is not None:
+            r2_txt = f"{info_sel['R2 log']:.3f}" if pd.notna(info_sel["R2 log"]) else "N/D"
+            st.markdown(
+                f"""
+                <div class="dca-kpi-grid">
+                    <div class="dca-kpi-card">
+                        <div class="dca-kpi-label">Di mensual nominal</div>
+                        <div class="dca-kpi-value">{info_sel['Di mensual nominal (%)']:.3f} %</div>
+                    </div>
+                    <div class="dca-kpi-card">
+                        <div class="dca-kpi-label">Qoi ajuste manual</div>
+                        <div class="dca-kpi-value">{info_sel['Qi ajuste (bpd)']:,.2f} bpd</div>
+                    </div>
+                    <div class="dca-kpi-card">
+                        <div class="dca-kpi-label">R2 log</div>
+                        <div class="dca-kpi-value">{r2_txt}</div>
+                    </div>
+                    <div class="dca-kpi-card">
+                        <div class="dca-kpi-label">Puntos ajuste</div>
+                        <div class="dca-kpi-value">{info_sel['Puntos ajuste']:,.0f}</div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            resumen_sel = pd.DataFrame([info_sel]).copy()
+            for col_fecha in ["Fecha última producción", "Fecha inicio ajuste", "Fecha fin ajuste"]:
+                if col_fecha in resumen_sel.columns:
+                    resumen_sel[col_fecha] = pd.to_datetime(resumen_sel[col_fecha]).dt.strftime("%d/%m/%Y")
+            st.markdown(
+                """
+                <div class="dca-section-card">
+                    <div class="dca-section-title">Resultado del pozo seleccionado</div>
+                    <div class="dca-section-subtitle">Parámetros del ajuste exponencial calculados para el pozo activo.</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+            st.dataframe(resumen_sel, use_container_width=True, hide_index=True, height=120)
+
+        st.markdown(
+            """
+            <div class="dca-section-card">
+                <div class="dca-section-title">Resultados exportables para pozos operando</div>
+                <div class="dca-section-subtitle">Para que el modulo abra rapido, el calculo masivo se ejecuta solo cuando presionas el boton.</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        calcular_exportable = st.button(
+            "Calcular ajustes para todos los pozos operando",
+            key="dca_calcular_exportable",
+            use_container_width=True
+        )
+
+        if calcular_exportable:
+            with st.spinner("Calculando ajustes DCA para pozos operando..."):
+                resultados = []
+                for pozo in pozos_operando:
+                    df_i = prod_f[prod_f[COL_POZO].astype(str) == str(pozo)].copy()
+                    info_i, _, _ = _ajustar_exponencial_pozo(df_i, int(meses_ajuste), int(min_puntos))
+                    if info_i is None:
+                        ult = df_i[df_i[COL_QO] > 0].sort_values(COL_FECHA).tail(1)
+                        resultados.append({
+                            "Pozo": pozo,
+                            "Yacimiento": df_i[COL_YAC].iloc[0] if not df_i.empty else "",
+                            "Fecha ultima produccion": ult[COL_FECHA].iloc[0] if not ult.empty else pd.NaT,
+                            "Qo ultima produccion (bpd)": ult[COL_QO].iloc[0] if not ult.empty else np.nan,
+                            "Fecha inicio ajuste": pd.NaT,
+                            "Fecha fin ajuste": pd.NaT,
+                            "Puntos ajuste": 0,
+                            "Qi ajuste (bpd)": np.nan,
+                            "Di mensual nominal": np.nan,
+                            "Di mensual nominal (%)": np.nan,
+                            "Di anual equivalente (%)": np.nan,
+                            "R2 log": np.nan,
+                            "Modelo": "Sin ajuste",
+                        })
+                    else:
+                        info_i = dict(info_i)
+                        if "Fecha última producción" in info_i:
+                            info_i["Fecha ultima produccion"] = info_i.pop("Fecha última producción")
+                        if "Qo última producción (bpd)" in info_i:
+                            info_i["Qo ultima produccion (bpd)"] = info_i.pop("Qo última producción (bpd)")
+                        resultados.append(info_i)
+
+                resultados_df = pd.DataFrame(resultados)
+                if not resultados_df.empty:
+                    resultados_df = resultados_df.sort_values(["Yacimiento", "Pozo"]).reset_index(drop=True)
+                    resultados_show = resultados_df.copy()
+                    for col_fecha in ["Fecha ultima produccion", "Fecha inicio ajuste", "Fecha fin ajuste"]:
+                        resultados_show[col_fecha] = pd.to_datetime(resultados_show[col_fecha], errors="coerce").dt.strftime("%d/%m/%Y")
+                    st.dataframe(resultados_show, use_container_width=True, height=360, hide_index=True)
+
+                    export_df = resultados_df.copy()
+                    for col_fecha in ["Fecha ultima produccion", "Fecha inicio ajuste", "Fecha fin ajuste"]:
+                        export_df[col_fecha] = pd.to_datetime(export_df[col_fecha], errors="coerce").dt.strftime("%d/%m/%Y")
+                    st.download_button(
+                        "Descargar ajustes DCA CSV",
+                        data=export_df.to_csv(index=False).encode("utf-8-sig"),
+                        file_name="ajustes_dca_pozos_operando.csv",
+                        mime="text/csv"
+                    )
+
 # =========================================================
 # SELECTOR GENERAL DE MÓDULO
 # =========================================================
@@ -12201,7 +13150,8 @@ vista = st.radio(
         "Presiones",
         "Estadística",
         "Inyección",
-        "Reservas"
+        "Reservas",
+        "Pronóstico"
     ],
     horizontal=True,
     key="vista_principal"
@@ -12212,12 +13162,13 @@ vista = st.radio(
 # =========================================================
 if vista in ["Producción por pozo", "Comparativa por pozo"]:
 
-    st.markdown("<div class='filter-box'>", unsafe_allow_html=True)
+    if vista == "Producción por pozo":
+        st.markdown("<div class='filter-box'>", unsafe_allow_html=True)
 
     if vista == "Producción por pozo":
         f1, f_modo, f2 = st.columns([1.4, 1.5, 2.1])
     else:
-        f1, f2 = st.columns([1.7, 2.3])
+        f2 = st.container()
 
     if vista == "Producción por pozo":
         with f1:
@@ -12229,14 +13180,7 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
                 key="prod_yac_sel"
             )
     else:
-        with f1:
-            yacs = sorted(df[COL_YAC].dropna().astype(str).unique())
-            yac_sel = st.multiselect(
-                "Filtro por Yacimiento",
-                yacs,
-                default=yacs,
-                key="prod_yac_sel"
-            )
+        yac_sel = None
 
     if vista == "Producción por pozo":
         with f_modo:
@@ -12252,7 +13196,7 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
     df_prod_pozo_fisico = agregar_pozo_fisico(df, df_coord)
     df_base_filtro = (
         df_prod_pozo_fisico[df_prod_pozo_fisico[COL_YAC].astype(str).isin(yac_sel)].copy()
-        if yac_sel else df_prod_pozo_fisico.copy()
+        if vista == "Producción por pozo" and yac_sel else df_prod_pozo_fisico.copy()
     )
 
     if vista == "Producción por pozo":
@@ -12295,10 +13239,10 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
                 df[COL_POZO].astype(str) == str(pozo_sel)
             ].copy()
     else:
-        with f2:
-            st.caption("Selecciona los pozos a comparar en el panel inferior.")
+        pass
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    if vista == "Producción por pozo":
+        st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================================================
 # BASE DE PRODUCCIÓN SIN FILTRO DE FECHAS
@@ -13461,7 +14405,7 @@ elif vista == "Comparativa por pozo":
 
     modo_escala = st.radio(
     "Escala de gráficos",
-    ["Semilog", "Lineal"],
+    ["Lineal", "Semilog"],
     horizontal=True
     )
 
@@ -14083,6 +15027,126 @@ elif vista == "Comparativa por pozo":
                         fig_sal.update_xaxes(range=[fecha_min, fecha_max])
 
                     st.plotly_chart(fig_sal, use_container_width=True)
+
+                    api_comp = salinidad_comp.dropna(subset=["API"]).copy()
+
+                    if not api_comp.empty:
+                        fig_api = go.Figure()
+
+                        for pozo in pozos_sel_comp:
+                            clave_pozo_api = normalizar_clave_texto(pd.Series([pozo])).iloc[0]
+                            dfi_api = api_comp[
+                                (normalizar_clave_texto(api_comp["TERMINACION"]) == clave_pozo_api) |
+                                (normalizar_clave_texto(api_comp["POZO"]) == clave_pozo_api)
+                            ].copy()
+
+                            if dfi_api.empty:
+                                continue
+
+                            dfi_api = dfi_api.sort_values("FECHA MUESTREO").reset_index(drop=True)
+
+                            if normalizar_tiempo:
+                                dfi_api[COL_TIEMPO_NORM] = range(len(dfi_api))
+                                x_values = dfi_api[COL_TIEMPO_NORM]
+                                hover_x = "Muestreo normalizado: %{x}"
+                                x_title = "Tiempo normalizado, muestreos"
+                            else:
+                                x_values = dfi_api["FECHA MUESTREO"]
+                                hover_x = "Fecha muestreo: %{x|%d/%m/%Y}"
+                                x_title = "Fecha"
+
+                            fig_api.add_trace(
+                                go.Scatter(
+                                    x=x_values,
+                                    y=dfi_api["API"],
+                                    mode="markers",
+                                    name=f"{pozo} - °API",
+                                    marker=dict(
+                                        size=8,
+                                        symbol="circle",
+                                        color=color_por_pozo_comp.get(str(pozo).strip()),
+                                        line=dict(color="black", width=0.8)
+                                    ),
+                                    customdata=dfi_api[["POZO", "FUENTE"]],
+                                    hovertemplate=
+                                        f"<b>Terminación: {pozo}</b><br>" +
+                                        "<b>Pozo:</b> %{customdata[0]}<br>" +
+                                        "<b>Fuente:</b> %{customdata[1]}<br>" +
+                                        hover_x + "<br>" +
+                                        "°API: %{y:,.2f}<extra></extra>"
+                                )
+                            )
+
+                        fig_api.update_layout(
+                            title=dict(
+                                text="<b>Densidad °API por pozo</b>",
+                                x=0.02,
+                                xanchor="left",
+                                font=dict(size=20, family="Arial Black", color="#111827")
+                            ),
+                            template="plotly_white",
+                            hovermode="x unified",
+                            height=450,
+                            plot_bgcolor="#F8F8FF",
+                            paper_bgcolor="white",
+                            font=dict(family="Arial", size=13, color="#111827"),
+                            margin=dict(l=70, r=40, t=90, b=70),
+                            legend=dict(
+                                orientation="h",
+                                yanchor="bottom",
+                                y=1.02,
+                                xanchor="center",
+                                x=0.5,
+                                font=dict(size=14, family="Arial", color="#111827"),
+                                bgcolor="rgba(255,255,255,0.8)",
+                                bordercolor="#D1D5DB",
+                                borderwidth=1
+                            )
+                        )
+
+                        fig_api.update_xaxes(
+                            title_text=f"<b>{x_title}</b>",
+                            tickformat="%d/%m/%Y" if not normalizar_tiempo else None,
+                            showgrid=True,
+                            gridcolor="#E5E7EB",
+                            gridwidth=0.7,
+                            zeroline=False,
+                            showline=True,
+                            linewidth=1.2,
+                            linecolor="#111827",
+                            mirror=True,
+                            ticks="outside",
+                            tickfont=dict(size=18, color="#111827"),
+                            title=dict(
+                                text=f"<b>{x_title}</b>",
+                                font=dict(size=18, color="#374151")
+                            ),
+                            rangeslider=dict(visible=False)
+                        )
+
+                        fig_api.update_yaxes(
+                            title_text="<b>Densidad °API</b>",
+                            showgrid=True,
+                            gridcolor="#E5E7EB",
+                            gridwidth=0.7,
+                            zeroline=False,
+                            separatethousands=True,
+                            showline=True,
+                            linewidth=1.2,
+                            linecolor="#111827",
+                            mirror=True,
+                            ticks="outside",
+                            tickfont=dict(size=18, color="#111827"),
+                            title=dict(
+                                text="<b>Densidad °API</b>",
+                                font=dict(size=18, color="#374151")
+                            )
+                        )
+
+                        if not normalizar_tiempo:
+                            fig_api.update_xaxes(range=[fecha_min, fecha_max])
+
+                        st.plotly_chart(fig_api, use_container_width=True)
                 else:
                     st.info("No hay datos de salinidad para los pozos seleccionados.")
             else:
@@ -14115,5 +15179,7 @@ elif vista == "Inyección":
     inyeccion()
 elif vista == "Reservas":
     reservas()
+elif vista == "Pronóstico":
+    pronostico_pozos_dca()
 
 #st.caption("Desarrollado en Python + Streamlit.")
