@@ -15,6 +15,7 @@ import urllib.parse
 import urllib.request
 from io import BytesIO
 
+
 # =========================================================
 # CONFIGURACIÓN GENERAL
 # =========================================================
@@ -216,8 +217,9 @@ st.markdown("""
     }
 
     /* Etiquetas seleccionadas */
-    span[data-baseweb="tag"] {
-    background-color: #1F4E79 !important;
+    [data-baseweb="tag"] {
+        background-color: #1F4E79 !important;
+        color: #FFFFFF !important;
     }
 
     /* Texto de filtros */
@@ -226,8 +228,9 @@ st.markdown("""
     }
 
     /* Botón X de cada etiqueta */
-    span[data-baseweb="tag"] svg {
+    [data-baseweb="tag"] svg {
         fill: white !important;
+        color: white !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -1566,6 +1569,13 @@ def preparar_acumuladas_mapa():
 
     prod = load_prod_calc().copy()
 
+    # Mes normalizado por pozo, con la misma logica del modulo de campanas.
+    # Se usan todos los registros reales de Produccion, no el periodo del mapa.
+    prod = prod.sort_values([COL_POZO, COL_FECHA]).copy()
+    prod["MES_PROD_MAPA"] = prod.groupby(COL_POZO).cumcount() + 1
+    prod["ACEITE_12M_BLS"] = prod[COL_ACEITE_BBL].where(prod["MES_PROD_MAPA"] <= 12, 0)
+    prod["ACEITE_60M_BLS"] = prod[COL_ACEITE_BBL].where(prod["MES_PROD_MAPA"] <= 60, 0)
+
     prod["MES_OPERANDO"] = np.where(
         (prod[COL_QO] > 0) | (prod[COL_QW] > 0) | (prod[COL_QG] > 0),
         1,
@@ -1579,6 +1589,8 @@ def preparar_acumuladas_mapa():
             WP_BLS=(COL_AGUA_BBL, "sum"),
             GP_PC=(COL_GAS_PC, "sum"),
             WINJ_BLS=(COL_INY_BBL, "sum"),
+            NP_12M_BLS=("ACEITE_12M_BLS", "sum"),
+            NP_60M_BLS=("ACEITE_60M_BLS", "sum"),
             MESES_OPERANDO=("MES_OPERANDO", "sum")
         )
     )
@@ -1787,6 +1799,61 @@ def load_term_perforados() -> pd.DataFrame:
     term["PERFORADO_TERM"] = "Sí"
 
     return term
+
+@st.cache_data(show_spinner="Cargando campañas 2011-2020 para el mapa...")
+def load_pozos_campanas_mapa() -> pd.DataFrame:
+    """Devuelve los 169 pozos y su yacimiento directamente desde TERM."""
+    term = normalizar_columnas(load_table(TABLA_TERM))
+    term = term.loc[:, ~term.columns.astype(str).str.startswith("Unnamed")]
+
+    if COL_POZO_FISICO not in term.columns:
+        return pd.DataFrame(columns=[COL_POZO_FISICO, COL_POZO, COL_YAC, "CAMPANA_ANIO", "QOI_CAMPANA"])
+
+    col_anio = next((c for c in ["AÑO", "ANO", "YEAR"] if c in term.columns), None)
+    if col_anio:
+        anio = pd.to_numeric(term[col_anio], errors="coerce")
+        term = term[anio.between(2011, 2020)].copy()
+        term["CAMPANA_ANIO"] = anio.loc[term.index].astype("Int64")
+    elif COL_FECHA in term.columns:
+        fecha = convertir_fechas(term[COL_FECHA])
+        term = term[fecha.dt.year.between(2011, 2020)].copy()
+        term["CAMPANA_ANIO"] = fecha.loc[term.index].dt.year.astype("Int64")
+    else:
+        term["CAMPANA_ANIO"] = pd.NA
+
+    term[COL_POZO_FISICO] = term[COL_POZO_FISICO].astype(str).str.strip()
+    if COL_POZO in term.columns:
+        term[COL_POZO] = term[COL_POZO].astype(str).str.strip()
+    else:
+        term[COL_POZO] = ""
+    if COL_YAC in term.columns:
+        term[COL_YAC] = term[COL_YAC].astype(str).str.strip().str.upper()
+    else:
+        term[COL_YAC] = ""
+    term["QOI_CAMPANA"] = pd.to_numeric(term["QOI"], errors="coerce") if "QOI" in term.columns else np.nan
+    return term[[COL_POZO_FISICO, COL_POZO, COL_YAC, "CAMPANA_ANIO", "QOI_CAMPANA"]].dropna(subset=[COL_POZO_FISICO]).drop_duplicates(subset=[COL_POZO_FISICO])
+
+@st.cache_data(show_spinner="Cargando RMA con Qoi para el mapa...")
+def load_pozos_rma_qoi_mapa() -> pd.DataFrame:
+    """Devuelve pozos RMA con Qoi informado y el yacimiento de la intervención."""
+    rma = normalizar_columnas(load_table(TABLA_RMA))
+    rma = rma.loc[:, ~rma.columns.astype(str).str.startswith("Unnamed")]
+    if COL_POZO_FISICO not in rma.columns or "QOI" not in rma.columns:
+        return pd.DataFrame(columns=[COL_POZO_FISICO, COL_YAC, "QOI_RMA_MAPA"])
+
+    col_yac_rma = "YACIMIENTO RMA" if "YACIMIENTO RMA" in rma.columns else COL_YAC
+    rma["QOI_RMA_MAPA"] = pd.to_numeric(rma["QOI"], errors="coerce")
+    rma = rma[rma["QOI_RMA_MAPA"].notna()].copy()
+    rma[COL_POZO_FISICO] = rma[COL_POZO_FISICO].astype(str).str.strip()
+    rma[COL_YAC] = rma[col_yac_rma].astype(str).str.strip().str.upper()
+    if COL_FECHA in rma.columns:
+        rma["_FECHA_RMA_MAPA"] = convertir_fechas(rma[COL_FECHA])
+        rma = rma.sort_values("_FECHA_RMA_MAPA")
+    return (
+        rma[[COL_POZO_FISICO, COL_YAC, "QOI_RMA_MAPA"]]
+        .dropna(subset=[COL_POZO_FISICO])
+        .drop_duplicates(subset=[COL_POZO_FISICO], keep="last")
+    )
 
 @st.cache_data(show_spinner="Cargando localizaciones...")
 def load_localizaciones() -> pd.DataFrame:
@@ -3291,7 +3358,9 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         "GP_PC",
         "WINJ_BLS",
         "MESES_OPERANDO",
-        "NP_NORM_MB"
+        "NP_NORM_MB",
+        "NP_12M_BLS",
+        "NP_60M_BLS"
     ]
 
     mapa[cols_acum] = mapa[cols_acum].fillna(0)
@@ -3443,6 +3512,36 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         "NP_NORM_MB": "orange"
     }
 
+    # Escala solicitada: azul -> cian -> verde -> amarillo -> naranja -> rojo.
+    escala_parula = [
+        [0.00, "#1600B8"],
+        [0.12, "#001CFF"],
+        [0.25, "#008CFF"],
+        [0.38, "#00E5F0"],
+        [0.50, "#42F59E"],
+        [0.62, "#C8FF35"],
+        [0.72, "#FFF000"],
+        [0.82, "#FF9A00"],
+        [0.91, "#FF2A00"],
+        [1.00, "#A80000"],
+    ]
+    escala_qoi_rangos = [
+        [0.000, "#D62728"], [0.090, "#D62728"],
+        [0.091, "#F28E2B"], [0.150, "#F28E2B"],
+        [0.151, "#2CA02C"], [0.250, "#2CA02C"],
+        [0.251, "#1F77B4"], [1.000, "#1F77B4"],
+    ]
+    escala_np_5_rangos = [
+        [0.0000, "#D62728"], [0.1100, "#D62728"],
+        [0.1133, "#F28E2B"], [0.2000, "#F28E2B"],
+        [0.2033, "#2CA02C"], [1.0000, "#2CA02C"],
+    ]
+    escala_np_5_ktia = [
+        [0.0000, "#D62728"], [0.1000, "#D62728"],
+        [0.1033, "#F28E2B"], [0.3333, "#F28E2B"],
+        [0.3367, "#2CA02C"], [1.0000, "#2CA02C"],
+    ]
+
     # =====================================================
     # FILTROS
     # =====================================================
@@ -3457,13 +3556,17 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     with c1:
         yacs_mapa = sorted(mapa[COL_YAC].dropna().astype(str).unique())
 
+        opcion_campanas_global = "Campañas 2011-2020 (169 pozos)"
+        opcion_rma_global = "RMA con Qoi (todos los yacimientos)"
         yac_mapa = st.selectbox(
             "Yacimiento del mapa",
-            options=["Todos"] + yacs_mapa,
+            options=["Todos", opcion_campanas_global, opcion_rma_global] + yacs_mapa,
             key=f"yac_mapa_burbujas_{modo_mapa}"
         )
 
     ver_todos_campo = yac_mapa == "Todos"
+    ver_rma_global = yac_mapa == opcion_rma_global
+    ver_campanas_global = yac_mapa in [opcion_campanas_global, opcion_rma_global]
     usar_panel_filtros_mapa = (not ver_todos_campo) and (not es_movil())
     solo_acum_key = f"solo_pozos_con_acum_mapa_{modo_mapa}"
     usar_listado_solo_prod = (
@@ -3676,7 +3779,9 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     "GP_PC",
                     "WINJ_BLS",
                     "MESES_OPERANDO",
-                    "NP_NORM_MB"
+                    "NP_NORM_MB",
+                    "NP_12M_BLS",
+                    "NP_60M_BLS"
                 ]
                 mapa[cols_acum_listado] = mapa[cols_acum_listado].fillna(0)
 
@@ -3690,9 +3795,63 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
                 mapa["ESTADO_MAPA"] = mapa["ESTADO"].apply(normalizar_estado)
 
-        mapa = mapa[mapa[COL_YAC].astype(str) == str(yac_mapa)].copy()
+        if ver_campanas_global:
+            fuente_historica = load_pozos_rma_qoi_mapa() if ver_rma_global else load_pozos_campanas_mapa()
+            fuente_historica = fuente_historica.rename(columns={COL_YAC: "YACIMIENTO_FUENTE"})
+            pozos_historicos = set(fuente_historica[COL_POZO_FISICO].astype(str))
+            mapa = mapa[mapa["POZO"].astype(str).str.strip().isin(pozos_historicos)].copy()
+            mapa["_TIENE_COORD"] = (
+                mapa.get("FONDO X UTM", pd.Series(index=mapa.index, dtype=float)).notna()
+                & mapa.get("FONDO Y UTM", pd.Series(index=mapa.index, dtype=float)).notna()
+            ).astype(int)
+            mapa = (
+                mapa.sort_values("_TIENE_COORD", ascending=False)
+                .drop_duplicates(subset=["POZO"], keep="first")
+                .drop(columns=["_TIENE_COORD"])
+            )
+            mapa = mapa.merge(
+                fuente_historica,
+                left_on="POZO",
+                right_on=COL_POZO_FISICO,
+                how="inner",
+                suffixes=("", "_FUENTE")
+            )
+            if not ver_rma_global:
+                # La terminacion de TERM es la llave correcta hacia Produccion.
+                # Sustituye las acumuladas de la fila de coordenadas (que puede
+                # pertenecer a otra terminacion del mismo pozo fisico).
+                cols_np_campana = ["NP_BLS", "NP_12M_BLS", "NP_60M_BLS"]
+                acum_term = acum[[COL_POZO] + cols_np_campana].copy()
+                acum_term = acum_term.rename(
+                    columns={
+                        COL_POZO: f"{COL_POZO}_FUENTE",
+                        **{col: f"{col}_TERM" for col in cols_np_campana}
+                    }
+                )
+                mapa = mapa.merge(acum_term, on=f"{COL_POZO}_FUENTE", how="left")
+                for col_np in cols_np_campana:
+                    mapa[col_np] = pd.to_numeric(mapa[f"{col_np}_TERM"], errors="coerce").fillna(0)
+                mapa = mapa.drop(columns=[f"{col}_TERM" for col in cols_np_campana])
+            yac_fuente_valido = ~mapa["YACIMIENTO_FUENTE"].isin(["", "-", "NAN", "NONE"])
+            mapa[COL_YAC] = mapa["YACIMIENTO_FUENTE"].where(yac_fuente_valido, mapa[COL_YAC])
+        else:
+            mapa = mapa[mapa[COL_YAC].astype(str) == str(yac_mapa)].copy()
 
     leyenda_estados = generar_leyenda_estados(mapa["ESTADO_MAPA"])
+    colores_yacimiento_campanas = {
+        "JSA": "#008000",
+        "KTIA": "#0066CC",
+        "KTS": "#F28C28",
+        "JAR": "#000000",
+    }
+    colores_anio_campanas = {
+        2011: "#1F77B4", 2012: "#FF7F0E", 2013: "#2CA02C",
+        2014: "#D62728", 2015: "#9467BD", 2016: "#8C564B",
+        2017: "#E377C2", 2018: "#7F7F7F", 2019: "#BCBD22",
+        2020: "#17BECF",
+    }
+    columna_color_historica = COL_YAC if ver_rma_global else "CAMPANA_ANIO"
+    colores_agrupacion_historica = colores_yacimiento_campanas if ver_rma_global else colores_anio_campanas
 
     # =====================================================
     # COORDENADAS
@@ -3729,13 +3888,15 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         for c in cols_req:
             mapa[c] = pd.to_numeric(mapa[c], errors="coerce")
 
-        # Coordenada final para graficar:
-        # Usa CIMA si existe; si no existe, usa FONDO.
-        mapa["X_MAPA"] = mapa["CIMA X UTM"].fillna(mapa["FONDO X UTM"])
-        mapa["Y_MAPA"] = mapa["CIMA Y UTM"].fillna(mapa["FONDO Y UTM"])
+        if ver_campanas_global:
+            mapa["X_MAPA"] = mapa["FONDO X UTM"]
+            mapa["Y_MAPA"] = mapa["FONDO Y UTM"]
+        else:
+            mapa["X_MAPA"] = mapa["CIMA X UTM"].fillna(mapa["FONDO X UTM"])
+            mapa["Y_MAPA"] = mapa["CIMA Y UTM"].fillna(mapa["FONDO Y UTM"])
 
         mapa["ORIGEN_COORD"] = np.where(
-            mapa["CIMA X UTM"].notna() & mapa["CIMA Y UTM"].notna(),
+            (not ver_campanas_global) & mapa["CIMA X UTM"].notna() & mapa["CIMA Y UTM"].notna(),
             "CIMA",
             "FONDO"
         )
@@ -3760,7 +3921,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         if iny.empty:
             return pd.DataFrame()
 
-        if not ver_todos_campo:
+        if not ver_todos_campo and not ver_campanas_global:
             iny = iny[
                 iny["Yacimiento"].astype(str).str.upper() == str(yac_mapa).upper()
             ].copy()
@@ -3973,7 +4134,10 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
     with control_variable_mapa:
 
-        if ver_todos_campo:
+        if ver_campanas_global:
+            variable = "YACIMIENTO_CAMPANA"
+            st.caption("RMA con Qoi · Color por yacimiento" if ver_rma_global else "Campañas 2011-2020 · Color por año")
+        elif ver_todos_campo:
 
             variable = st.selectbox(
                 "Variable de burbuja",
@@ -4101,6 +4265,16 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     mostrar_muestreos_agua = False
     fecha_inicio_muestreos_agua = None
     mostrar_perforados_term = False
+    mostrar_qoi_campana = False
+    mostrar_np_total_campana = False
+    mostrar_np_12m_campana = False
+    mostrar_np_60m_campana = False
+    anios_np_total_sel = []
+    factor_tamano_burbujas_campana = 1.0
+    usar_rangos_np_5_ktia = False
+    yacimientos_campana_sel = sorted(
+        mapa[COL_YAC].dropna().astype(str).str.upper().str.strip().unique()
+    ) if ver_campanas_global and not ver_rma_global else []
     estados_activos_mapa = set(leyenda_estados.keys())
 
     with control_opciones_mapa:
@@ -4108,7 +4282,61 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             #st.markdown("##### Opciones visuales")
             st.markdown("<div class='map-panel-section'>Filtros</div>", unsafe_allow_html=True)
 
-            if modo_mapa != "RMA":
+            if ver_campanas_global and not ver_rma_global:
+                yacimientos_campana = sorted(
+                    mapa[COL_YAC].dropna().astype(str).str.upper().str.strip().unique()
+                )
+                yacimientos_campana_sel = st.multiselect(
+                    "Yacimientos de campaña",
+                    options=yacimientos_campana,
+                    default=yacimientos_campana,
+                    key=f"yacimientos_campana_mapa_{modo_mapa}"
+                )
+                factor_tamano_burbujas_campana = st.slider(
+                    "Tamaño de burbujas (%)",
+                    min_value=40,
+                    max_value=100,
+                    value=65,
+                    step=5,
+                    key=f"tamano_burbujas_campana_mapa_{modo_mapa}"
+                ) / 100.0
+                mostrar_qoi_campana = st.checkbox(
+                    "Mostrar Qoi en burbujas",
+                    value=False,
+                    key=f"mostrar_qoi_campana_mapa_{modo_mapa}"
+                )
+                mostrar_np_total_campana = st.checkbox(
+                    "Mostrar producción acumulada total",
+                    value=False,
+                    key=f"mostrar_np_total_campana_mapa_{modo_mapa}"
+                )
+                if mostrar_np_total_campana:
+                    anios_np_total = sorted(
+                        pd.to_numeric(mapa["CAMPANA_ANIO"], errors="coerce")
+                        .dropna()
+                        .astype(int)
+                        .unique()
+                        .tolist()
+                    )
+                    anios_np_total_sel = st.multiselect(
+                        "Años de acumulada total",
+                        options=anios_np_total,
+                        default=anios_np_total,
+                        key=f"anios_np_total_campana_mapa_{modo_mapa}"
+                    )
+                mostrar_np_12m_campana = st.checkbox(
+                    "Mostrar producción acumulada de aceite a 1 año",
+                    value=False,
+                    key=f"mostrar_np_12m_campana_mapa_{modo_mapa}"
+                )
+                mostrar_np_60m_campana = st.checkbox(
+                    "Mostrar producción acumulada de aceite a 5 años",
+                    value=False,
+                    key=f"mostrar_np_60m_campana_mapa_{modo_mapa}"
+                )
+                st.caption("Los colores representan el año de la campaña.")
+
+            if modo_mapa != "RMA" and not ver_campanas_global:
                 #st.markdown("###### Pozos perforados TERM")
 
                 filtro_solo_perforados_term = st.checkbox(
@@ -4222,6 +4450,38 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 value=False,
                 disabled=ver_todos_campo,
                 key=mostrar_valores_key
+            )
+
+    if ver_campanas_global and not ver_rma_global:
+        mapa = mapa[
+            mapa[COL_YAC].astype(str).str.upper().str.strip().isin(yacimientos_campana_sel)
+        ].copy()
+        usar_rangos_np_5_ktia = {
+            str(yac).upper().strip() for yac in yacimientos_campana_sel
+        } == {"KTIA"}
+        mapa["QOI_CAMPANA"] = pd.to_numeric(mapa["QOI_CAMPANA"], errors="coerce")
+        qoi_max_campana = mapa["QOI_CAMPANA"].max()
+        mapa["SIZE_QOI_CAMPANA"] = np.where(
+            mapa["QOI_CAMPANA"].notna() & (mapa["QOI_CAMPANA"] >= 0),
+            factor_tamano_burbujas_campana * (
+                14 + (mapa["QOI_CAMPANA"].clip(lower=0) / qoi_max_campana) * 42
+                if pd.notna(qoi_max_campana) and qoi_max_campana > 0 else 14
+            ),
+            0
+        )
+        for col_valor, col_size in [
+            ("NP_BLS", "SIZE_NP_TOTAL_CAMPANA"),
+            ("NP_12M_BLS", "SIZE_NP_12M_CAMPANA"),
+            ("NP_60M_BLS", "SIZE_NP_60M_CAMPANA"),
+        ]:
+            mapa[col_valor] = pd.to_numeric(mapa[col_valor], errors="coerce").fillna(0)
+            valor_max = mapa[col_valor].max()
+            mapa[col_size] = np.where(
+                mapa[col_valor] > 0,
+                factor_tamano_burbujas_campana * (
+                    14 + (mapa[col_valor] / valor_max) * 42 if valor_max > 0 else 14
+                ),
+                0
             )
 
     if usar_panel_filtros_mapa and modo_mapa != "RMA":
@@ -4471,7 +4731,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     st.session_state[mapa_zoom_state_key] = pozo_zoom
     color_burbuja = color_variable.get(variable, "green")
 
-    if not ver_todos_campo and not animar_tiempo:
+    if not ver_todos_campo and not ver_campanas_global and not animar_tiempo:
 
         mapa[variable] = pd.to_numeric(
             mapa[variable],
@@ -4496,7 +4756,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             mapa["ETIQUETA_MAPA"] = mapa[variable].fillna(0).map(lambda x: f"{x/1000:,.1f}")
 
     else:
-        mapa["SIZE"] = 8
+        mapa["SIZE"] = 10 if ver_campanas_global else 8
         mapa["ETIQUETA_MAPA"] = ""
 
     def mostrar_tabla_pozos_mapa(datos_mapa: pd.DataFrame):
@@ -5221,7 +5481,111 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     )
                 )
 
-        if ver_todos_campo and variable == "SAP":
+        if ver_campanas_global:
+            for grupo_historico, color in colores_agrupacion_historica.items():
+                if ver_rma_global:
+                    mascara_grupo = mapa_gis[columna_color_historica].astype(str).str.upper().str.strip() == str(grupo_historico)
+                else:
+                    mascara_grupo = pd.to_numeric(mapa_gis[columna_color_historica], errors="coerce") == grupo_historico
+                tmp = mapa_gis[mascara_grupo].copy()
+                if tmp.empty:
+                    continue
+                fig_gis.add_trace(go.Scattermapbox(
+                    lat=tmp["LAT"], lon=tmp["LON"],
+                    mode="markers+text" if mostrar_nombres else "markers",
+                    text=tmp["POZO"] if mostrar_nombres else None,
+                    textposition="top center",
+                    textfont=dict(color="#000000", size=12) if not ver_rma_global else None,
+                    marker=dict(size=10, color=color),
+                    name=str(grupo_historico),
+                    customdata=tmp[["POZO", COL_YAC] + (["QOI_RMA_MAPA"] if ver_rma_global else ["CAMPANA_ANIO"])],
+                    hovertemplate=("<b>Pozo:</b> %{customdata[0]}<br><b>Yacimiento:</b> %{customdata[1]}<br><b>Qoi RMA:</b> %{customdata[2]:,.2f} bpd<extra></extra>" if ver_rma_global else "<b>Pozo:</b> %{customdata[0]}<br><b>Yacimiento:</b> %{customdata[1]}<br><b>Año:</b> %{customdata[2]}<extra></extra>"),
+                    legendgroup=f"historico_{grupo_historico}", showlegend=True
+                ))
+
+            if mostrar_qoi_campana and not ver_rma_global:
+                qoi_gis = mapa_gis[mapa_gis["SIZE_QOI_CAMPANA"] > 0].copy()
+                if not qoi_gis.empty:
+                    fig_gis.add_trace(go.Scattermapbox(
+                        lat=qoi_gis["LAT"], lon=qoi_gis["LON"], mode="markers",
+                        marker=dict(size=qoi_gis["SIZE_QOI_CAMPANA"] + 5, color="#1F2937", opacity=0.88),
+                        name="Borde Qoi", legendgroup="qoi_campana", showlegend=False,
+                        hoverinfo="skip"
+                    ))
+                    fig_gis.add_trace(go.Scattermapbox(
+                        lat=qoi_gis["LAT"], lon=qoi_gis["LON"], mode="markers",
+                        marker=dict(
+                            size=qoi_gis["SIZE_QOI_CAMPANA"],
+                            color=qoi_gis["QOI_CAMPANA"],
+                            colorscale=escala_qoi_rangos,
+                            cmin=0,
+                            cmax=1000,
+                            opacity=0.62,
+                            showscale=True,
+                            colorbar=dict(
+                                title=dict(text="Qoi [bpd]"), thickness=14,
+                                tickvals=[45, 120, 200, 625],
+                                ticktext=["0-90", "91-150", "151-250", "251-1000"]
+                            )
+                        ),
+                        name="Qoi campaña", legendgroup="qoi_campana", showlegend=True,
+                        customdata=qoi_gis[["POZO", COL_YAC, "CAMPANA_ANIO", "QOI_CAMPANA"]],
+                        hovertemplate="<b>Pozo:</b> %{customdata[0]}<br><b>Yacimiento:</b> %{customdata[1]}<br><b>Año:</b> %{customdata[2]}<br><b>Qoi:</b> %{customdata[3]:,.2f} bpd<extra></extra>"
+                    ))
+
+            acumuladas_campana = [
+                (mostrar_np_total_campana, "NP_BLS", "SIZE_NP_TOTAL_CAMPANA", "Np total", escala_parula, "#2450A4"),
+                (mostrar_np_12m_campana, "NP_12M_BLS", "SIZE_NP_12M_CAMPANA", "Np a 1 año", "Oranges", "#9A3412"),
+                (
+                    mostrar_np_60m_campana, "NP_60M_BLS", "SIZE_NP_60M_CAMPANA", "Np a 5 años",
+                    escala_np_5_ktia if usar_rangos_np_5_ktia else escala_np_5_rangos, "#1E3A8A"
+                ),
+            ]
+            for mostrar_np, col_np, col_size, etiqueta_np, escala_np, borde_np in acumuladas_campana:
+                if not mostrar_np or ver_rma_global:
+                    continue
+                np_gis = mapa_gis[mapa_gis[col_size] > 0].copy()
+                if col_np == "NP_BLS":
+                    np_gis = np_gis[
+                        pd.to_numeric(np_gis["CAMPANA_ANIO"], errors="coerce")
+                        .isin(anios_np_total_sel)
+                    ].copy()
+                if np_gis.empty:
+                    continue
+                fig_gis.add_trace(go.Scattermapbox(
+                    lat=np_gis["LAT"], lon=np_gis["LON"], mode="markers",
+                    marker=dict(
+                        size=np_gis[col_size], color=np_gis[col_np] / 1000.0,
+                        colorscale=escala_np,
+                        cmin=0 if col_np in ["NP_BLS", "NP_60M_BLS"] else None,
+                        cmax=(
+                            mapa_gis["NP_BLS"].max() / 1000.0
+                            if col_np == "NP_BLS"
+                            else (300 if col_np == "NP_60M_BLS" else None)
+                        ),
+                        opacity=0.4 if col_np == "NP_BLS" else 0.62,
+                        showscale=True,
+                        colorbar=dict(
+                            title=dict(text=f"{etiqueta_np} [mb]"), thickness=14,
+                            tickvals=(
+                                [15, 65.5, 200] if usar_rangos_np_5_ktia else [16.5, 47, 180]
+                            ) if col_np == "NP_60M_BLS" else None,
+                            ticktext=(
+                                ["0-30", "31-100", ">101"]
+                                if usar_rangos_np_5_ktia else ["0-33", "34-60", "61-300"]
+                            ) if col_np == "NP_60M_BLS" else None
+                        )
+                    ),
+                    name=etiqueta_np, legendgroup=f"{col_np}_campana", showlegend=True,
+                    customdata=np_gis[["POZO", COL_YAC, "CAMPANA_ANIO", col_np]],
+                    hovertemplate=(
+                        "<b>Pozo:</b> %{customdata[0]}<br>"
+                        "<b>Yacimiento:</b> %{customdata[1]}<br>"
+                        "<b>Año:</b> %{customdata[2]}<br>"
+                        f"<b>{etiqueta_np}:</b> %{{customdata[3]:,.0f}} bls<extra></extra>"
+                    )
+                ))
+        elif ver_todos_campo and variable == "SAP":
 
             mapa_gis["SAP_MAPA"] = (
                 mapa_gis["SAP"]
@@ -5266,7 +5630,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     )
                 )
 
-        else:
+        elif not ver_campanas_global:
 
             for estado, color in leyenda_estados.items():
 
@@ -6153,7 +6517,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
             return
 
-    if not ver_todos_campo:
+    if not ver_todos_campo and not ver_campanas_global:
 
         mapa_burb = mapa[mapa[variable] > 0].copy()
 
@@ -6199,7 +6563,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 showlegend=True
             ))
 
-    if (not ver_todos_campo) and variable == "NP_BLS" and "WINJ_BLS" in mapa.columns:
+    if (not ver_todos_campo) and (not ver_campanas_global) and variable == "NP_BLS" and "WINJ_BLS" in mapa.columns:
 
         mapa_iny = mapa[mapa["WINJ_BLS"].fillna(0) > 0].copy()
 
@@ -6277,7 +6641,112 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     # =====================================================
     # PUNTOS POR ESTADO / SAP
     # =====================================================
-    if ver_todos_campo and variable == "SAP":
+    if ver_campanas_global:
+        for grupo_historico, color in colores_agrupacion_historica.items():
+            if ver_rma_global:
+                mascara_grupo = mapa[columna_color_historica].astype(str).str.upper().str.strip() == str(grupo_historico)
+            else:
+                mascara_grupo = pd.to_numeric(mapa[columna_color_historica], errors="coerce") == grupo_historico
+            tmp = mapa[mascara_grupo].copy()
+            if tmp.empty:
+                continue
+            fig.add_trace(go.Scatter(
+                x=tmp[x_col], y=tmp[y_col], mode="markers",
+                name=str(grupo_historico),
+                marker=dict(size=10, color=color, line=dict(color="white", width=0.8)),
+                customdata=tmp[["POZO", COL_YAC] + (["QOI_RMA_MAPA"] if ver_rma_global else ["CAMPANA_ANIO"])],
+                hovertemplate=("<b>Pozo:</b> %{customdata[0]}<br><b>Yacimiento:</b> %{customdata[1]}<br><b>Qoi RMA:</b> %{customdata[2]:,.2f} bpd<extra></extra>" if ver_rma_global else "<b>Pozo:</b> %{customdata[0]}<br><b>Yacimiento:</b> %{customdata[1]}<br><b>Año:</b> %{customdata[2]}<extra></extra>"),
+                legendgroup=f"historico_{grupo_historico}", showlegend=True
+            ))
+            if mostrar_nombres:
+                fig.add_trace(go.Scatter(
+                    x=tmp[x_col], y=tmp[y_col], mode="text", text=tmp["POZO"],
+                    textposition="top center",
+                    textfont=dict(color="#000000" if not ver_rma_global else color, size=12),
+                    legendgroup=f"historico_{grupo_historico}", showlegend=False, hoverinfo="skip"
+                ))
+
+        if mostrar_qoi_campana and not ver_rma_global:
+            qoi_mapa = mapa[mapa["SIZE_QOI_CAMPANA"] > 0].copy()
+            if not qoi_mapa.empty:
+                fig.add_trace(go.Scatter(
+                    x=qoi_mapa[x_col], y=qoi_mapa[y_col], mode="markers",
+                    name="Qoi campaña",
+                    marker=dict(
+                        size=qoi_mapa["SIZE_QOI_CAMPANA"], sizemode="diameter",
+                        color=qoi_mapa["QOI_CAMPANA"],
+                        colorscale=escala_qoi_rangos,
+                        cmin=0,
+                        cmax=1000,
+                        opacity=0.62,
+                        showscale=True,
+                        colorbar=dict(
+                            title=dict(text="Qoi [bpd]"), thickness=14,
+                            tickvals=[45, 120, 200, 625],
+                            ticktext=["0-90", "91-150", "151-250", "251-1000"]
+                        ),
+                        line=dict(color="#1F2937", width=2.5)
+                    ),
+                    customdata=qoi_mapa[["POZO", COL_YAC, "CAMPANA_ANIO", "QOI_CAMPANA"]],
+                    hovertemplate="<b>Pozo:</b> %{customdata[0]}<br><b>Yacimiento:</b> %{customdata[1]}<br><b>Año:</b> %{customdata[2]}<br><b>Qoi:</b> %{customdata[3]:,.2f} bpd<extra></extra>",
+                    legendgroup="qoi_campana", showlegend=True
+                ))
+
+        acumuladas_campana = [
+            (mostrar_np_total_campana, "NP_BLS", "SIZE_NP_TOTAL_CAMPANA", "Np total", escala_parula, "#2450A4"),
+            (mostrar_np_12m_campana, "NP_12M_BLS", "SIZE_NP_12M_CAMPANA", "Np a 1 año", "Oranges", "#9A3412"),
+            (
+                mostrar_np_60m_campana, "NP_60M_BLS", "SIZE_NP_60M_CAMPANA", "Np a 5 años",
+                escala_np_5_ktia if usar_rangos_np_5_ktia else escala_np_5_rangos, "#1E3A8A"
+            ),
+        ]
+        for mostrar_np, col_np, col_size, etiqueta_np, escala_np, borde_np in acumuladas_campana:
+            if not mostrar_np or ver_rma_global:
+                continue
+            np_mapa = mapa[mapa[col_size] > 0].copy()
+            if col_np == "NP_BLS":
+                np_mapa = np_mapa[
+                    pd.to_numeric(np_mapa["CAMPANA_ANIO"], errors="coerce")
+                    .isin(anios_np_total_sel)
+                ].copy()
+            if np_mapa.empty:
+                continue
+            fig.add_trace(go.Scatter(
+                x=np_mapa[x_col], y=np_mapa[y_col], mode="markers",
+                name=etiqueta_np,
+                marker=dict(
+                    size=np_mapa[col_size], sizemode="diameter",
+                    color=np_mapa[col_np] / 1000.0, colorscale=escala_np,
+                    cmin=0 if col_np in ["NP_BLS", "NP_60M_BLS"] else None,
+                    cmax=(
+                        mapa["NP_BLS"].max() / 1000.0
+                        if col_np == "NP_BLS"
+                        else (300 if col_np == "NP_60M_BLS" else None)
+                    ),
+                    opacity=0.4 if col_np == "NP_BLS" else 0.62,
+                    showscale=True,
+                    colorbar=dict(
+                        title=dict(text=f"{etiqueta_np} [mb]"), thickness=14,
+                        tickvals=(
+                            [15, 65.5, 200] if usar_rangos_np_5_ktia else [16.5, 47, 180]
+                        ) if col_np == "NP_60M_BLS" else None,
+                        ticktext=(
+                            ["0-30", "31-100", ">101"]
+                            if usar_rangos_np_5_ktia else ["0-33", "34-60", "61-300"]
+                        ) if col_np == "NP_60M_BLS" else None
+                    ),
+                    line=dict(color=borde_np, width=2.5)
+                ),
+                customdata=np_mapa[["POZO", COL_YAC, "CAMPANA_ANIO", col_np]],
+                hovertemplate=(
+                    "<b>Pozo:</b> %{customdata[0]}<br>"
+                    "<b>Yacimiento:</b> %{customdata[1]}<br>"
+                    "<b>Año:</b> %{customdata[2]}<br>"
+                    f"<b>{etiqueta_np}:</b> %{{customdata[3]:,.0f}} bls<extra></extra>"
+                ),
+                legendgroup=f"{col_np}_campana", showlegend=True
+            ))
+    elif ver_todos_campo and variable == "SAP":
 
         mapa["SAP_MAPA"] = (
             mapa["SAP"]
@@ -6338,7 +6807,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     hoverinfo="skip"
                 ))
 
-    else:
+    elif not ver_campanas_global:
 
         for estado, color in leyenda_estados.items():
 
@@ -6906,6 +7375,17 @@ def mapa_burbujas_rma_modulo(
             + "<br>"
             + mapa_rma["ETIQUETA_VALOR"].astype(str)
         )
+        if variable == "QOI_RMA_BPD":
+            mapa_rma["COLOR_BURBUJA_RMA"] = np.select(
+                [
+                    mapa_rma["QOI_RMA_BPD"] <= 30,
+                    mapa_rma["QOI_RMA_BPD"] <= 50,
+                ],
+                ["#D62728", "#F28E2B"],
+                default="#2CA02C"
+            )
+        else:
+            mapa_rma["COLOR_BURBUJA_RMA"] = colores_variable.get(variable, "#1F77B4")
 
     fig = go.Figure()
 
@@ -6988,10 +7468,11 @@ def mapa_burbujas_rma_modulo(
             marker=dict(
                 size=mapa_rma["SIZE_BURBUJA"],
                 symbol="circle",
-                color=colores_variable.get(variable, "#1F77B4"),
+                color=mapa_rma["COLOR_BURBUJA_RMA"],
                 opacity=0.35,
-                line=dict(color=colores_variable.get(variable, "#1F77B4"), width=1.2)
+                line=dict(color=mapa_rma["COLOR_BURBUJA_RMA"], width=1.2)
             ),
+            showlegend=variable != "QOI_RMA_BPD",
             customdata=mapa_rma[custom_cols],
             hovertemplate=(
                 "<b>Pozo:</b> %{customdata[0]}<br>" +
@@ -7006,6 +7487,23 @@ def mapa_burbujas_rma_modulo(
                 "<extra></extra>"
             )
         ))
+
+        if variable == "QOI_RMA_BPD":
+            for etiqueta_qoi, color_qoi in [
+                ("Qoi 0-30 bpd", "#D62728"),
+                ("Qoi >30-50 bpd", "#F28E2B"),
+                ("Qoi >50 bpd", "#2CA02C"),
+            ]:
+                fig.add_trace(go.Scatter(
+                    x=[None], y=[None], mode="markers",
+                    name=etiqueta_qoi,
+                    marker=dict(
+                        size=12, symbol="circle", color=color_qoi,
+                        opacity=0.7, line=dict(color=color_qoi, width=1.2)
+                    ),
+                    hoverinfo="skip",
+                    showlegend=True
+                ))
 
         fig.add_trace(go.Scatter(
             x=mapa_rma["X_MAPA"],
@@ -8063,8 +8561,8 @@ def analisis_term():
                 COL_NP: ":,.1f"
             },
             color_discrete_map={
-                "TERM": "#1F77B4",       # azul
-                "Extra PROD": "#808080" # gris
+                "TERM": "#FF0000",       # pozos del filtro inicial: rojo
+                "Extra PROD": "#000000"  # pozos adicionales: negro
             },
             title=f"<b>Comportamiento de {nombre_np} por tiempo de producción</b>",
             template="plotly_white"
@@ -8074,19 +8572,14 @@ def analisis_term():
 
             if "Extra PROD" in trace.name:
 
-                trace.line.color = "gray"
-                trace.marker.color = "gray"
+                trace.line.color = "#000000"
 
             else:
 
-                trace.line.width = 2
+                trace.line.color = "#FF0000"
 
         fig4.update_traces(
-            mode="lines+markers",
-            marker=dict(
-                size=5,
-                line=dict(color="black", width=0.5)
-            ),
+            mode="lines",
             line=dict(width=2)
         )
 
