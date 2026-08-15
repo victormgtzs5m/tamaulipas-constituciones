@@ -10,7 +10,7 @@
 #matplotlib
 
 
-streamlit>=1.36
+streamlit>=1.58
 pandas>=2.0
 plotly>=5.20
 openpyxl>=3.1
