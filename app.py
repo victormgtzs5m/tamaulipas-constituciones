@@ -25,7 +25,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-st.cache_data.clear()
+#st.cache_data.clear()
 # =========================================================
 # RUTA DE LA BASE DE DATOS
 # Cambia esta ruta si tu archivo .db está en otra carpeta.
@@ -217,9 +217,14 @@ st.markdown("""
     }
 
     /* Etiquetas seleccionadas */
-    [data-baseweb="tag"] {
+    div[data-testid="stMultiSelect"] [data-baseweb="tag"],
+    div[data-testid="stMultiSelect"] [data-baseweb="tag"] > span,
+    div[data-testid="stMultiSelect"] [data-baseweb="tag"] > div,
+    div[data-testid="stMultiSelect"] span[aria-label*="close by backspace"] {
+        background: #1F4E79 !important;
         background-color: #1F4E79 !important;
         color: #FFFFFF !important;
+        border-color: #1F4E79 !important;
     }
 
     /* Texto de filtros */
@@ -228,7 +233,7 @@ st.markdown("""
     }
 
     /* Botón X de cada etiqueta */
-    [data-baseweb="tag"] svg {
+    div[data-testid="stMultiSelect"] [data-baseweb="tag"] svg {
         fill: white !important;
         color: white !important;
     }
