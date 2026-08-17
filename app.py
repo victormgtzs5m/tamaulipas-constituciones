@@ -2153,9 +2153,12 @@ def load_seguimiento_actividades(cache_version=2) -> pd.DataFrame:
 
     return seguimiento.sort_values(["POZO", "TERMINACION", "FECHA", "ACTIVIDAD"]).reset_index(drop=True)
 
-@st.cache_data(ttl=CACHE_TTL_ARCHIVOS_DINAMICOS, show_spinner=False)
-def load_salinidad(cache_version=3) -> pd.DataFrame:
-    columnas_salida = ["TERMINACION", "POZO", "FECHA MUESTREO", "SALINIDAD_PPM", "API", "FUENTE"]
+@st.cache_data(ttl=300, show_spinner=False)
+def load_salinidad(cache_version=20260816) -> pd.DataFrame:
+    columnas_salida = [
+        "TERMINACION", "POZO", "YACIMIENTO", "FECHA MUESTREO",
+        "SALINIDAD_PPM", "DENSIDAD", "API", "FUENTE"
+    ]
 
     def clave_columna(col):
         texto = "" if pd.isna(col) else str(col).strip().upper()
@@ -2199,6 +2202,7 @@ def load_salinidad(cache_version=3) -> pd.DataFrame:
         candidatos = {
             "TERMINACION": ["TERMINACION", "TERMINACIÓN", "TERM"],
             "POZO": ["POZO", "POZO FISICO", "NOMBRE POZO"],
+            "YACIMIENTO": ["YACIMIENTO", "YAC", "FORMACION"],
             "FECHA MUESTREO": [
                 "FECHA MUESTREO",
                 "FECHA MUESTRO",
@@ -2220,6 +2224,11 @@ def load_salinidad(cache_version=3) -> pd.DataFrame:
                 "ºAPI",
                 "GRADOS API",
                 "DENSIDAD API"
+            ],
+            "DENSIDAD": [
+                "DENSIDAD",
+                "DENSIDAD GR CM3",
+                "DENSIDAD G CM3"
             ],
         }
 
@@ -2243,16 +2252,27 @@ def load_salinidad(cache_version=3) -> pd.DataFrame:
 
         if "API" not in datos.columns:
             datos["API"] = np.nan
+        if "DENSIDAD" not in datos.columns:
+            datos["DENSIDAD"] = np.nan
+        if "YACIMIENTO" not in datos.columns:
+            datos["YACIMIENTO"] = ""
 
-        datos = datos[["TERMINACION", "POZO", "FECHA MUESTREO", "SALINIDAD_PPM", "API"]].copy()
+        datos = datos[
+            ["TERMINACION", "POZO", "YACIMIENTO", "FECHA MUESTREO", "SALINIDAD_PPM", "DENSIDAD", "API"]
+        ].copy()
         datos["TERMINACION"] = datos["TERMINACION"].astype(str).str.strip()
         datos["POZO"] = datos["POZO"].astype(str).str.strip()
+        datos["YACIMIENTO"] = datos["YACIMIENTO"].astype(str).str.strip().str.upper()
         datos["FECHA MUESTREO"] = convertir_fechas(datos["FECHA MUESTREO"])
         datos["SALINIDAD_PPM"] = pd.to_numeric(datos["SALINIDAD_PPM"], errors="coerce")
+        datos["DENSIDAD"] = pd.to_numeric(datos["DENSIDAD"], errors="coerce")
         datos["API"] = pd.to_numeric(datos["API"], errors="coerce")
         datos["FUENTE"] = fuente
 
-        datos = datos.dropna(subset=["TERMINACION", "POZO", "FECHA MUESTREO", "SALINIDAD_PPM"])
+        datos = datos.dropna(subset=["TERMINACION", "POZO", "FECHA MUESTREO"])
+        datos = datos[
+            datos[["SALINIDAD_PPM", "DENSIDAD", "API"]].notna().any(axis=1)
+        ].copy()
         datos = datos[
             ~datos["TERMINACION"].str.upper().isin(["", "NAN", "NONE"])
             & ~datos["POZO"].str.upper().isin(["", "NAN", "NONE"])
@@ -2261,7 +2281,10 @@ def load_salinidad(cache_version=3) -> pd.DataFrame:
         return datos[columnas_salida]
 
     try:
-        with urllib.request.urlopen(URL_SALINIDAD, timeout=30) as resp:
+        # El parámetro de versión evita que GitHub/CDN entregue una revisión
+        # anterior del Excel después de actualizarlo en el repositorio.
+        url_salinidad_actual = f"{URL_SALINIDAD}?v={cache_version}"
+        with urllib.request.urlopen(url_salinidad_actual, timeout=30) as resp:
             contenido_bytes = resp.read()
 
         excel_salinidad = pd.ExcelFile(BytesIO(contenido_bytes))
@@ -2787,6 +2810,45 @@ def seleccionar_presiones_mapa(
 
     return pd.DataFrame(salida)
 
+
+def seleccionar_muestras_aceite_mapa(
+    muestras: pd.DataFrame,
+    fecha_ref,
+    columnas_valor=("SALINIDAD_PPM", "API"),
+    dias_promedio=30,
+    ventana_anios_ultima=7
+) -> pd.DataFrame:
+    """Selecciona la última campaña de muestras y promedia ±30 días por terminación."""
+    datos = muestras.copy()
+    fecha_ref = pd.to_datetime(fecha_ref).normalize()
+    fecha_min = fecha_ref - pd.DateOffset(years=ventana_anios_ultima)
+    datos["FECHA MUESTREO"] = pd.to_datetime(datos["FECHA MUESTREO"], errors="coerce")
+    datos = datos[
+        datos["FECHA MUESTREO"].between(fecha_min, fecha_ref)
+    ].copy()
+
+    if datos.empty:
+        return pd.DataFrame()
+
+    salida = []
+    for (terminacion, yacimiento), grupo in datos.groupby(["TERMINACION", "YACIMIENTO"]):
+        fecha_base = grupo["FECHA MUESTREO"].max()
+        cercanas = grupo[
+            (grupo["FECHA MUESTREO"] - fecha_base).abs().dt.days <= dias_promedio
+        ].copy()
+        fila = {
+            "TERMINACION": terminacion,
+            "YACIMIENTO": yacimiento,
+            "POZO": cercanas["POZO"].dropna().astype(str).iloc[0],
+            "FECHA_MUESTRA_MAPA": fecha_base,
+            "N_MUESTRAS": len(cercanas),
+        }
+        for columna in columnas_valor:
+            fila[columna] = pd.to_numeric(cercanas[columna], errors="coerce").mean()
+        salida.append(fila)
+
+    return pd.DataFrame(salida)
+
 from pyproj import Transformer
 
 def convertir_utm_a_latlon(df_mapa, x_col, y_col):
@@ -3231,36 +3293,57 @@ def crear_heatmap_kriging_burbujas(
                 datos["VALOR_KRIGING"] = datos[variable]
                 unidad = ""
 
-            if len(datos) < 4:
-                st.warning(f"No hay suficientes pozos para interpolar. Pozos con dato: {len(datos)}")
+            # Varias terminaciones pueden compartir exactamente la misma cima.
+            # Kriging necesita coordenadas espaciales únicas para evitar una
+            # matriz singular; en esos casos usamos el promedio en la coordenada.
+            datos_interp = (
+                datos.groupby([x_col, y_col], as_index=False)["VALOR_KRIGING"]
+                .mean()
+            )
+
+            if len(datos_interp) < 3:
+                st.warning(
+                    "No hay suficientes coordenadas únicas para interpolar. "
+                    f"Pozos con dato: {len(datos)} · Coordenadas únicas: {len(datos_interp)}"
+                )
                 return None
 
-            if datos["VALOR_KRIGING"].nunique() < 2:
+            if datos_interp["VALOR_KRIGING"].nunique() < 2:
                 st.warning("La variable tiene muy poca variación; por eso el mapa se ve de un solo color.")
                 return None
 
-            x = datos[x_col].values.astype(float)
-            y = datos[y_col].values.astype(float)
-            z = datos["VALOR_KRIGING"].values.astype(float)
+            x = datos_interp[x_col].values.astype(float)
+            y = datos_interp[y_col].values.astype(float)
+            z = datos_interp["VALOR_KRIGING"].values.astype(float)
 
             xi = np.linspace(contorno["X"].min(), contorno["X"].max(), grid_n)
             yi = np.linspace(contorno["Y"].min(), contorno["Y"].max(), grid_n)
 
-            OK = OrdinaryKriging(
-                x,
-                y,
-                z,
-                variogram_model="spherical",
-                verbose=False,
-                enable_plotting=False,
-                nlags=4,
-                weight=True
-            )
-
-            zi, ss = OK.execute("grid", xi, yi)
-            zi = np.array(zi, dtype=float)
-
             XI, YI = np.meshgrid(xi, yi)
+
+            try:
+                # Misma configuración visual/estadística usada por Presiones.
+                OK = OrdinaryKriging(
+                    x,
+                    y,
+                    z,
+                    variogram_model="spherical",
+                    verbose=False,
+                    enable_plotting=False,
+                    nlags=2,
+                    weight=True
+                )
+                zi, _ = OK.execute("grid", xi, yi)
+                zi = np.array(zi, dtype=float)
+            except Exception:
+                # Respaldo para distribuciones que producen una matriz singular
+                # en PyKrige. Conserva el grid en lugar de dejar el mapa vacío.
+                from scipy.interpolate import griddata
+                puntos = np.column_stack([x, y])
+                zi = griddata(puntos, z, (XI, YI), method="linear")
+                if np.isnan(zi).any():
+                    zi_nearest = griddata(puntos, z, (XI, YI), method="nearest")
+                    zi = np.where(np.isnan(zi), zi_nearest, zi)
 
             poly = MplPath(contorno[["X", "Y"]].values)
             puntos_grid = np.vstack((XI.ravel(), YI.ravel())).T
@@ -3283,7 +3366,16 @@ def crear_heatmap_kriging_burbujas(
             st.warning(f"No se pudo generar el heatmap con Kriging: {e}")
             return None
 
-def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM", pozos_destacados=None, mostrar_instalaciones_gis=False):
+def mapa_burbujas(
+    df_base: pd.DataFrame,
+    df_coord: pd.DataFrame,
+    modo_mapa="TERM",
+    pozos_destacados=None,
+    mostrar_instalaciones_gis=False,
+    incluir_campanas_global=True,
+    incluir_rma_global=True,
+    forzar_campanas_global=False
+):
     """Mapa de burbujas con opción Todos desde Operativas y mapas por yacimiento sin modificar."""
 
     st.markdown(
@@ -3558,22 +3650,48 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     else:
         c1, c2, c3, c4 = st.columns([1.3, 1.3, 1.3, 1.3])
 
-    with c1:
-        yacs_mapa = sorted(mapa[COL_YAC].dropna().astype(str).unique())
+    yacs_mapa = sorted(mapa[COL_YAC].dropna().astype(str).unique())
+    opcion_campanas_global = "Campañas 2011-2020 (169 pozos)"
+    opcion_rma_global = "RMA con Qoi (todos los yacimientos)"
 
-        opcion_campanas_global = "Campañas 2011-2020 (169 pozos)"
-        opcion_rma_global = "RMA con Qoi (todos los yacimientos)"
-        yac_mapa = st.selectbox(
-            "Yacimiento del mapa",
-            options=["Todos", opcion_campanas_global, opcion_rma_global] + yacs_mapa,
-            key=f"yac_mapa_burbujas_{modo_mapa}"
-        )
+    with c1:
+        if forzar_campanas_global:
+            yac_mapa = opcion_campanas_global
+            st.caption("Vista del mapa")
+            st.markdown(f"**{opcion_campanas_global}**")
+        else:
+            opciones_especiales = []
+            if incluir_campanas_global:
+                opciones_especiales.append(opcion_campanas_global)
+            if incluir_rma_global:
+                opciones_especiales.append(opcion_rma_global)
+            key_yac_mapa = f"yac_mapa_burbujas_{modo_mapa}"
+            if (
+                (
+                    not incluir_campanas_global
+                    and st.session_state.get(key_yac_mapa) == opcion_campanas_global
+                )
+                or (
+                    not incluir_rma_global
+                    and st.session_state.get(key_yac_mapa) == opcion_rma_global
+                )
+            ):
+                st.session_state[key_yac_mapa] = "Todos"
+            yac_mapa = st.selectbox(
+                "Yacimiento del mapa",
+                options=["Todos"] + opciones_especiales + yacs_mapa,
+                key=key_yac_mapa
+            )
 
     ver_todos_campo = yac_mapa == "Todos"
     ver_rma_global = yac_mapa == opcion_rma_global
     ver_campanas_global = yac_mapa in [opcion_campanas_global, opcion_rma_global]
     usar_panel_filtros_mapa = (not ver_todos_campo) and (not es_movil())
     solo_acum_key = f"solo_pozos_con_acum_mapa_{modo_mapa}"
+    mostrar_valores_key = f"mostrar_valores_burbujas_{modo_mapa}"
+    if forzar_campanas_global:
+        st.session_state[solo_acum_key] = False
+        st.session_state[mostrar_valores_key] = False
     usar_listado_solo_prod = (
         not ver_todos_campo
         and modo_mapa != "RMA"
@@ -4087,6 +4205,8 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     tipo_mapa_key = f"tipo_mapa_burbujas_{modo_mapa}_{yac_mapa}"
     solo_acum_key = f"solo_pozos_con_acum_mapa_{modo_mapa}"
     mostrar_valores_key = f"mostrar_valores_burbujas_{modo_mapa}"
+    if forzar_campanas_global:
+        st.session_state[animar_key] = False
     animar_tiempo_activo = bool(st.session_state.get(animar_key, False)) and not ver_todos_campo
 
     if animar_tiempo_activo:
@@ -4112,23 +4232,30 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 unsafe_allow_html=True
             )
 
-            if animar_tiempo_activo:
-                opciones_tipo_mapa = ["Mapa Burbujas"]
+            if forzar_campanas_global:
+                tipo_mapa = "Mapa Burbujas"
+                st.session_state[tipo_mapa_key] = tipo_mapa
             else:
-                opciones_tipo_mapa = ["Mapa Burbujas", "Mapa GIS"]
+                if animar_tiempo_activo:
+                    opciones_tipo_mapa = ["Mapa Burbujas"]
+                else:
+                    opciones_tipo_mapa = ["Mapa Burbujas", "Mapa GIS"]
 
-            tipo_mapa = st.radio(
-                "Tipo de mapa",
-                opciones_tipo_mapa,
-                horizontal=False,
-                key=tipo_mapa_key
-            )
+                tipo_mapa = st.radio(
+                    "Tipo de mapa",
+                    opciones_tipo_mapa,
+                    horizontal=False,
+                    key=tipo_mapa_key
+                )
 
-            animar_tiempo = st.checkbox(
-                "Modo animado",
-                value=False,
-                key=animar_key
-            )
+            if forzar_campanas_global:
+                animar_tiempo = False
+            else:
+                animar_tiempo = st.checkbox(
+                    "Modo animado",
+                    value=False,
+                    key=animar_key
+                )
 
             if animar_tiempo:
                 tipo_mapa = "Mapa Burbujas"
@@ -4277,6 +4404,10 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     anios_np_total_sel = []
     factor_tamano_burbujas_campana = 1.0
     usar_rangos_np_5_ktia = False
+    mostrar_salinidad_kriging = False
+    mostrar_api_kriging = False
+    fecha_ref_muestras_mapa = None
+    muestras_aceite_yac_mapa = pd.DataFrame()
     yacimientos_campana_sel = sorted(
         mapa[COL_YAC].dropna().astype(str).str.upper().str.strip().unique()
     ) if ver_campanas_global and not ver_rma_global else []
@@ -4343,6 +4474,61 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
             if modo_mapa != "RMA" and not ver_campanas_global:
                 #st.markdown("###### Pozos perforados TERM")
+
+                if mostrar_instalaciones_gis and not ver_todos_campo:
+                    muestras_aceite_yac_mapa = load_salinidad()
+                    if not muestras_aceite_yac_mapa.empty:
+                        muestras_aceite_yac_mapa = muestras_aceite_yac_mapa[
+                            (muestras_aceite_yac_mapa["FUENTE"] == "Aceite")
+                            & (
+                                muestras_aceite_yac_mapa["YACIMIENTO"].astype(str).str.upper().str.strip()
+                                == str(yac_mapa).upper().strip()
+                            )
+                        ].copy()
+
+                    hay_salinidad_yac = (
+                        not muestras_aceite_yac_mapa.empty
+                        and pd.to_numeric(
+                            muestras_aceite_yac_mapa["SALINIDAD_PPM"], errors="coerce"
+                        ).notna().any()
+                    )
+                    hay_api_yac = (
+                        not muestras_aceite_yac_mapa.empty
+                        and pd.to_numeric(
+                            muestras_aceite_yac_mapa["API"], errors="coerce"
+                        ).notna().any()
+                    )
+
+                    mostrar_salinidad_kriging = st.checkbox(
+                        "Salinidad",
+                        value=False,
+                        disabled=not hay_salinidad_yac,
+                        key=f"mostrar_salinidad_kriging_{modo_mapa}_{yac_mapa}"
+                    )
+                    mostrar_api_kriging = st.checkbox(
+                        "Densidad °API",
+                        value=False,
+                        disabled=not hay_api_yac,
+                        key=f"mostrar_api_kriging_{modo_mapa}_{yac_mapa}"
+                    )
+
+                    if mostrar_salinidad_kriging or mostrar_api_kriging:
+                        fechas_muestras_validas = pd.to_datetime(
+                            muestras_aceite_yac_mapa["FECHA MUESTREO"], errors="coerce"
+                        ).dropna()
+                        if not fechas_muestras_validas.empty:
+                            fecha_ref_muestras_mapa = st.date_input(
+                                "Fecha referencia de muestras",
+                                value=fechas_muestras_validas.max().date(),
+                                min_value=fechas_muestras_validas.min().date(),
+                                max_value=fechas_muestras_validas.max().date(),
+                                key=f"fecha_ref_muestras_kriging_{modo_mapa}_{yac_mapa}"
+                            )
+                            # El selector de tipo de mapa ya fue creado arriba. Cambiamos
+                            # solamente la variable local para no modificar el estado del
+                            # widget durante la misma ejecución de Streamlit.
+                            tipo_mapa = "Mapa Burbujas"
+                            st.caption("Última muestra disponible · promedio ±30 días")
 
                 filtro_solo_perforados_term = st.checkbox(
                     "Solo Campañas 2011-2020",
@@ -4411,22 +4597,23 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                         key=f"fecha_inicio_muestreos_agua_{modo_mapa}"
                     )
 
-                st.markdown("Estados de pozos")
+                if not (mostrar_salinidad_kriging or mostrar_api_kriging):
+                    st.markdown("Estados de pozos")
 
-                estados_activos_mapa = set()
-                estados_panel_mapa = [
-                    (estado_key, etiqueta_estado_mapa(estado_key))
-                    for estado_key in leyenda_estados.keys()
-                ]
+                    estados_activos_mapa = set()
+                    estados_panel_mapa = [
+                        (estado_key, etiqueta_estado_mapa(estado_key))
+                        for estado_key in leyenda_estados.keys()
+                    ]
 
-                for estado_key, estado_label in estados_panel_mapa:
-                    estado_key_safe = re.sub(r"[^A-Za-z0-9_]+", "_", str(estado_key))
-                    if st.checkbox(
-                        estado_label,
-                        value=True,
-                        key=f"estado_mapa_chk_{estado_key_safe}_{modo_mapa}"
-                    ):
-                        estados_activos_mapa.add(estado_key)
+                    for estado_key, estado_label in estados_panel_mapa:
+                        estado_key_safe = re.sub(r"[^A-Za-z0-9_]+", "_", str(estado_key))
+                        if st.checkbox(
+                            estado_label,
+                            value=True,
+                            key=f"estado_mapa_chk_{estado_key_safe}_{modo_mapa}"
+                        ):
+                            estados_activos_mapa.add(estado_key)
 
                 mostrar_perforados_term = st.checkbox(
                     "Campañas 2011-2020",
@@ -4441,7 +4628,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
             value=True,
             key=f"mostrar_nombres_mapa_{modo_mapa}"
         )
-        if animar_tiempo_activo:
+        if animar_tiempo_activo or forzar_campanas_global:
             solo_pozos_con_acum = False
             mostrar_etiquetas_burbujas = False
         else:
@@ -4580,6 +4767,57 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
     lineas_2d_render = simplificar_lineas_2d_render(lineas_2d_mapa) if not lineas_2d_mapa.empty else lineas_2d_mapa
 
+    capas_muestras_kriging = []
+    conteos_muestras_kriging = {}
+    if (
+        (mostrar_salinidad_kriging or mostrar_api_kriging)
+        and fecha_ref_muestras_mapa is not None
+        and not muestras_aceite_yac_mapa.empty
+    ):
+        muestras_sel_mapa = seleccionar_muestras_aceite_mapa(
+            muestras_aceite_yac_mapa,
+            fecha_ref=fecha_ref_muestras_mapa,
+            dias_promedio=30,
+            ventana_anios_ultima=7
+        )
+        coords_muestras_mapa = (
+            mapa[[COL_POZO, x_col, y_col]]
+            .dropna(subset=[COL_POZO, x_col, y_col])
+            .drop_duplicates(subset=[COL_POZO])
+        )
+        muestras_sel_mapa = muestras_sel_mapa.merge(
+            coords_muestras_mapa,
+            on=COL_POZO,
+            how="inner"
+        )
+
+        variables_muestras = []
+        if mostrar_salinidad_kriging:
+            variables_muestras.append(("SALINIDAD_PPM", "Salinidad", "ppm", "Turbo"))
+        if mostrar_api_kriging:
+            variables_muestras.append(("API", "Densidad °API", "°API", "Turbo"))
+
+        for col_muestra, nombre_muestra, unidad_muestra, escala_muestra in variables_muestras:
+            valores_validos_muestra = pd.to_numeric(
+                muestras_sel_mapa[col_muestra], errors="coerce"
+            )
+            conteos_muestras_kriging[nombre_muestra] = muestras_sel_mapa.loc[
+                valores_validos_muestra.notna() & (valores_validos_muestra > 0),
+                COL_POZO
+            ].dropna().astype(str).nunique()
+            resultado_muestra = crear_heatmap_kriging_burbujas(
+                mapa=muestras_sel_mapa,
+                contorno=contorno,
+                x_col=x_col,
+                y_col=y_col,
+                variable=col_muestra,
+                grid_n=180
+            )
+            if resultado_muestra is not None:
+                capas_muestras_kriging.append(
+                    (nombre_muestra, unidad_muestra, escala_muestra, resultado_muestra)
+                )
+
     if "NP_BLS" in mapa.columns:
         pozos_np_mapa = mapa.loc[
             pd.to_numeric(mapa["NP_BLS"], errors="coerce").fillna(0) > 0,
@@ -4600,31 +4838,46 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
         ("Productores Históricos", pozos_np_mapa, "green"),
         ("Inyectores Históricos", pozos_iny_mapa, "blue"),
     ]
+    if mostrar_salinidad_kriging:
+        contadores_mapa.append(
+            ("Pozos Kriging Salinidad", conteos_muestras_kriging.get("Salinidad", 0), "#DC2626")
+        )
+    if mostrar_api_kriging:
+        contadores_mapa.append(
+            ("Pozos Kriging API", conteos_muestras_kriging.get("Densidad °API", 0), "#7C3AED")
+        )
 
     with resumen_tipo_mapa:
         if not usar_panel_filtros_mapa:
             c6_tipo, *columnas_contadores = st.columns([2.4] + [1] * len(contadores_mapa))
             with c6_tipo:
-                if ver_todos_campo:
-                    opciones_tipo_mapa = ["Mapa GIS"]
-                elif animar_tiempo_activo:
-                    opciones_tipo_mapa = ["Mapa Burbujas"]
+                if forzar_campanas_global:
+                    tipo_mapa = "Mapa Burbujas"
+                    st.session_state[tipo_mapa_key] = tipo_mapa
                 else:
-                    opciones_tipo_mapa = ["Mapa Burbujas", "Mapa GIS"]
+                    if ver_todos_campo:
+                        opciones_tipo_mapa = ["Mapa GIS"]
+                    elif animar_tiempo_activo:
+                        opciones_tipo_mapa = ["Mapa Burbujas"]
+                    else:
+                        opciones_tipo_mapa = ["Mapa Burbujas", "Mapa GIS"]
 
-                tipo_mapa = st.radio(
-                    "Tipo de mapa",
-                    opciones_tipo_mapa,
-                    horizontal=True,
-                    key=tipo_mapa_key
-                )
+                    tipo_mapa = st.radio(
+                        "Tipo de mapa",
+                        opciones_tipo_mapa,
+                        horizontal=True,
+                        key=tipo_mapa_key
+                    )
 
-                animar_tiempo = st.checkbox(
-                    "Modo animado",
-                    value=False,
-                    disabled=ver_todos_campo,
-                    key=animar_key
-                )
+                if forzar_campanas_global:
+                    animar_tiempo = False
+                else:
+                    animar_tiempo = st.checkbox(
+                        "Modo animado",
+                        value=False,
+                        disabled=ver_todos_campo,
+                        key=animar_key
+                    )
 
                 if animar_tiempo and not ver_todos_campo:
                     tipo_mapa = "Mapa Burbujas"
@@ -5927,6 +6180,77 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
     # =====================================================
     fig = go.Figure()
 
+    # En los mapas de muestras se muestran todos los pozos del yacimiento con
+    # una simbología neutra. Los pozos usados por el kriging se superponen
+    # después, coloreados por el valor de la muestra.
+    if mostrar_salinidad_kriging or mostrar_api_kriging:
+        pozos_base_muestras = mapa.dropna(subset=[x_col, y_col]).drop_duplicates(subset=[COL_POZO])
+        fig.add_trace(go.Scatter(
+            x=pozos_base_muestras[x_col],
+            y=pozos_base_muestras[y_col],
+            mode="markers+text" if mostrar_nombres else "markers",
+            text=pozos_base_muestras[COL_POZO] if mostrar_nombres else None,
+            textposition="top center",
+            textfont=dict(size=10, color="black", family="Arial"),
+            marker=dict(size=7, color="#D1D5DB", line=dict(color="#4B5563", width=1)),
+            name="Pozos del yacimiento",
+            customdata=pozos_base_muestras[[COL_POZO, COL_YAC]],
+            hovertemplate=(
+                "<b>Pozo:</b> %{customdata[0]}<br>"
+                "<b>Yacimiento:</b> %{customdata[1]}<extra></extra>"
+            )
+        ))
+
+    for idx_capa, (nombre_muestra, unidad_muestra, escala_muestra, resultado_muestra) in enumerate(capas_muestras_kriging):
+        xi_m, yi_m, zi_m, datos_m, zmin_m, zmax_m, _ = resultado_muestra
+        fig.add_trace(go.Contour(
+            x=xi_m,
+            y=yi_m,
+            z=zi_m,
+            zmin=zmin_m,
+            zmax=zmax_m,
+            colorscale=escala_muestra,
+            opacity=0.72,
+            contours=dict(coloring="heatmap", showlines=False, showlabels=False),
+            line=dict(width=0),
+            colorbar=dict(
+                title=f"{nombre_muestra} [{unidad_muestra}]",
+                x=1.02 - (idx_capa * 0.10),
+                thickness=14
+            ),
+            name=f"Kriging {nombre_muestra}",
+            hovertemplate=(
+                f"<b>{nombre_muestra}:</b> %{{z:,.3f}} {unidad_muestra}<extra></extra>"
+            )
+        ))
+        fig.add_trace(go.Scatter(
+            x=datos_m[x_col],
+            y=datos_m[y_col],
+            mode="markers+text" if mostrar_nombres else "markers",
+            text=datos_m["POZO"] if mostrar_nombres else None,
+            textposition="top center",
+            textfont=dict(size=10, color="black", family="Arial"),
+            marker=dict(
+                size=10,
+                color=datos_m["VALOR_KRIGING"],
+                colorscale=escala_muestra,
+                cmin=zmin_m,
+                cmax=zmax_m,
+                showscale=False,
+                line=dict(color="black", width=1.5)
+            ),
+            name=f"Muestras de {nombre_muestra}",
+            customdata=datos_m[["POZO", "TERMINACION", "FECHA_MUESTRA_MAPA", "N_MUESTRAS", "VALOR_KRIGING"]],
+            hovertemplate=(
+                "<b>Pozo:</b> %{customdata[0]}<br>"
+                "<b>Terminación:</b> %{customdata[1]}<br>"
+                "<b>Fecha:</b> %{customdata[2]|%d/%m/%Y}<br>"
+                "<b>Muestras promediadas:</b> %{customdata[3]:,.0f}<br>"
+                f"<b>{nombre_muestra}:</b> %{{customdata[4]:,.3f}} {unidad_muestra}"
+                "<extra></extra>"
+            )
+        ))
+
     # =====================================================
     # HEATMAP KRIGING
     # =====================================================
@@ -6522,7 +6846,11 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
 
             return
 
-    if not ver_todos_campo and not ver_campanas_global:
+    if (
+        not ver_todos_campo
+        and not ver_campanas_global
+        and not (mostrar_salinidad_kriging or mostrar_api_kriging)
+    ):
 
         mapa_burb = mapa[mapa[variable] > 0].copy()
 
@@ -6568,7 +6896,13 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                 showlegend=True
             ))
 
-    if (not ver_todos_campo) and (not ver_campanas_global) and variable == "NP_BLS" and "WINJ_BLS" in mapa.columns:
+    if (
+        (not ver_todos_campo)
+        and (not ver_campanas_global)
+        and not (mostrar_salinidad_kriging or mostrar_api_kriging)
+        and variable == "NP_BLS"
+        and "WINJ_BLS" in mapa.columns
+    ):
 
         mapa_iny = mapa[mapa["WINJ_BLS"].fillna(0) > 0].copy()
 
@@ -6812,7 +7146,7 @@ def mapa_burbujas(df_base: pd.DataFrame, df_coord: pd.DataFrame, modo_mapa="TERM
                     hoverinfo="skip"
                 ))
 
-    elif not ver_campanas_global:
+    elif not ver_campanas_global and not (mostrar_salinidad_kriging or mostrar_api_kriging):
 
         for estado, color in leyenda_estados.items():
 
@@ -7181,11 +7515,68 @@ def mapa_burbujas_rma_modulo(
     if yac_mapa_default not in opciones_yac_mapa:
         yac_mapa_default = "Todos"
 
-    c1, c2, c3, c4 = st.columns([1.2, 1.3, 1.5, 1.3])
+    panel_filtros_rma, salida_mapa_rma = st.columns([0.24, 0.76], gap="medium")
+    with panel_filtros_rma:
+        st.markdown(
+            """
+            <div class="rma-map-filter-panel-marker"></div>
+            <div class="rma-map-panel-title">Filtros del mapa RMA</div>
+            <style>
+            div[data-testid="column"]:has(.rma-map-filter-panel-marker),
+            div[data-testid="stColumn"]:has(.rma-map-filter-panel-marker) {
+                background: linear-gradient(180deg, #2F363D 0%, #252B31 100%);
+                border: 1px solid #1F252B;
+                border-radius: 8px;
+                padding: 12px 12px 18px 12px;
+                box-shadow: 0 10px 26px rgba(15, 23, 42, 0.22);
+            }
+            div[data-testid="column"]:has(.rma-map-filter-panel-marker) .rma-map-panel-title,
+            div[data-testid="stColumn"]:has(.rma-map-filter-panel-marker) .rma-map-panel-title {
+                background: #20262D;
+                border: 1px solid #111827;
+                border-radius: 6px;
+                color: #E5E7EB;
+                font-size: 15px;
+                font-weight: 800;
+                padding: 8px 10px;
+                margin-bottom: 10px;
+            }
+            div[data-testid="column"]:has(.rma-map-filter-panel-marker) label,
+            div[data-testid="column"]:has(.rma-map-filter-panel-marker) p,
+            div[data-testid="column"]:has(.rma-map-filter-panel-marker) span,
+            div[data-testid="stColumn"]:has(.rma-map-filter-panel-marker) label,
+            div[data-testid="stColumn"]:has(.rma-map-filter-panel-marker) p,
+            div[data-testid="stColumn"]:has(.rma-map-filter-panel-marker) span {
+                color: #FFFFFF !important;
+                font-family: "Segoe UI", Arial, sans-serif;
+                font-size: 12px;
+            }
+            div[data-testid="column"]:has(.rma-map-filter-panel-marker) div[data-baseweb="select"] > div,
+            div[data-testid="stColumn"]:has(.rma-map-filter-panel-marker) div[data-baseweb="select"] > div {
+                background-color: #1F252B !important;
+                border-color: #4B5563 !important;
+            }
+            div[data-testid="column"]:has(.rma-map-filter-panel-marker) div[data-baseweb="select"] div,
+            div[data-testid="column"]:has(.rma-map-filter-panel-marker) div[data-baseweb="select"] input,
+            div[data-testid="stColumn"]:has(.rma-map-filter-panel-marker) div[data-baseweb="select"] div,
+            div[data-testid="stColumn"]:has(.rma-map-filter-panel-marker) div[data-baseweb="select"] input {
+                color: #FFFFFF !important;
+                -webkit-text-fill-color: #FFFFFF !important;
+            }
+            div[data-testid="column"]:has(.rma-map-filter-panel-marker) div[data-baseweb="select"] svg,
+            div[data-testid="stColumn"]:has(.rma-map-filter-panel-marker) div[data-baseweb="select"] svg {
+                color: #FFFFFF !important;
+                fill: #FFFFFF !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
+
     key_yac_mapa_rma = "rma_mapa_yacimiento"
     st.session_state[key_yac_mapa_rma] = yac_mapa_default
 
-    with c1:
+    with panel_filtros_rma:
         yac_mapa = st.selectbox(
             "Yacimiento del mapa",
             opciones_yac_mapa,
@@ -7303,7 +7694,7 @@ def mapa_burbujas_rma_modulo(
                 suffixes=("", "_COORD")
             ).dropna(subset=["X_MAPA", "Y_MAPA"]).copy()
 
-    with c2:
+    with panel_filtros_rma:
         variable = st.selectbox(
             "Variable de burbuja",
             ["NP_RMA_MB", "QOI_RMA_BPD", "MESES_ACTIVOS_RMA"],
@@ -7315,7 +7706,7 @@ def mapa_burbujas_rma_modulo(
             key="rma_mapa_variable"
         )
 
-    with c3:
+    with panel_filtros_rma:
         alcance_mapa = st.selectbox(
             "Pozos intervenidos RMA",
             ["Solo RMA filtrados", "Todos los pozos del yacimiento"],
@@ -7342,7 +7733,7 @@ def mapa_burbujas_rma_modulo(
 
     pozos_zoom = sorted(datos_zoom["POZO_MAPA"].dropna().astype(str).unique())
 
-    with c4:
+    with panel_filtros_rma:
         pozo_zoom = st.selectbox(
             "Zoom a pozo",
             ["Todos"] + pozos_zoom,
@@ -7572,7 +7963,7 @@ def mapa_burbujas_rma_modulo(
         title=f"<b>Mapa RMA 2011-2020 - {yac_mapa}</b>",
         dragmode="pan",
         template="plotly_white",
-        height=1350,
+        height=900,
         margin=dict(l=20, r=20, t=70, b=20),
         legend=dict(
             orientation="h",
@@ -7628,7 +8019,7 @@ def mapa_burbujas_rma_modulo(
                 hovertemplate="<b>Pozo:</b> %{text}<extra></extra>"
             ))
 
-    st.plotly_chart(
+    salida_mapa_rma.plotly_chart(
         fig,
         use_container_width=True,
         config={
@@ -7649,8 +8040,8 @@ def mapa_burbujas_rma_modulo(
             "MESES_ACTIVOS_RMA",
             "RMA_EVENTOS"
         ]
-        st.markdown("<div class='section-title'>Pozos RMA mostrados en el mapa</div>", unsafe_allow_html=True)
-        st.dataframe(
+        salida_mapa_rma.markdown("<div class='section-title'>Pozos RMA mostrados en el mapa</div>", unsafe_allow_html=True)
+        salida_mapa_rma.dataframe(
             mapa_rma[[c for c in tabla_cols if c in mapa_rma.columns]]
             .rename(columns={
                 "POZO_MAPA": "Pozo / Terminacion",
@@ -9082,7 +9473,11 @@ def analisis_term():
     if df_coord_term.empty:
         st.warning("Los pozos seleccionados en TERM no tienen coordenadas en Coord.")
     else:
-        mapa_burbujas(df_mapa_term, df_coord_term)
+        mapa_burbujas(
+            df_mapa_term,
+            df_coord_term,
+            forzar_campanas_global=True
+        )
 
 @st.cache_data(show_spinner="Calculando producción total del campo...")
 def preparar_resumen_campo(df_base: pd.DataFrame):
@@ -10030,31 +10425,12 @@ def analisis_rma():
         st.warning("No hay datos con los filtros seleccionados.")
         return
 
-    col_rma_graficas, col_rma_mapa_grande = st.columns([1.35, 1], gap="medium")
-
-    with col_rma_mapa_grande:
-        df_coord_rma = df_coord.copy()
-
-        if df_coord_rma.empty:
-            st.warning("Los pozos seleccionados en RMA no tienen coordenadas en Coord.")
-        else:
-            mapa_burbujas_rma_modulo(
-                rma_f,
-                df_coord_rma,
-                col_anio,
-                col_yac,
-                col_yac_rma,
-                col_qoi,
-                col_np_rma,
-                col_meses_activos,
-                rma_solo_ubicacion=rma_solo_ubicacion_f,
-                yac_mapa_default=yac_mapa_default_rma
-            )
+    df_coord_rma = df_coord.copy()
 
     # =========================
     # MÉTRICAS
     # =========================
-    m1, m2 = col_rma_graficas.columns(2)
+    m1, m2 = st.columns(2)
 
     m1.metric("RMA analizadas", f"{rma_f[COL_POZO].nunique():,.0f}")
     m2.metric("Qoi promedio", f"{rma_f[col_qoi].mean():,.1f} bpd")
@@ -10141,7 +10517,7 @@ def analisis_rma():
         tickfont=dict(size=12, color="black", family="Arial Black")
     )
 
-    col_rma_graficas.plotly_chart(fig1, use_container_width=True)
+    st.plotly_chart(fig1, use_container_width=True)
 
     # =========================
     # 2. QOI PROMEDIO POR AÑO
@@ -10344,7 +10720,7 @@ def analisis_rma():
         tickfont=dict(size=12, color="black", family="Arial Black")
     )
 
-    colg1, colg2 = col_rma_graficas.columns(2)
+    colg1, colg2 = st.columns(2)
 
     with colg1:
         st.plotly_chart(fig2, use_container_width=True)
@@ -10502,7 +10878,7 @@ def analisis_rma():
         tickfont=dict(size=12, color="black", family="Arial Black")
     )
 
-    col_rma_graficas.plotly_chart(fig4, use_container_width=True)
+    st.plotly_chart(fig4, use_container_width=True)
 
     # =========================
     # 5. NP PROMEDIO
@@ -10704,13 +11080,32 @@ def analisis_rma():
         tickfont=dict(size=12, color="black", family="Arial Black")
     )
 
-    colnp1, colnp2 = col_rma_graficas.columns(2)
+    colnp1, colnp2 = st.columns(2)
 
     with colnp1:
         st.plotly_chart(fig5, use_container_width=True)
 
     with colnp2:
         st.plotly_chart(fig6, use_container_width=True)
+
+    # =========================
+    # MAPA RMA AL FINAL DEL MODULO
+    # =========================
+    if df_coord_rma.empty:
+        st.warning("Los pozos seleccionados en RMA no tienen coordenadas en Coord.")
+    else:
+        mapa_burbujas_rma_modulo(
+            rma_f,
+            df_coord_rma,
+            col_anio,
+            col_yac,
+            col_yac_rma,
+            col_qoi,
+            col_np_rma,
+            col_meses_activos,
+            rma_solo_ubicacion=rma_solo_ubicacion_f,
+            yac_mapa_default=yac_mapa_default_rma
+        )
 
 
 def mapa_presion():
@@ -10857,6 +11252,12 @@ def mapa_presion():
         )
 
         st.markdown("<div class='presion-panel-section'>Filtros</div>", unsafe_allow_html=True)
+
+        mostrar_pozos_all_presion = st.checkbox(
+            "Mostrar Pozos (All)",
+            value=False,
+            key="mostrar_pozos_all_mapa_presion"
+        )
 
         mostrar_np = st.checkbox(
             "Producción Acumulada Aceite (mb)",
@@ -11040,6 +11441,32 @@ def mapa_presion():
     mapa_todos = mapa_todos.dropna(
         subset=["CIMA X UTM", "CIMA Y UTM"]
     )
+
+    # Capa adicional equivalente a "Mostrar Pozos (All)" del módulo Mapas:
+    # usa Listado para localizar las terminaciones cuya cima pertenece al
+    # yacimiento seleccionado. Se excluyen las ya presentes en Coord para no
+    # duplicar puntos ni etiquetas de la capa original.
+    mapa_pozos_all_presion = pd.DataFrame()
+    if mostrar_pozos_all_presion:
+        listado_presion = load_listado()
+        if not listado_presion.empty:
+            mapa_pozos_all_presion = listado_presion[
+                listado_presion[COL_YAC].astype(str).str.strip() == str(yac_sel).strip()
+            ].copy()
+            mapa_pozos_all_presion = mapa_pozos_all_presion.merge(
+                acum_pozos,
+                on=COL_POZO,
+                how="left"
+            )
+            mapa_pozos_all_presion[
+                ["NP_BLS", "WP_BLS", "GP_PC", "WINJ_BLS", "ULTIMA_RGA"]
+            ] = mapa_pozos_all_presion[
+                ["NP_BLS", "WP_BLS", "GP_PC", "WINJ_BLS", "ULTIMA_RGA"]
+            ].fillna(0)
+            terminaciones_coord = set(mapa_todos[COL_POZO].dropna().astype(str).str.strip())
+            mapa_pozos_all_presion = mapa_pozos_all_presion[
+                ~mapa_pozos_all_presion[COL_POZO].astype(str).str.strip().isin(terminaciones_coord)
+            ].dropna(subset=["CIMA X UTM", "CIMA Y UTM"]).copy()
 
     def preparar_localizaciones_presion(tipo_localizaciones):
         loc = load_localizaciones()
@@ -11390,6 +11817,37 @@ def mapa_presion():
             "<extra></extra>",
         showlegend=True
     ))
+
+    if mostrar_pozos_all_presion and not mapa_pozos_all_presion.empty:
+        fig.add_trace(go.Scatter(
+            x=mapa_pozos_all_presion["CIMA X UTM"],
+            y=mapa_pozos_all_presion["CIMA Y UTM"],
+            mode="markers+text",
+            text=mapa_pozos_all_presion["POZO"],
+            textposition="top center",
+            textfont=dict(size=13, color=color_etiqueta_pozo_presion, family="Arial"),
+            marker=dict(
+                size=7,
+                symbol="circle",
+                color="white",
+                line=dict(color="#1F77B4", width=1.8),
+                opacity=1
+            ),
+            name="Pozos (All) por cima",
+            customdata=mapa_pozos_all_presion[
+                ["POZO", "TERMINACION", "YACIMIENTO", "NP_BLS", "WP_BLS", "GP_PC"]
+            ],
+            hovertemplate=(
+                "<b>Pozo:</b> %{customdata[0]}<br>"
+                "<b>Terminación:</b> %{customdata[1]}<br>"
+                "<b>Yacimiento de cima:</b> %{customdata[2]}<br>"
+                "<b>Np:</b> %{customdata[3]:,.0f} bls<br>"
+                "<b>Wp:</b> %{customdata[4]:,.0f} bls<br>"
+                "<b>Gp:</b> %{customdata[5]:,.0f} pc<br>"
+                "<extra></extra>"
+            ),
+            showlegend=True
+        ))
 
     if mostrar_np:
         # =========================
@@ -11797,7 +12255,7 @@ def mapa_presion():
     fig.update_layout(
         title=f"<b>Mapa de presión - {yac_sel}</b>",
         template="plotly_white",
-        height=750,
+        height=900,
         margin=dict(l=20, r=20, t=70, b=20),
         showlegend=True,
         legend=dict(
@@ -13496,7 +13954,7 @@ st.markdown(
         box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12);
     }
     div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]),
-    div[data-testid="stRadio"]:has(input[aria-label="Mapa"]),
+    div[data-testid="stRadio"]:has(input[aria-label="Mapas"]),
     div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) {
         background: linear-gradient(90deg, #2F363D 0%, #252B31 100%);
         border: 1px solid #1F252B;
@@ -13506,7 +13964,7 @@ st.markdown(
         box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
     }
     div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) > label,
-    div[data-testid="stRadio"]:has(input[aria-label="Mapa"]) > label,
+    div[data-testid="stRadio"]:has(input[aria-label="Mapas"]) > label,
     div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) > label {
         color: #AEB7C2 !important;
         font-size: 11px;
@@ -13516,13 +13974,13 @@ st.markdown(
         margin-bottom: 8px;
     }
     div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) label,
-    div[data-testid="stRadio"]:has(input[aria-label="Mapa"]) label,
+    div[data-testid="stRadio"]:has(input[aria-label="Mapas"]) label,
     div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) label,
     div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) p,
-    div[data-testid="stRadio"]:has(input[aria-label="Mapa"]) p,
+    div[data-testid="stRadio"]:has(input[aria-label="Mapas"]) p,
     div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) p,
     div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) span,
-    div[data-testid="stRadio"]:has(input[aria-label="Mapa"]) span,
+    div[data-testid="stRadio"]:has(input[aria-label="Mapas"]) span,
     div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) span {
         color: #E5E7EB !important;
         font-family: "Segoe UI", Arial, sans-serif;
@@ -13530,14 +13988,14 @@ st.markdown(
         font-weight: 650;
     }
     div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) [role="radiogroup"],
-    div[data-testid="stRadio"]:has(input[aria-label="Mapa"]) [role="radiogroup"],
+    div[data-testid="stRadio"]:has(input[aria-label="Mapas"]) [role="radiogroup"],
     div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) [role="radiogroup"] {
         gap: 10px;
         align-items: center;
         flex-wrap: wrap;
     }
     div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) [role="radio"],
-    div[data-testid="stRadio"]:has(input[aria-label="Mapa"]) [role="radio"],
+    div[data-testid="stRadio"]:has(input[aria-label="Mapas"]) [role="radio"],
     div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) [role="radio"] {
         background: rgba(255,255,255,0.06);
         border: 1px solid rgba(255,255,255,0.10);
@@ -13546,7 +14004,7 @@ st.markdown(
         transition: all .15s ease-in-out;
     }
     div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) [role="radio"][aria-checked="true"],
-    div[data-testid="stRadio"]:has(input[aria-label="Mapa"]) [role="radio"][aria-checked="true"],
+    div[data-testid="stRadio"]:has(input[aria-label="Mapas"]) [role="radio"][aria-checked="true"],
     div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) [role="radio"][aria-checked="true"] {
         background: rgba(255,255,255,0.14);
         border-color: rgba(255,255,255,0.35);
@@ -13640,7 +14098,7 @@ vista = st.radio(
     [
         "Producción por pozo",
         "Comparativa por pozo",
-        "Mapa",
+        "Mapas",
         "Campañas 2011-2020",
         "RMA 2011-2020",
         "Operación Campo",
@@ -14024,7 +14482,10 @@ if vista == "Producción por pozo":
 # =========================================================
 # Comparativa FUNCIÓN PARA GRÁFICAS COMPARATIVAS
 # =========================================================
-def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False, normalizar_tiempo=False):
+def comparative_plot(
+    data, y_col, title, y_title, pozos_sel_comp,
+    semilog=False, normalizar_tiempo=False, rango_fechas=None
+):
 
     fig = go.Figure()
     df_promedio = pd.DataFrame()
@@ -14165,6 +14626,9 @@ def comparative_plot(data, y_col, title, y_title, pozos_sel_comp, semilog=False,
     ),
         rangeslider=dict(visible=False)
     )
+
+    if not normalizar_tiempo and rango_fechas is not None:
+        fig.update_xaxes(range=list(rango_fechas))
 
     fig.update_yaxes(
         title_text=f"<b>{y_title}</b>",
@@ -14955,6 +15419,40 @@ elif vista == "Comparativa por pozo":
                 for i, pozo in enumerate(pozos_sel_comp)
             }
 
+            # Rango temporal común para todas las gráficas de la comparativa.
+            # Incluye producción, presión, salinidad y densidad API para no
+            # ocultar mediciones posteriores al último mes de producción.
+            fechas_rango_comp = [pd.to_datetime(df_comp[COL_FECHA], errors="coerce")]
+
+            pres_comp_rango = load_presiones()
+            if not pres_comp_rango.empty and {"TERMINACION", "FECHA"}.issubset(pres_comp_rango.columns):
+                pres_comp_rango = pres_comp_rango[
+                    pres_comp_rango["TERMINACION"].astype(str).str.strip().isin(pozos_sel_comp)
+                ].copy()
+                fechas_rango_comp.append(pd.to_datetime(pres_comp_rango["FECHA"], errors="coerce"))
+
+            salinidad_comp_rango = load_salinidad() if mostrar_salinidad_comp else pd.DataFrame()
+            if not salinidad_comp_rango.empty:
+                claves_sal_term_rango = normalizar_clave_texto(salinidad_comp_rango["TERMINACION"])
+                claves_sal_pozo_rango = normalizar_clave_texto(salinidad_comp_rango["POZO"])
+                claves_sel_rango = set(normalizar_clave_texto(pd.Series(pozos_sel_comp)).tolist())
+                salinidad_comp_rango = salinidad_comp_rango[
+                    claves_sal_term_rango.isin(claves_sel_rango)
+                    | claves_sal_pozo_rango.isin(claves_sel_rango)
+                ].copy()
+                fechas_rango_comp.append(
+                    pd.to_datetime(salinidad_comp_rango["FECHA MUESTREO"], errors="coerce")
+                )
+
+            fechas_rango_validas = pd.concat(fechas_rango_comp, ignore_index=True).dropna()
+            fecha_min = fechas_rango_validas.min()
+            fecha_max = fechas_rango_validas.max()
+            margen_fecha_comp = pd.Timedelta(days=15)
+            rango_fechas_comp = (
+                fecha_min - margen_fecha_comp,
+                fecha_max + margen_fecha_comp
+            )
+
             st.plotly_chart(
                 comparative_plot(
                     df_comp,
@@ -14963,7 +15461,8 @@ elif vista == "Comparativa por pozo":
                     "Qo (bpd)",
                     pozos_sel_comp,
                     semilog=usar_semilog,
-                    normalizar_tiempo=normalizar_tiempo
+                    normalizar_tiempo=normalizar_tiempo,
+                    rango_fechas=rango_fechas_comp
                 ),
                 use_container_width=True
             )
@@ -14976,7 +15475,8 @@ elif vista == "Comparativa por pozo":
                     "RGA (pc/bl)",
                     pozos_sel_comp,
                     semilog=usar_semilog,
-                    normalizar_tiempo=normalizar_tiempo
+                    normalizar_tiempo=normalizar_tiempo,
+                    rango_fechas=rango_fechas_comp
                 ),
                 use_container_width=True
             )
@@ -15103,9 +15603,7 @@ elif vista == "Comparativa por pozo":
                 ),
             )
             if not normalizar_tiempo:
-                fecha_min = df_comp[COL_FECHA].min()
-                fecha_max = df_comp[COL_FECHA].max()
-                fig_agua.update_xaxes(range=[fecha_min, fecha_max])
+                fig_agua.update_xaxes(range=list(rango_fechas_comp))
             
             st.plotly_chart(fig_agua, use_container_width=True)
 
@@ -15230,9 +15728,7 @@ elif vista == "Comparativa por pozo":
             )
 
             if not normalizar_tiempo:
-                fecha_min = df_comp[COL_FECHA].min()
-                fecha_max = df_comp[COL_FECHA].max()
-                fig_iny.update_xaxes(range=[fecha_min, fecha_max])
+                fig_iny.update_xaxes(range=list(rango_fechas_comp))
             st.plotly_chart(fig_iny, use_container_width=True)
 
             # =========================
@@ -15356,7 +15852,7 @@ elif vista == "Comparativa por pozo":
                     )
 
                     if not normalizar_tiempo:
-                        fig_pres.update_xaxes(range=[fecha_min, fecha_max])
+                        fig_pres.update_xaxes(range=list(rango_fechas_comp))
 
                     st.plotly_chart(fig_pres, use_container_width=True)
                 else:
@@ -15522,7 +16018,7 @@ elif vista == "Comparativa por pozo":
                     )
 
                     if not normalizar_tiempo:
-                        fig_sal.update_xaxes(range=[fecha_min, fecha_max])
+                        fig_sal.update_xaxes(range=list(rango_fechas_comp))
 
                     st.plotly_chart(fig_sal, use_container_width=True)
 
@@ -15642,7 +16138,7 @@ elif vista == "Comparativa por pozo":
                         )
 
                         if not normalizar_tiempo:
-                            fig_api.update_xaxes(range=[fecha_min, fecha_max])
+                            fig_api.update_xaxes(range=list(rango_fechas_comp))
 
                         st.plotly_chart(fig_api, use_container_width=True)
                 else:
@@ -15659,8 +16155,14 @@ elif vista == "Comparativa por pozo":
 
 # VISTA MAPA DE BURBUJAS
 # =========================================================
-elif vista == "Mapa":
-    mapa_burbujas(df, df_coord, mostrar_instalaciones_gis=True)
+elif vista == "Mapas":
+    mapa_burbujas(
+        df,
+        df_coord,
+        mostrar_instalaciones_gis=True,
+        incluir_campanas_global=False,
+        incluir_rma_global=False
+    )
 elif vista == "Campañas 2011-2020":
     analisis_term()
 elif vista == "RMA 2011-2020":
