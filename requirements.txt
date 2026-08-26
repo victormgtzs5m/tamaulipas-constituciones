@@ -12,7 +12,8 @@
 
 streamlit>=1.58
 pandas>=2.0
-plotly>=5.20
+plotly==6.8.0
+#plotly>=5.20
 openpyxl>=3.1
 numpy>=1.24
 pyshp>=2.3.1
