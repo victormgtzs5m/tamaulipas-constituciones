@@ -1670,7 +1670,7 @@ def load_contorno_asignacion():
     return contorno, asignacion
 
 @st.cache_data(show_spinner="Cargando base de datos...")
-def load_data() -> pd.DataFrame:
+def load_data(cache_version=None) -> pd.DataFrame:
     """
     Carga la base original sin completar fechas.
     El visualizador trabaja solamente con los registros reales de SQLite.
@@ -1887,6 +1887,10 @@ def load_localizaciones() -> pd.DataFrame:
     loc["CATEGORIA"] = loc["CATEGORIA"].str.upper()
     loc["FONDO X"] = pd.to_numeric(loc["FONDO X"], errors="coerce")
     loc["FONDO Y"] = pd.to_numeric(loc["FONDO Y"], errors="coerce")
+    if "ANO" in loc.columns:
+        loc["ANO"] = pd.to_numeric(loc["ANO"], errors="coerce").astype("Int64")
+    else:
+        loc["ANO"] = pd.Series(pd.NA, index=loc.index, dtype="Int64")
     loc = loc.dropna(subset=["POZO", "YACIMIENTO", "FONDO X", "FONDO Y"]).copy()
 
     if "COLUMNA 1" in loc.columns:
@@ -3623,10 +3627,10 @@ def mapa_burbujas(
         [1.00, "#A80000"],
     ]
     escala_qoi_rangos = [
-        [0.000, "#D62728"], [0.090, "#D62728"],
-        [0.091, "#F28E2B"], [0.150, "#F28E2B"],
-        [0.151, "#2CA02C"], [0.250, "#2CA02C"],
-        [0.251, "#1F77B4"], [1.000, "#1F77B4"],
+        [0.000, "#D62728"], [0.050, "#D62728"],
+        [0.0501, "#F28E2B"], [0.100, "#F28E2B"],
+        [0.1001, "#2CA02C"], [0.160, "#2CA02C"],
+        [0.1601, "#1F77B4"], [1.000, "#1F77B4"],
     ]
     escala_np_5_rangos = [
         [0.0000, "#D62728"], [0.1100, "#D62728"],
@@ -3964,6 +3968,7 @@ def mapa_burbujas(
     colores_yacimiento_campanas = {
         "JSA": "#008000",
         "KTIA": "#0066CC",
+        "KTIB": "#C026D3",
         "KTS": "#F28C28",
         "JAR": "#000000",
     }
@@ -4239,7 +4244,10 @@ def mapa_burbujas(
                 if animar_tiempo_activo:
                     opciones_tipo_mapa = ["Mapa Burbujas"]
                 else:
-                    opciones_tipo_mapa = ["Mapa Burbujas", "Mapa GIS"]
+                    opciones_tipo_mapa = ["Mapa Burbujas"]
+                    if mostrar_instalaciones_gis and not ver_todos_campo:
+                        opciones_tipo_mapa.append("Mapa Grid")
+                    opciones_tipo_mapa.append("Mapa GIS")
 
                 tipo_mapa = st.radio(
                     "Tipo de mapa",
@@ -4390,6 +4398,7 @@ def mapa_burbujas(
     filtro_solo_perforados_term = False
     mostrar_localizaciones_315 = False
     mostrar_localizaciones_196 = False
+    anios_localizaciones_sel = []
     mostrar_inyectores_operando = False
     mostrar_radio_drene = False
     mostrar_lineas_2d = False
@@ -4406,6 +4415,10 @@ def mapa_burbujas(
     usar_rangos_np_5_ktia = False
     mostrar_salinidad_kriging = False
     mostrar_api_kriging = False
+    mostrar_todas_campanas_por_yacimiento = False
+    mostrar_presion_campana_kriging = False
+    fecha_ref_presion_campana = None
+    presiones_campana_mapa = pd.DataFrame()
     fecha_ref_muestras_mapa = None
     muestras_aceite_yac_mapa = pd.DataFrame()
     yacimientos_campana_sel = sorted(
@@ -4428,6 +4441,52 @@ def mapa_burbujas(
                     default=yacimientos_campana,
                     key=f"yacimientos_campana_mapa_{modo_mapa}"
                 )
+                localizaciones_campana_disponibles = load_localizaciones()
+                if not localizaciones_campana_disponibles.empty:
+                    localizaciones_campana_disponibles = localizaciones_campana_disponibles[
+                        localizaciones_campana_disponibles["YACIMIENTO"].astype(str).str.upper().str.strip()
+                        .isin({str(y).upper().strip() for y in yacimientos_campana_sel})
+                    ].copy()
+                anios_localizaciones_disponibles = sorted(
+                    pd.to_numeric(
+                        localizaciones_campana_disponibles.get("ANO", pd.Series(dtype=float)),
+                        errors="coerce"
+                    ).dropna().astype(int).unique().tolist()
+                )
+                anios_localizaciones_sel = st.multiselect(
+                    "Campañas de localizaciones",
+                    options=anios_localizaciones_disponibles,
+                    default=[],
+                    key=f"anios_localizaciones_campanas_{modo_mapa}"
+                )
+                presiones_campana_mapa = load_presiones()
+                if not presiones_campana_mapa.empty:
+                    presiones_campana_mapa = presiones_campana_mapa[
+                        presiones_campana_mapa["YACIMIENTO"].astype(str).str.upper().str.strip()
+                        .isin({str(y).upper().strip() for y in yacimientos_campana_sel})
+                    ].copy()
+                mostrar_presion_campana_kriging = st.checkbox(
+                    "Mostrar mapa de presiones",
+                    value=False,
+                    disabled=presiones_campana_mapa.empty,
+                    key=f"mostrar_presion_campana_kriging_{modo_mapa}"
+                )
+                if mostrar_presion_campana_kriging and not presiones_campana_mapa.empty:
+                    fechas_presion_campana = pd.to_datetime(
+                        presiones_campana_mapa["FECHA"], errors="coerce"
+                    ).dropna()
+                    if not fechas_presion_campana.empty:
+                        clave_yacs_presion = "_".join(sorted(
+                            str(y).upper().strip() for y in yacimientos_campana_sel
+                        )) or "sin_yacimiento"
+                        fecha_ref_presion_campana = st.date_input(
+                            "Fecha referencia de presión",
+                            value=fechas_presion_campana.max().date(),
+                            min_value=fechas_presion_campana.min().date(),
+                            max_value=fechas_presion_campana.max().date(),
+                            key=f"fecha_ref_presion_campana_{modo_mapa}_{clave_yacs_presion}"
+                        )
+                        st.caption("Última presión disponible · promedio ±30 días")
                 factor_tamano_burbujas_campana = st.slider(
                     "Tamaño de burbujas (%)",
                     min_value=40,
@@ -4470,7 +4529,21 @@ def mapa_burbujas(
                     value=False,
                     key=f"mostrar_np_60m_campana_mapa_{modo_mapa}"
                 )
-                st.caption("Los colores representan el año de la campaña.")
+                mostrar_todas_campanas_por_yacimiento = st.checkbox(
+                    "Mostrar todas las campañas por yacimiento",
+                    value=False,
+                    key=f"mostrar_todas_campanas_yacimiento_{modo_mapa}"
+                )
+                mostrar_inyectores_operando = st.checkbox(
+                    "Mostrar inyectores operando y volumen inyectado",
+                    value=False,
+                    key=f"mostrar_inyectores_operando_campanas_{modo_mapa}"
+                )
+                st.caption(
+                    "Los colores representan el yacimiento."
+                    if mostrar_todas_campanas_por_yacimiento
+                    else "Los colores representan el año de la campaña."
+                )
 
             if modo_mapa != "RMA" and not ver_campanas_global:
                 #st.markdown("###### Pozos perforados TERM")
@@ -4546,6 +4619,25 @@ def mapa_burbujas(
                     "196 Localizaciones",
                     value=False,
                     key=f"filtro_term_loc_196_chk_{modo_mapa}"
+                )
+
+                localizaciones_anios_disponibles = load_localizaciones()
+                if not localizaciones_anios_disponibles.empty and not ver_todos_campo:
+                    localizaciones_anios_disponibles = localizaciones_anios_disponibles[
+                        localizaciones_anios_disponibles["YACIMIENTO"].astype(str).str.upper().str.strip()
+                        == str(yac_mapa).upper().strip()
+                    ].copy()
+                anios_localizaciones_disponibles = sorted(
+                    pd.to_numeric(
+                        localizaciones_anios_disponibles.get("ANO", pd.Series(dtype=float)),
+                        errors="coerce"
+                    ).dropna().astype(int).unique().tolist()
+                )
+                anios_localizaciones_sel = st.multiselect(
+                    "Campañas de localizaciones",
+                    options=anios_localizaciones_disponibles,
+                    default=[],
+                    key=f"anios_localizaciones_mapa_{modo_mapa}_{yac_mapa}"
                 )
 
                 mostrar_inyectores_operando = st.checkbox(
@@ -4645,9 +4737,17 @@ def mapa_burbujas(
             )
 
     if ver_campanas_global and not ver_rma_global:
+        if mostrar_todas_campanas_por_yacimiento:
+            columna_color_historica = COL_YAC
+            colores_agrupacion_historica = colores_yacimiento_campanas
         mapa = mapa[
             mapa[COL_YAC].astype(str).str.upper().str.strip().isin(yacimientos_campana_sel)
         ].copy()
+        if not inyectores_operando_mapa.empty:
+            inyectores_operando_mapa = inyectores_operando_mapa[
+                inyectores_operando_mapa[COL_YAC].astype(str).str.upper().str.strip()
+                .isin({str(y).upper().strip() for y in yacimientos_campana_sel})
+            ].copy()
         usar_rangos_np_5_ktia = {
             str(yac).upper().strip() for yac in yacimientos_campana_sel
         } == {"KTIA"}
@@ -4704,6 +4804,49 @@ def mapa_burbujas(
                 ]
             )
             localizaciones_mapa = pd.concat(locs_panel, ignore_index=True)
+
+    if anios_localizaciones_sel:
+        localizaciones_por_anio = load_localizaciones()
+        if not localizaciones_por_anio.empty:
+            if ver_campanas_global and not ver_rma_global:
+                yacs_localizaciones_activos = {
+                    str(y).upper().strip() for y in yacimientos_campana_sel
+                }
+                localizaciones_por_anio = localizaciones_por_anio[
+                    localizaciones_por_anio["YACIMIENTO"].astype(str).str.upper().str.strip()
+                    .isin(yacs_localizaciones_activos)
+                ].copy()
+            elif not ver_todos_campo:
+                localizaciones_por_anio = localizaciones_por_anio[
+                    localizaciones_por_anio["YACIMIENTO"].astype(str).str.upper().str.strip()
+                    == str(yac_mapa).upper().strip()
+                ].copy()
+
+            localizaciones_por_anio = localizaciones_por_anio[
+                pd.to_numeric(localizaciones_por_anio["ANO"], errors="coerce")
+                .isin(anios_localizaciones_sel)
+            ].copy()
+            localizaciones_por_anio[x_col] = pd.to_numeric(
+                localizaciones_por_anio["FONDO X"], errors="coerce"
+            )
+            localizaciones_por_anio[y_col] = pd.to_numeric(
+                localizaciones_por_anio["FONDO Y"], errors="coerce"
+            )
+            localizaciones_por_anio = localizaciones_por_anio.dropna(subset=[x_col, y_col])
+            localizaciones_por_anio["COLOR_LOCALIZACION"] = (
+                localizaciones_por_anio["CATEGORIA"].map(colores_localizaciones).fillna("#7F8C8D")
+            )
+
+            if not localizaciones_por_anio.empty:
+                filtro_anios_loc = "/".join(str(a) for a in sorted(anios_localizaciones_sel))
+                filtro_localizaciones = (
+                    f"{filtro_localizaciones} · {filtro_anios_loc}"
+                    if filtro_localizaciones != "Ninguno"
+                    else filtro_anios_loc
+                )
+                localizaciones_mapa = pd.concat(
+                    [localizaciones_mapa, localizaciones_por_anio], ignore_index=True
+                ).drop_duplicates(subset=["POZO", "TERMINACION", "ANO"], keep="last")
 
     if solo_pozos_con_acum and not usar_listado_solo_prod and {"NP_BLS", "WINJ_BLS"}.issubset(mapa.columns):
         mapa = mapa[
@@ -4818,6 +4961,58 @@ def mapa_burbujas(
                     (nombre_muestra, unidad_muestra, escala_muestra, resultado_muestra)
                 )
 
+    if (
+        mostrar_presion_campana_kriging
+        and fecha_ref_presion_campana is not None
+        and not presiones_campana_mapa.empty
+    ):
+        presiones_sel_campana = seleccionar_presiones_mapa(
+            presiones_campana_mapa,
+            fecha_ref=fecha_ref_presion_campana,
+            modo_presion="Última disponible",
+            ventana_meses=24,
+            dias_promedio=30,
+            ventana_anios_ultima=7
+        )
+        if not presiones_sel_campana.empty:
+            coord_presion_campana = normalizar_columnas(coord.copy())
+            cols_coord_presion = ["TERMINACION", "CIMA X UTM", "CIMA Y UTM"]
+            if all(c in coord_presion_campana.columns for c in cols_coord_presion):
+                coord_presion_campana = (
+                    coord_presion_campana[cols_coord_presion]
+                    .drop_duplicates(subset=["TERMINACION"])
+                    .copy()
+                )
+                coord_presion_campana[x_col] = pd.to_numeric(
+                    coord_presion_campana["CIMA X UTM"], errors="coerce"
+                )
+                coord_presion_campana[y_col] = pd.to_numeric(
+                    coord_presion_campana["CIMA Y UTM"], errors="coerce"
+                )
+                presiones_sel_campana = presiones_sel_campana.merge(
+                    coord_presion_campana[["TERMINACION", x_col, y_col]],
+                    on="TERMINACION",
+                    how="inner"
+                ).dropna(subset=[x_col, y_col, "PRESION_MAPA"])
+                presiones_sel_campana["FECHA_MUESTRA_MAPA"] = presiones_sel_campana["FECHA_PRESION"]
+                presiones_sel_campana["N_MUESTRAS"] = presiones_sel_campana["N_MEDICIONES"]
+
+                conteos_muestras_kriging["Presión"] = (
+                    presiones_sel_campana["POZO"].dropna().astype(str).nunique()
+                )
+                resultado_presion_campana = crear_heatmap_kriging_burbujas(
+                    mapa=presiones_sel_campana,
+                    contorno=contorno,
+                    x_col=x_col,
+                    y_col=y_col,
+                    variable="PRESION_MAPA",
+                    grid_n=180
+                )
+                if resultado_presion_campana is not None:
+                    capas_muestras_kriging.append(
+                        ("Presión", "psi", "Turbo", resultado_presion_campana)
+                    )
+
     if "NP_BLS" in mapa.columns:
         pozos_np_mapa = mapa.loc[
             pd.to_numeric(mapa["NP_BLS"], errors="coerce").fillna(0) > 0,
@@ -4846,6 +5041,10 @@ def mapa_burbujas(
         contadores_mapa.append(
             ("Pozos Kriging API", conteos_muestras_kriging.get("Densidad °API", 0), "#7C3AED")
         )
+    if mostrar_presion_campana_kriging:
+        contadores_mapa.append(
+            ("Pozos Kriging Presión", conteos_muestras_kriging.get("Presión", 0), "#DC2626")
+        )
 
     with resumen_tipo_mapa:
         if not usar_panel_filtros_mapa:
@@ -4860,7 +5059,10 @@ def mapa_burbujas(
                     elif animar_tiempo_activo:
                         opciones_tipo_mapa = ["Mapa Burbujas"]
                     else:
-                        opciones_tipo_mapa = ["Mapa Burbujas", "Mapa GIS"]
+                        opciones_tipo_mapa = ["Mapa Burbujas"]
+                        if mostrar_instalaciones_gis:
+                            opciones_tipo_mapa.append("Mapa Grid")
+                        opciones_tipo_mapa.append("Mapa GIS")
 
                     tipo_mapa = st.radio(
                         "Tipo de mapa",
@@ -5741,7 +5943,7 @@ def mapa_burbujas(
 
         if ver_campanas_global:
             for grupo_historico, color in colores_agrupacion_historica.items():
-                if ver_rma_global:
+                if ver_rma_global or mostrar_todas_campanas_por_yacimiento:
                     mascara_grupo = mapa_gis[columna_color_historica].astype(str).str.upper().str.strip() == str(grupo_historico)
                 else:
                     mascara_grupo = pd.to_numeric(mapa_gis[columna_color_historica], errors="coerce") == grupo_historico
@@ -5756,8 +5958,8 @@ def mapa_burbujas(
                     textfont=dict(color="#000000", size=12) if not ver_rma_global else None,
                     marker=dict(size=10, color=color),
                     name=str(grupo_historico),
-                    customdata=tmp[["POZO", COL_YAC] + (["QOI_RMA_MAPA"] if ver_rma_global else ["CAMPANA_ANIO"])],
-                    hovertemplate=("<b>Pozo:</b> %{customdata[0]}<br><b>Yacimiento:</b> %{customdata[1]}<br><b>Qoi RMA:</b> %{customdata[2]:,.2f} bpd<extra></extra>" if ver_rma_global else "<b>Pozo:</b> %{customdata[0]}<br><b>Yacimiento:</b> %{customdata[1]}<br><b>Año:</b> %{customdata[2]}<extra></extra>"),
+                    customdata=tmp[["POZO", COL_YAC] + (["QOI_RMA_MAPA"] if ver_rma_global else ([COL_YAC] if mostrar_todas_campanas_por_yacimiento else ["CAMPANA_ANIO"]))],
+                    hovertemplate=("<b>Pozo:</b> %{customdata[0]}<br><b>Yacimiento:</b> %{customdata[1]}<br><b>Qoi RMA:</b> %{customdata[2]:,.2f} bpd<extra></extra>" if ver_rma_global else ("<b>Pozo:</b> %{customdata[0]}<br><b>Yacimiento:</b> %{customdata[1]}<extra></extra>" if mostrar_todas_campanas_por_yacimiento else "<b>Pozo:</b> %{customdata[0]}<br><b>Yacimiento:</b> %{customdata[1]}<br><b>Año:</b> %{customdata[2]}<extra></extra>")),
                     legendgroup=f"historico_{grupo_historico}", showlegend=True
                 ))
 
@@ -5782,8 +5984,8 @@ def mapa_burbujas(
                             showscale=True,
                             colorbar=dict(
                                 title=dict(text="Qoi [bpd]"), thickness=14,
-                                tickvals=[45, 120, 200, 625],
-                                ticktext=["0-90", "91-150", "151-250", "251-1000"]
+                                tickvals=[25, 75, 130, 580],
+                                ticktext=["0-50", ">50-100", ">100-160", ">160"]
                             )
                         ),
                         name="Qoi campaña", legendgroup="qoi_campana", showlegend=True,
@@ -5987,12 +6189,13 @@ def mapa_burbujas(
                         opacity=0.95
                     ),
                     name=f"Loc {filtro_localizaciones} {categoria}",
-                    customdata=tmp_loc[["POZO", "TERMINACION", "YACIMIENTO", "CATEGORIA"]],
+                    customdata=tmp_loc[["POZO", "TERMINACION", "YACIMIENTO", "CATEGORIA", "ANO"]],
                     hovertemplate=
                         "<b>Localizacion:</b> %{customdata[0]}<br>" +
                         "<b>Terminacion:</b> %{customdata[1]}<br>" +
                         "<b>Yacimiento:</b> %{customdata[2]}<br>" +
                         "<b>Categoria:</b> %{customdata[3]}<br>" +
+                        "<b>Año de entrada:</b> %{customdata[4]}<br>" +
                         "<extra></extra>",
                     legendgroup=f"loc_{categoria}",
                     showlegend=True
@@ -6231,7 +6434,7 @@ def mapa_burbujas(
             textposition="top center",
             textfont=dict(size=10, color="black", family="Arial"),
             marker=dict(
-                size=10,
+                size=14 if nombre_muestra == "Presión" else 10,
                 color=datos_m["VALOR_KRIGING"],
                 colorscale=escala_muestra,
                 cmin=zmin_m,
@@ -6252,12 +6455,21 @@ def mapa_burbujas(
         ))
 
     # =====================================================
-    # HEATMAP KRIGING
+    # MAPA GRID CON KRIGING
     # =====================================================
-    if tipo_mapa == "Heatmap":
+    if tipo_mapa == "Mapa Grid":
+
+        # En el mapa de burbujas los estados funcionan como capas. Para el
+        # grid también deben limitar los pozos que alimentan la interpolación,
+        # de modo que los controles del panel lateral tengan efecto real.
+        mapa_grid = mapa.copy()
+        if "ESTADO_MAPA" in mapa_grid.columns:
+            mapa_grid = mapa_grid[
+                mapa_grid["ESTADO_MAPA"].isin(estados_activos_mapa)
+            ].copy()
 
         resultado_heatmap = crear_heatmap_kriging_burbujas(
-            mapa=mapa,
+            mapa=mapa_grid,
             contorno=contorno,
             x_col=x_col,
             y_col=y_col,
@@ -6316,7 +6528,7 @@ def mapa_burbujas(
             contorno_plot = pd.DataFrame()
             asignacion_plot = pd.DataFrame()
 
-        # Heatmap
+        # Superficie interpolada del mapa grid
         fig_heat.add_trace(
             go.Contour(
                 x=xi,
@@ -6335,7 +6547,7 @@ def mapa_burbujas(
                 colorbar=dict(
                     title=f"{nombre_variable} {unidad}"
                 ),
-                name=f"Heatmap {nombre_variable}",
+                name=f"Grid {nombre_variable}",
                 hovertemplate=
                     f"<b>{nombre_variable}:</b> " +
                     "%{z:,.2f} " + unidad +
@@ -6384,35 +6596,85 @@ def mapa_burbujas(
                     showlegend=True
                 ))
 
-        # Puntos usados para interpolar
-        fig_heat.add_trace(go.Scatter(
-            x=datos_heat[x_col],
-            y=datos_heat[y_col],
-            mode="markers+text",
-            text=datos_heat["POZO"] if mostrar_nombres else None,
-            textposition="top center",
-            textfont=dict(
-                size=10,
-                color="black",
-                family="Arial"
-            ),
-            marker=dict(
-                size=8,
-                color="white",
-                line=dict(color="black", width=1.5)
-            ),
-            name="Pozos usados",
-            customdata=datos_heat[["POZO", COL_YAC, "VALOR_KRIGING"]],
-            #customdata=datos_heat[["POZO", COL_YAC, variable]],
-            hovertemplate=
-                "<b>Pozo:</b> %{customdata[0]}<br>" +
-                "<b>Yacimiento:</b> %{customdata[1]}<br>" +
-                f"<b>{nombre_variable}:</b> " + "%{customdata[2]:,.2f}<br>" +
-                "<extra></extra>"
-        ))
+        # Pozos usados para interpolar, respetando los estados activados en
+        # la sección Filtros y conservando sus colores de identificación.
+        grupos_grid = []
+        if "ESTADO_MAPA" in datos_heat.columns:
+            grupos_grid = [
+                (estado, color, datos_heat[datos_heat["ESTADO_MAPA"] == estado].copy())
+                for estado, color in leyenda_estados.items()
+                if estado in estados_activos_mapa
+            ]
+        else:
+            grupos_grid = [("Pozos usados", "white", datos_heat)]
+
+        for estado_grid, color_grid, datos_estado_grid in grupos_grid:
+            if datos_estado_grid.empty:
+                continue
+            fig_heat.add_trace(go.Scatter(
+                x=datos_estado_grid[x_col],
+                y=datos_estado_grid[y_col],
+                mode="markers+text",
+                text=datos_estado_grid["POZO"] if mostrar_nombres else None,
+                textposition="top center",
+                textfont=dict(size=10, color="black", family="Arial"),
+                marker=dict(
+                    size=8,
+                    color=color_grid,
+                    line=dict(color="black", width=1.5)
+                ),
+                name=etiqueta_estado_mapa(estado_grid),
+                customdata=datos_estado_grid[["POZO", COL_YAC, "VALOR_KRIGING"]],
+                hovertemplate=(
+                    "<b>Pozo:</b> %{customdata[0]}<br>"
+                    "<b>Yacimiento:</b> %{customdata[1]}<br>"
+                    f"<b>{nombre_variable}:</b> %{{customdata[2]:,.2f}}<br>"
+                    "<extra></extra>"
+                )
+            ))
+
+        # Campañas de localizaciones seleccionadas en el panel lateral. Estas
+        # son una capa de referencia y no participan en el cálculo del kriging.
+        if not localizaciones_mapa.empty:
+            for categoria, color in colores_localizaciones.items():
+                tmp_loc_grid = localizaciones_mapa[
+                    localizaciones_mapa["CATEGORIA"].astype(str).str.upper() == categoria
+                ].copy()
+
+                if tmp_loc_grid.empty:
+                    continue
+
+                fig_heat.add_trace(go.Scatter(
+                    x=tmp_loc_grid[x_col],
+                    y=tmp_loc_grid[y_col],
+                    mode="markers+text" if mostrar_nombres else "markers",
+                    text=tmp_loc_grid["POZO"] if mostrar_nombres else None,
+                    textposition="bottom center",
+                    textfont=dict(size=10, color="black", family="Arial"),
+                    marker=dict(
+                        size=12,
+                        symbol="diamond",
+                        color=color,
+                        line=dict(color="black", width=1)
+                    ),
+                    name=f"Loc {filtro_localizaciones} {categoria}",
+                    customdata=tmp_loc_grid[
+                        ["POZO", "TERMINACION", "YACIMIENTO", "CATEGORIA", "ANO"]
+                    ],
+                    hovertemplate=(
+                        "<b>Localización:</b> %{customdata[0]}<br>"
+                        "<b>Terminación:</b> %{customdata[1]}<br>"
+                        "<b>Yacimiento:</b> %{customdata[2]}<br>"
+                        "<b>Categoría:</b> %{customdata[3]}<br>"
+                        "<b>Año de entrada:</b> %{customdata[4]}<br>"
+                        "<extra></extra>"
+                    ),
+                    legendgroup=f"loc_grid_{categoria}",
+                    showlegend=True
+                ))
 
         fig_heat.update_layout(
-            title=f"<b>Heatmap Kriging - {nombre_variable} - {yac_mapa}</b>",
+            title=f"<b>Mapa Grid - {nombre_variable} - {yac_mapa}</b>",
             template="plotly_white",
             height=950,
             uirevision=mapa_uirevision,
@@ -6954,16 +7216,60 @@ def mapa_burbujas(
                     showlegend=True
                 ))
 
+    if (
+        mostrar_inyectores_operando
+        and ver_campanas_global
+        and not ver_rma_global
+        and not inyectores_operando_mapa.empty
+    ):
+        max_vi_campana = pd.to_numeric(
+            inyectores_operando_mapa["VI_BLS"], errors="coerce"
+        ).fillna(0).max()
+        valores_vi_campana = pd.to_numeric(
+            inyectores_operando_mapa["VI_BLS"], errors="coerce"
+        ).fillna(0)
+        size_vi_campana = np.where(
+            valores_vi_campana > 0,
+            12 + (valores_vi_campana / max_vi_campana) * 45 if max_vi_campana > 0 else 12,
+            10
+        )
+        fig.add_trace(go.Scatter(
+            x=inyectores_operando_mapa[x_col],
+            y=inyectores_operando_mapa[y_col],
+            mode="markers",
+            marker=dict(
+                size=size_vi_campana,
+                sizemode="diameter",
+                color="#00ACC1",
+                opacity=0.35,
+                line=dict(color="#1E88E5", width=1.5)
+            ),
+            name="Volumen inyectado",
+            customdata=inyectores_operando_mapa[["POZO", "TERMINACION", COL_YAC, "Vi", "VI_BLS"]],
+            hovertemplate=(
+                "<b>Inyector:</b> %{customdata[0]}<br>"
+                "<b>Terminación:</b> %{customdata[1]}<br>"
+                "<b>Yacimiento:</b> %{customdata[2]}<br>"
+                "<b>Vi:</b> %{customdata[3]:,.0f} m³<br>"
+                "<b>Vi:</b> %{customdata[4]:,.0f} bls<extra></extra>"
+            ),
+            legendgroup="inyectores_operando",
+            showlegend=True
+        ))
+
     if mostrar_inyectores_operando and not inyectores_operando_mapa.empty:
         fig.add_trace(go.Scatter(
             x=inyectores_operando_mapa[x_col],
             y=inyectores_operando_mapa[y_col],
             mode="markers",
             marker=dict(
-                size=22,
-                symbol="circle-open",
+                size=10 if (ver_campanas_global and not ver_rma_global) else 22,
+                symbol="diamond" if (ver_campanas_global and not ver_rma_global) else "circle-open",
                 color="#0057FF",
-                line=dict(color="#0057FF", width=4)
+                line=dict(
+                    color="#0B1F33" if (ver_campanas_global and not ver_rma_global) else "#0057FF",
+                    width=1.5 if (ver_campanas_global and not ver_rma_global) else 4
+                )
             ),
             name="Inyectores operando",
             customdata=inyectores_operando_mapa[["POZO", COL_YAC, "Operando", "VI_BLS"]],
@@ -6982,7 +7288,7 @@ def mapa_burbujas(
     # =====================================================
     if ver_campanas_global:
         for grupo_historico, color in colores_agrupacion_historica.items():
-            if ver_rma_global:
+            if ver_rma_global or mostrar_todas_campanas_por_yacimiento:
                 mascara_grupo = mapa[columna_color_historica].astype(str).str.upper().str.strip() == str(grupo_historico)
             else:
                 mascara_grupo = pd.to_numeric(mapa[columna_color_historica], errors="coerce") == grupo_historico
@@ -6993,8 +7299,8 @@ def mapa_burbujas(
                 x=tmp[x_col], y=tmp[y_col], mode="markers",
                 name=str(grupo_historico),
                 marker=dict(size=10, color=color, line=dict(color="white", width=0.8)),
-                customdata=tmp[["POZO", COL_YAC] + (["QOI_RMA_MAPA"] if ver_rma_global else ["CAMPANA_ANIO"])],
-                hovertemplate=("<b>Pozo:</b> %{customdata[0]}<br><b>Yacimiento:</b> %{customdata[1]}<br><b>Qoi RMA:</b> %{customdata[2]:,.2f} bpd<extra></extra>" if ver_rma_global else "<b>Pozo:</b> %{customdata[0]}<br><b>Yacimiento:</b> %{customdata[1]}<br><b>Año:</b> %{customdata[2]}<extra></extra>"),
+                customdata=tmp[["POZO", COL_YAC] + (["QOI_RMA_MAPA"] if ver_rma_global else ([COL_YAC] if mostrar_todas_campanas_por_yacimiento else ["CAMPANA_ANIO"]))],
+                hovertemplate=("<b>Pozo:</b> %{customdata[0]}<br><b>Yacimiento:</b> %{customdata[1]}<br><b>Qoi RMA:</b> %{customdata[2]:,.2f} bpd<extra></extra>" if ver_rma_global else ("<b>Pozo:</b> %{customdata[0]}<br><b>Yacimiento:</b> %{customdata[1]}<extra></extra>" if mostrar_todas_campanas_por_yacimiento else "<b>Pozo:</b> %{customdata[0]}<br><b>Yacimiento:</b> %{customdata[1]}<br><b>Año:</b> %{customdata[2]}<extra></extra>")),
                 legendgroup=f"historico_{grupo_historico}", showlegend=True
             ))
             if mostrar_nombres:
@@ -7021,8 +7327,8 @@ def mapa_burbujas(
                         showscale=True,
                         colorbar=dict(
                             title=dict(text="Qoi [bpd]"), thickness=14,
-                            tickvals=[45, 120, 200, 625],
-                            ticktext=["0-90", "91-150", "151-250", "251-1000"]
+                            tickvals=[25, 75, 130, 580],
+                            ticktext=["0-50", ">50-100", ">100-160", ">160"]
                         ),
                         line=dict(color="#1F2937", width=2.5)
                     ),
@@ -7255,12 +7561,13 @@ def mapa_burbujas(
                     line=dict(color="black", width=1)
                 ),
                 name=f"Loc {filtro_localizaciones} {categoria}",
-                customdata=tmp_loc[["POZO", "TERMINACION", "YACIMIENTO", "CATEGORIA"]],
+                customdata=tmp_loc[["POZO", "TERMINACION", "YACIMIENTO", "CATEGORIA", "ANO"]],
                 hovertemplate=
                     "<b>Localizacion:</b> %{customdata[0]}<br>" +
                     "<b>Terminacion:</b> %{customdata[1]}<br>" +
                     "<b>Yacimiento:</b> %{customdata[2]}<br>" +
                     "<b>Categoria:</b> %{customdata[3]}<br>" +
+                    "<b>Año de entrada:</b> %{customdata[4]}<br>" +
                     "<extra></extra>",
                 legendgroup=f"loc_{categoria}",
                 showlegend=True
@@ -7416,6 +7723,7 @@ def mapa_burbujas_rma_modulo(
     col_np_rma: str,
     col_meses_activos: str,
     rma_solo_ubicacion: pd.DataFrame | None = None,
+    rma_todas: pd.DataFrame | None = None,
     yac_mapa_default: str = "Todos"
 ):
     """Mapa exclusivo para el modulo RMA 2011-2020, sin modificar mapa_burbujas general."""
@@ -7506,8 +7814,15 @@ def mapa_burbujas_rma_modulo(
         if col_yac_rma in rma_mapa.columns
         else []
     )
+    yacs_todas_mapa = []
+    if rma_todas is not None and not rma_todas.empty:
+        for col_yac_todas in [col_yac, col_yac_rma]:
+            if col_yac_todas in rma_todas.columns:
+                yacs_todas_mapa.extend(
+                    rma_todas[col_yac_todas].dropna().astype(str).str.strip().tolist()
+                )
     yacs_mapa = sorted({
-        y for y in yacs_rma + yacs_intervencion_mapa + yacs_coord
+        y for y in yacs_rma + yacs_intervencion_mapa + yacs_coord + yacs_todas_mapa
         if y and y.upper() not in ["NAN", "NONE"]
     })
 
@@ -7584,8 +7899,43 @@ def mapa_burbujas_rma_modulo(
             key=key_yac_mapa_rma
         )
 
-    rma_fil_mapa = rma_mapa.copy()
+        anios_entrada_disponibles = sorted(
+            pd.to_numeric(rma_mapa[col_anio], errors="coerce")
+            .dropna().astype(int).unique().tolist()
+        )
+        anios_entrada_sel = st.multiselect(
+            "Años de entrada RMA",
+            options=anios_entrada_disponibles,
+            default=anios_entrada_disponibles,
+            key="rma_mapa_anios_entrada"
+        )
+        mostrar_todas_rma_por_yacimiento = st.checkbox(
+            "Mostrar todas las RMA por yacimiento",
+            value=False,
+            key="rma_mapa_todas_por_yacimiento"
+        )
+
+    if mostrar_todas_rma_por_yacimiento and rma_todas is not None and not rma_todas.empty:
+        rma_fil_mapa = rma_todas.copy()
+        rma_fil_mapa[COL_POZO] = rma_fil_mapa[COL_POZO].astype(str).str.strip()
+        col_nombre_todas = COL_POZO_FISICO if COL_POZO_FISICO in rma_fil_mapa.columns else COL_POZO
+        rma_fil_mapa["POZO_NOMBRE_RMA_BASE"] = rma_fil_mapa[col_nombre_todas].astype(str).str.strip()
+        rma_fil_mapa["POZO_NOMBRE_RMA_BASE"] = rma_fil_mapa["POZO_NOMBRE_RMA_BASE"].where(
+            ~rma_fil_mapa["POZO_NOMBRE_RMA_BASE"].str.upper().isin(["", "NAN", "NONE"]),
+            rma_fil_mapa[COL_POZO]
+        )
+        for c in [col_qoi, col_np_rma, col_meses_activos]:
+            rma_fil_mapa[c] = pd.to_numeric(rma_fil_mapa[c], errors="coerce").fillna(0)
+        rma_fil_mapa[col_anio] = pd.to_numeric(rma_fil_mapa[col_anio], errors="coerce")
+    else:
+        rma_fil_mapa = rma_mapa.copy()
     coord_fil_mapa = coord_mapa.copy()
+
+    if not mostrar_todas_rma_por_yacimiento:
+        rma_fil_mapa = rma_fil_mapa[
+            pd.to_numeric(rma_fil_mapa[col_anio], errors="coerce")
+            .isin(anios_entrada_sel)
+        ].copy()
 
     if yac_mapa != "Todos":
         clave_yac = normalizar_clave_texto(pd.Series([yac_mapa])).iloc[0]
@@ -7611,7 +7961,20 @@ def mapa_burbujas_rma_modulo(
         ]
         return ", ".join(sorted(vals))
 
+    # Una terminación puede tener más de una RMA en años distintos. La clave
+    # del evento evita que esas actividades se consoliden como un solo punto.
+    anio_evento_rma = pd.to_numeric(rma_fil_mapa[col_anio], errors="coerce").astype("Int64")
+    consecutivo_evento_rma = (
+        rma_fil_mapa.groupby([COL_POZO, anio_evento_rma], dropna=False).cumcount() + 1
+    )
+    rma_fil_mapa["RMA_EVENTO_ID"] = (
+        rma_fil_mapa[COL_POZO].astype(str)
+        + " | " + anio_evento_rma.astype(str)
+        + " | " + consecutivo_evento_rma.astype(str)
+    )
+
     agregaciones = {
+        "TERMINACION_COORD": (COL_POZO, "first"),
         "NP_RMA_MB": (col_np_rma, "sum"),
         "QOI_RMA_BPD": (col_qoi, "mean"),
         "MESES_ACTIVOS_RMA": (col_meses_activos, "sum"),
@@ -7623,16 +7986,27 @@ def mapa_burbujas_rma_modulo(
         agregaciones["YACIMIENTO_RMA_ORIGEN"] = (col_yac, unir_unicos_mapa)
     if col_yac_rma in rma_fil_mapa.columns:
         agregaciones["INTERVENCIONES_RMA"] = (col_yac_rma, unir_unicos_mapa)
+        agregaciones["YACIMIENTO_COLOR_RMA"] = (
+            col_yac_rma,
+            lambda s: next(
+                (v for v in s.dropna().astype(str).str.strip() if v and v.upper() not in ["NAN", "NONE"]),
+                "SIN YACIMIENTO"
+            )
+        )
     if col_anio in rma_fil_mapa.columns:
         agregaciones["ANIOS_RMA"] = (col_anio, lambda s: ", ".join(sorted(s.dropna().astype(int).astype(str).unique())))
+        # Atributo exclusivamente visual. Las acumulaciones y promedios
+        # mantienen las agregaciones históricas definidas arriba.
+        agregaciones["ANIO_ENTRADA_RMA"] = (col_anio, "min")
 
     if rma_fil_mapa.empty:
-        rma_resumen = pd.DataFrame(columns=[COL_POZO] + list(agregaciones.keys()))
+        rma_resumen = pd.DataFrame(columns=["RMA_EVENTO_ID", COL_POZO] + list(agregaciones.keys()))
     else:
         rma_resumen = (
             rma_fil_mapa
-            .groupby(COL_POZO, as_index=False)
+            .groupby("RMA_EVENTO_ID", as_index=False)
             .agg(**agregaciones)
+            .rename(columns={"TERMINACION_COORD": COL_POZO})
         )
 
     mapa_rma = rma_resumen.merge(
@@ -7643,6 +8017,14 @@ def mapa_burbujas_rma_modulo(
     )
 
     mapa_rma = mapa_rma.dropna(subset=["X_MAPA", "Y_MAPA"]).copy()
+    # Desplazamiento cartográfico mínimo para eventos de la misma terminación.
+    # No modifica las coordenadas almacenadas ni los cálculos RMA.
+    mapa_rma["_EVENTO_POS"] = mapa_rma.groupby(COL_POZO).cumcount()
+    mapa_rma["_EVENTOS_POZO"] = mapa_rma.groupby(COL_POZO)[COL_POZO].transform("size")
+    angulo_evento = 2 * np.pi * mapa_rma["_EVENTO_POS"] / mapa_rma["_EVENTOS_POZO"].clip(lower=1)
+    radio_evento = np.where(mapa_rma["_EVENTOS_POZO"] > 1, 12.0, 0.0)
+    mapa_rma["X_MAPA"] = mapa_rma["X_MAPA"] + radio_evento * np.cos(angulo_evento)
+    mapa_rma["Y_MAPA"] = mapa_rma["Y_MAPA"] + radio_evento * np.sin(angulo_evento)
     mapa_rma["POZO_MAPA"] = mapa_rma["POZO_NOMBRE_RMA"].astype(str).str.strip()
     mapa_rma["POZO_MAPA"] = mapa_rma["POZO_MAPA"].where(
         ~mapa_rma["POZO_MAPA"].str.upper().isin(["", "NAN", "NONE"]),
@@ -7705,6 +8087,19 @@ def mapa_burbujas_rma_modulo(
             }[x],
             key="rma_mapa_variable"
         )
+        factor_tamano_burbujas_rma = st.slider(
+            "Tamaño de burbujas (%)",
+            min_value=40,
+            max_value=100,
+            value=65,
+            step=5,
+            key="rma_mapa_tamano_burbujas"
+        ) / 100.0
+        st.caption(
+            "Los colores de los pozos representan el yacimiento."
+            if mostrar_todas_rma_por_yacimiento
+            else "Los colores de los pozos representan el año de entrada RMA."
+        )
 
     with panel_filtros_rma:
         alcance_mapa = st.selectbox(
@@ -7756,14 +8151,30 @@ def mapa_burbujas_rma_modulo(
         "MESES_ACTIVOS_RMA": "Meses activo"
     }
 
+    colores_anio_rma = {
+        2011: "#1F77B4", 2012: "#FF7F0E", 2013: "#2CA02C",
+        2014: "#D62728", 2015: "#9467BD", 2016: "#8C564B",
+        2017: "#E377C2", 2018: "#7F7F7F", 2019: "#BCBD22",
+        2020: "#17BECF",
+    }
+    colores_yacimiento_rma = {
+        "JSA": "#008000", "KTIA": "#0066CC", "KTS": "#F28C28",
+        "JAR": "#000000", "KTIB": "#C026D3",
+    }
+    escala_parula_rma = [
+        [0.00, "#000080"], [0.10, "#0000FF"], [0.25, "#00B5FF"],
+        [0.40, "#00FFFF"], [0.55, "#66FF99"], [0.70, "#FFFF00"],
+        [0.82, "#FF9900"], [0.92, "#FF0000"], [1.00, "#800000"],
+    ]
+
     if not mapa_rma.empty:
         mapa_rma[variable] = pd.to_numeric(mapa_rma[variable], errors="coerce").fillna(0)
         mapa_rma["VALOR_VARIABLE"] = mapa_rma[variable]
         max_val = mapa_rma[variable].max()
         mapa_rma["SIZE_BURBUJA"] = np.where(
             max_val > 0,
-            18 + (mapa_rma[variable] / max_val) * 70,
-            22
+            factor_tamano_burbujas_rma * (14 + (mapa_rma[variable] / max_val) * 42),
+            factor_tamano_burbujas_rma * 14
         )
         mapa_rma["ETIQUETA_VALOR"] = mapa_rma[variable].map(lambda x: f"{x:,.1f}")
         mapa_rma["ETIQUETA_POZO_VALOR"] = (
@@ -7776,6 +8187,15 @@ def mapa_burbujas_rma_modulo(
                 [
                     mapa_rma["QOI_RMA_BPD"] <= 30,
                     mapa_rma["QOI_RMA_BPD"] <= 50,
+                ],
+                ["#D62728", "#F28E2B"],
+                default="#2CA02C"
+            )
+        elif variable == "NP_RMA_MB":
+            mapa_rma["COLOR_BURBUJA_RMA"] = np.select(
+                [
+                    mapa_rma["NP_RMA_MB"] <= 20,
+                    mapa_rma["NP_RMA_MB"] <= 40,
                 ],
                 ["#D62728", "#F28E2B"],
                 default="#2CA02C"
@@ -7856,18 +8276,31 @@ def mapa_burbujas_rma_modulo(
                 mapa_rma[c] = ""
             custom_cols.append(c)
 
+        marcador_burbuja_rma = dict(
+            size=mapa_rma["SIZE_BURBUJA"],
+            symbol="circle",
+            opacity=0.40,
+            line=dict(width=1.2)
+        )
+        if variable == "NP_RMA_MB":
+            marcador_burbuja_rma.update(
+                color=mapa_rma["COLOR_BURBUJA_RMA"],
+                opacity=1,
+                showscale=False,
+                line=dict(color=mapa_rma["COLOR_BURBUJA_RMA"], width=1.2)
+            )
+        else:
+            marcador_burbuja_rma.update(
+                color=mapa_rma["COLOR_BURBUJA_RMA"],
+                line=dict(color=mapa_rma["COLOR_BURBUJA_RMA"], width=1.2)
+            )
+
         fig.add_trace(go.Scatter(
             x=mapa_rma["X_MAPA"],
             y=mapa_rma["Y_MAPA"],
             mode="markers",
             name=f"Burbuja {etiquetas_variable[variable]}",
-            marker=dict(
-                size=mapa_rma["SIZE_BURBUJA"],
-                symbol="circle",
-                color=mapa_rma["COLOR_BURBUJA_RMA"],
-                opacity=0.35,
-                line=dict(color=mapa_rma["COLOR_BURBUJA_RMA"], width=1.2)
-            ),
+            marker=marcador_burbuja_rma,
             showlegend=variable != "QOI_RMA_BPD",
             customdata=mapa_rma[custom_cols],
             hovertemplate=(
@@ -7900,33 +8333,74 @@ def mapa_burbujas_rma_modulo(
                     hoverinfo="skip",
                     showlegend=True
                 ))
+        elif variable == "NP_RMA_MB":
+            for etiqueta_np, color_np in [
+                ("Np RMA 0-20 mb", "#D62728"),
+                ("Np RMA >20-40 mb", "#F28E2B"),
+                ("Np RMA >40 mb", "#2CA02C"),
+            ]:
+                fig.add_trace(go.Scatter(
+                    x=[None], y=[None], mode="markers",
+                    name=etiqueta_np,
+                    marker=dict(
+                        size=12, symbol="circle", color=color_np,
+                        opacity=1, line=dict(color=color_np, width=1.2)
+                    ),
+                    hoverinfo="skip",
+                    showlegend=True
+                ))
 
-        fig.add_trace(go.Scatter(
-            x=mapa_rma["X_MAPA"],
-            y=mapa_rma["Y_MAPA"],
-            mode="markers+text",
-            text=mapa_rma["ETIQUETA_POZO_VALOR"],
-            textposition="bottom center",
-            textfont=dict(size=10, color="#111827", family="Arial Black"),
-            name="Pozo RMA",
-            marker=dict(
-                size=6,
-                symbol="square",
-                color="red",
-                opacity=1,
-                line=dict(color="black", width=2)
-            ),
-            customdata=mapa_rma[custom_cols],
-            hovertemplate=(
-                "<b>Pozo:</b> %{customdata[0]}<br>" +
-                f"<b>{etiquetas_variable[variable]}:</b> " + "%{customdata[1]:,.2f}<br>" +
-                "<b>Np RMA:</b> %{customdata[2]:,.2f} mb<br>" +
-                "<b>Qoi:</b> %{customdata[3]:,.2f} bpd<br>" +
-                "<b>Meses activo:</b> %{customdata[4]:,.1f}<br>" +
-                "<b>Intervencion:</b> %{customdata[7]}<br>" +
-                "<extra></extra>"
-            )
-        ))
+        if mostrar_todas_rma_por_yacimiento:
+            grupos_pozos_rma = colores_yacimiento_rma.items()
+        else:
+            grupos_pozos_rma = colores_anio_rma.items()
+
+        for grupo_rma, color_grupo_rma in grupos_pozos_rma:
+            if mostrar_todas_rma_por_yacimiento:
+                mascara_grupo_rma = (
+                    mapa_rma["YACIMIENTO_COLOR_RMA"].astype(str).str.upper().str.strip()
+                    == str(grupo_rma).upper().strip()
+                )
+            else:
+                mascara_grupo_rma = (
+                    pd.to_numeric(mapa_rma["ANIO_ENTRADA_RMA"], errors="coerce") == grupo_rma
+                )
+            tmp_grupo_rma = mapa_rma[mascara_grupo_rma].copy()
+            if tmp_grupo_rma.empty:
+                continue
+            fig.add_trace(go.Scatter(
+                x=tmp_grupo_rma["X_MAPA"],
+                y=tmp_grupo_rma["Y_MAPA"],
+                mode="markers+text",
+                text=tmp_grupo_rma["POZO_MAPA"],
+                textposition="top center",
+                textfont=dict(
+                    size=10,
+                    color="#050505",
+                    family="Arial Black, Arial, sans-serif"
+                ),
+                name=str(grupo_rma),
+                marker=dict(
+                    size=6,
+                    symbol="circle",
+                    color=color_grupo_rma,
+                    opacity=1,
+                    line=dict(color="#FFFFFF", width=0.6)
+                ),
+                customdata=tmp_grupo_rma[custom_cols],
+                hovertemplate=(
+                    "<b>Pozo:</b> %{customdata[0]}<br>" +
+                    f"<b>{etiquetas_variable[variable]}:</b> " + "%{customdata[1]:,.2f}<br>" +
+                    "<b>Np RMA:</b> %{customdata[2]:,.2f} mb<br>" +
+                    "<b>Qoi:</b> %{customdata[3]:,.2f} bpd<br>" +
+                    "<b>Meses activo:</b> %{customdata[4]:,.1f}<br>" +
+                    "<b>Intervención:</b> %{customdata[7]}<br>" +
+                    "<b>Año(s) RMA:</b> %{customdata[8]}<br>" +
+                    "<extra></extra>"
+                ),
+                legendgroup=f"grupo_rma_{grupo_rma}",
+                showlegend=True
+            ))
 
     if not mapa_rma_ubicacion.empty:
         for col_tmp in ["YACIMIENTO_RMA_ORIGEN", "INTERVENCIONES_RMA"]:
@@ -9481,15 +9955,53 @@ def analisis_term():
 
 @st.cache_data(show_spinner="Calculando producción total del campo...")
 def preparar_resumen_campo(df_base: pd.DataFrame):
-
-    prod = calcular_columnas_produccion(df_base.copy())
+    prod = df_base.copy()
     prod = prod.sort_values([COL_FECHA, COL_YAC, COL_POZO]).copy()
+    prod[COL_FECHA] = pd.to_datetime(prod[COL_FECHA], errors="coerce")
+    prod = prod.dropna(subset=[COL_FECHA, COL_POZO]).copy()
+    for col in [COL_ACEITE, COL_AGUA, COL_GAS, COL_INY]:
+        prod[col] = pd.to_numeric(prod[col], errors="coerce").fillna(0)
 
-    prod["POZO_ACTIVO"] = np.where(
-        (prod[COL_QO] > 0) | (prod[COL_QW] > 0) | (prod[COL_QG] > 0),
-        1,
-        0
+    # Los valores de la tabla son volúmenes mensuales. Primero se agregan y
+    # convierten; el gasto se obtiene después con los días calendario del mes.
+    prod[COL_ACEITE_BBL] = prod[COL_ACEITE] * 6.2898
+    prod[COL_AGUA_BBL] = prod[COL_AGUA] * 6.2898
+    prod[COL_INY_BBL] = prod[COL_INY] * 6.2898
+    prod[COL_GAS_PC] = prod[COL_GAS] * 35.32
+    prod["DIAS_MES"] = prod[COL_FECHA].dt.days_in_month
+
+    prod["TERMINACION_ACTIVA_FLAG"] = (
+        (prod[COL_ACEITE] > 0) | (prod[COL_AGUA] > 0) | (prod[COL_GAS] > 0)
     )
+    if COL_POZO_FISICO in prod.columns:
+        pozo_fisico = prod[COL_POZO_FISICO].astype(str).str.strip()
+        pozo_fisico = pozo_fisico.where(
+            ~pozo_fisico.str.upper().isin(["", "NAN", "NONE"]),
+            prod[COL_POZO].astype(str).str.strip()
+        )
+    else:
+        pozo_fisico = prod[COL_POZO].astype(str).str.strip()
+    prod["POZO_FISICO_CAMPO"] = pozo_fisico
+    prod["POZO_FISICO_ACTIVO"] = prod["POZO_FISICO_CAMPO"].where(prod["TERMINACION_ACTIVA_FLAG"])
+    prod["TERMINACION_ACTIVA"] = prod[COL_POZO].astype(str).where(prod["TERMINACION_ACTIVA_FLAG"])
+
+    def calcular_gastos_y_relaciones(resumen):
+        resumen = resumen.copy()
+        dias = pd.to_numeric(resumen["DIAS_MES"], errors="coerce").replace(0, np.nan)
+        resumen["QO_TOTAL"] = (resumen["ACEITE_BBL"] / dias).fillna(0)
+        resumen["QW_TOTAL"] = (resumen["AGUA_BBL"] / dias).fillna(0)
+        resumen["QIN_TOTAL"] = (resumen["INY_BBL"] / dias).fillna(0)
+        resumen["QG_PCD_TOTAL"] = (resumen["GAS_PC"] / dias).fillna(0)
+        resumen["QG_TOTAL"] = resumen["QG_PCD_TOTAL"] / 1000.0
+        resumen["RGA_TOTAL"] = np.where(
+            resumen["QO_TOTAL"] > 0,
+            resumen["QG_PCD_TOTAL"] / resumen["QO_TOTAL"], 0
+        )
+        resumen["WC_TOTAL"] = np.where(
+            (resumen["QO_TOTAL"] + resumen["QW_TOTAL"]) > 0,
+            resumen["QW_TOTAL"] / (resumen["QO_TOTAL"] + resumen["QW_TOTAL"]) * 100, 0
+        )
+        return resumen
 
     # =========================
     # TOTAL CAMPO
@@ -9497,30 +10009,17 @@ def preparar_resumen_campo(df_base: pd.DataFrame):
     total = (
         prod.groupby(COL_FECHA, as_index=False)
         .agg(
-            QO_TOTAL=(COL_QO, "sum"),
-            QW_TOTAL=(COL_QW, "sum"),
-            QIN_TOTAL=(COL_QIN, "sum"),
-            QG_TOTAL=(COL_QG, "sum"),
-            QG_PCD_TOTAL=(COL_QG_PCD, "sum"),
+            DIAS_MES=("DIAS_MES", "first"),
             ACEITE_BBL=(COL_ACEITE_BBL, "sum"),
             AGUA_BBL=(COL_AGUA_BBL, "sum"),
+            INY_BBL=(COL_INY_BBL, "sum"),
             GAS_PC=(COL_GAS_PC, "sum"),
-            POZOS_ACTIVOS=(COL_POZO, lambda x: x[prod.loc[x.index, "POZO_ACTIVO"] == 1].nunique())
+            POZOS_ACTIVOS=("POZO_FISICO_ACTIVO", "nunique"),
+            TERMINACIONES_ACTIVAS=("TERMINACION_ACTIVA", "nunique")
         )
         .sort_values(COL_FECHA)
     )
-
-    total["RGA_TOTAL"] = np.where(
-        total["QO_TOTAL"] > 0,
-        total["QG_PCD_TOTAL"] / total["QO_TOTAL"],
-        0
-    )
-
-    total["WC_TOTAL"] = np.where(
-        (total["QO_TOTAL"] + total["QW_TOTAL"]) > 0,
-        total["QW_TOTAL"] / (total["QO_TOTAL"] + total["QW_TOTAL"]) * 100,
-        0
-    )
+    total = calcular_gastos_y_relaciones(total)
 
     total["NP_TOTAL"] = total["ACEITE_BBL"].cumsum() / 1000
     total["WP_TOTAL"] = total["AGUA_BBL"].cumsum() / 1000
@@ -9532,30 +10031,19 @@ def preparar_resumen_campo(df_base: pd.DataFrame):
     yac = (
         prod.groupby([COL_FECHA, COL_YAC], as_index=False)
         .agg(
-            QO_TOTAL=(COL_QO, "sum"),
-            QW_TOTAL=(COL_QW, "sum"),
-            QIN_TOTAL=(COL_QIN, "sum"),
-            QG_TOTAL=(COL_QG, "sum"),
-            QG_PCD_TOTAL=(COL_QG_PCD, "sum"),
+            DIAS_MES=("DIAS_MES", "first"),
             ACEITE_BBL=(COL_ACEITE_BBL, "sum"),
             AGUA_BBL=(COL_AGUA_BBL, "sum"),
+            INY_BBL=(COL_INY_BBL, "sum"),
             GAS_PC=(COL_GAS_PC, "sum"),
-            POZOS_ACTIVOS=(COL_POZO, lambda x: x[prod.loc[x.index, "POZO_ACTIVO"] == 1].nunique())
+            POZOS_ACTIVOS=("POZO_FISICO_ACTIVO", "nunique"),
+            TERMINACIONES_ACTIVAS=("TERMINACION_ACTIVA", "nunique"),
+            POZOS_ACTIVOS_SET=("POZO_FISICO_ACTIVO", lambda s: frozenset(s.dropna().astype(str))),
+            TERMINACIONES_ACTIVAS_SET=("TERMINACION_ACTIVA", lambda s: frozenset(s.dropna().astype(str)))
         )
         .sort_values([COL_YAC, COL_FECHA])
     )
-
-    yac["RGA_TOTAL"] = np.where(
-        yac["QO_TOTAL"] > 0,
-        yac["QG_PCD_TOTAL"] / yac["QO_TOTAL"],
-        0
-    )
-
-    yac["WC_TOTAL"] = np.where(
-        (yac["QO_TOTAL"] + yac["QW_TOTAL"]) > 0,
-        yac["QW_TOTAL"] / (yac["QO_TOTAL"] + yac["QW_TOTAL"]) * 100,
-        0
-    )
+    yac = calcular_gastos_y_relaciones(yac)
 
     yac["NP_TOTAL"] = yac.groupby(COL_YAC)["ACEITE_BBL"].cumsum() / 1000
     yac["WP_TOTAL"] = yac.groupby(COL_YAC)["AGUA_BBL"].cumsum() / 1000
@@ -9602,18 +10090,25 @@ def produccion_total_campo():
     total = (
         yac.groupby(COL_FECHA, as_index=False)
         .agg(
-            QO_TOTAL=("QO_TOTAL", "sum"),
-            QW_TOTAL=("QW_TOTAL", "sum"),
-            QIN_TOTAL=("QIN_TOTAL", "sum"),
-            QG_TOTAL=("QG_TOTAL", "sum"),
-            QG_PCD_TOTAL=("QG_PCD_TOTAL", "sum"),
+            DIAS_MES=("DIAS_MES", "first"),
             ACEITE_BBL=("ACEITE_BBL", "sum"),
             AGUA_BBL=("AGUA_BBL", "sum"),
+            INY_BBL=("INY_BBL", "sum"),
             GAS_PC=("GAS_PC", "sum"),
-            POZOS_ACTIVOS=("POZOS_ACTIVOS", "sum")
+            POZOS_ACTIVOS_SET=("POZOS_ACTIVOS_SET", lambda sets: frozenset().union(*sets)),
+            TERMINACIONES_ACTIVAS_SET=("TERMINACIONES_ACTIVAS_SET", lambda sets: frozenset().union(*sets))
         )
         .sort_values(COL_FECHA)
     )
+
+    total["POZOS_ACTIVOS"] = total["POZOS_ACTIVOS_SET"].map(len)
+    total["TERMINACIONES_ACTIVAS"] = total["TERMINACIONES_ACTIVAS_SET"].map(len)
+    dias_total = pd.to_numeric(total["DIAS_MES"], errors="coerce").replace(0, np.nan)
+    total["QO_TOTAL"] = (total["ACEITE_BBL"] / dias_total).fillna(0)
+    total["QW_TOTAL"] = (total["AGUA_BBL"] / dias_total).fillna(0)
+    total["QIN_TOTAL"] = (total["INY_BBL"] / dias_total).fillna(0)
+    total["QG_PCD_TOTAL"] = (total["GAS_PC"] / dias_total).fillna(0)
+    total["QG_TOTAL"] = total["QG_PCD_TOTAL"] / 1000.0
 
     total["RGA_TOTAL"] = np.where(
         total["QO_TOTAL"] > 0,
@@ -9659,7 +10154,7 @@ def produccion_total_campo():
     </div>
     """, unsafe_allow_html=True)
 
-    k1, k2, k3, k4, k5, k6, k7, k8, k9 = st.columns(9)
+    k1, k2, k3, k4, k5, k6, k7, k8, k9, k10 = st.columns(10)
 
     with k1:
         kpi_card("Producción Aceite", f"{last_campo['QO_TOTAL']:,.1f}", "bpd", "#1F77B4")
@@ -9674,18 +10169,21 @@ def produccion_total_campo():
         kpi_card("Pozos Activos", f"{last_campo['POZOS_ACTIVOS']:,.0f}", "", "#1F77B4")
 
     with k5:
-        kpi_card("RGA Actual", f"{last_campo['RGA_TOTAL']:,.0f}", "pc/bl", "#1F77B4")
+        kpi_card("Terminaciones Activas", f"{last_campo['TERMINACIONES_ACTIVAS']:,.0f}", "", "#1F77B4")
 
     with k6:
-        kpi_card("% Agua Actual", f"{last_campo['WC_TOTAL']:,.1f}", "%", "#1F77B4")
+        kpi_card("RGA Actual", f"{last_campo['RGA_TOTAL']:,.0f}", "pc/bl", "#1F77B4")
 
     with k7:
-        kpi_card("Acumulada Aceite", f"{last_campo['NP_TOTAL']/1000:,.2f}", "mmb", "#1F77B4")
+        kpi_card("% Agua Actual", f"{last_campo['WC_TOTAL']:,.1f}", "%", "#1F77B4")
 
     with k8:
-        kpi_card("Acumulada Agua", f"{last_campo['WP_TOTAL']/1000:,.2f}", "mmb", "#1F77B4")
+        kpi_card("Acumulada Aceite", f"{last_campo['NP_TOTAL']/1000:,.2f}", "mmb", "#1F77B4")
 
     with k9:
+        kpi_card("Acumulada Agua", f"{last_campo['WP_TOTAL']/1000:,.2f}", "mmb", "#1F77B4")
+
+    with k10:
         kpi_card("Acumulada Gas", f"{last_campo['GP_TOTAL']/1000:,.2f}", "mmmpc", "#1F77B4")
 
     fecha_min_graficas = total[COL_FECHA].min()
@@ -9728,8 +10226,17 @@ def produccion_total_campo():
         opacity=0.45
     ), secondary_y=True)
 
+    fig1.add_trace(go.Bar(
+        x=total[COL_FECHA],
+        y=total["TERMINACIONES_ACTIVAS"],
+        name="Terminaciones activas",
+        marker=dict(color="rgba(126,87,194,0.45)"),
+        opacity=0.55
+    ), secondary_y=True)
+
     fig1.update_layout(
-        title="<b>Producción de aceite, agua, gas y pozos activos</b>",
+        title="<b>Producción de aceite, agua, gas, pozos y terminaciones activas</b>",
+        barmode="group",
         template="plotly_white",
         #height=alto_grafico,
         height=600,
@@ -9774,7 +10281,7 @@ def produccion_total_campo():
     )
 
     fig1.update_yaxes(
-        title_text="Pozos activos",
+        title_text="Pozos / terminaciones activas",
         secondary_y=True,
         showgrid=False
     )
@@ -9987,6 +10494,12 @@ def produccion_total_campo():
 
     total_export = total.copy()
     yac_export = yac.copy()
+    total_export = total_export.drop(
+        columns=["POZOS_ACTIVOS_SET", "TERMINACIONES_ACTIVAS_SET"], errors="ignore"
+    )
+    yac_export = yac_export.drop(
+        columns=["POZOS_ACTIVOS_SET", "TERMINACIONES_ACTIVAS_SET"], errors="ignore"
+    )
 
     total_export["FECHA"] = pd.to_datetime(total_export[COL_FECHA]).dt.strftime("%d/%m/%Y")
     yac_export["FECHA"] = pd.to_datetime(yac_export[COL_FECHA]).dt.strftime("%d/%m/%Y")
@@ -9997,6 +10510,7 @@ def produccion_total_campo():
         "QIN_TOTAL": "Qiny total (bpd)",
         "QG_TOTAL": "Qg total (mpcd)",
         "POZOS_ACTIVOS": "Pozos activos",
+        "TERMINACIONES_ACTIVAS": "Terminaciones activas",
         "RGA_TOTAL": "RGA (pc/bl)",
         "WC_TOTAL": "% Agua",
         "NP_TOTAL": "Np (mbl)",
@@ -10011,6 +10525,7 @@ def produccion_total_campo():
         "QIN_TOTAL": "Qiny total (bpd)",
         "QG_TOTAL": "Qg total (mpcd)",
         "POZOS_ACTIVOS": "Pozos activos",
+        "TERMINACIONES_ACTIVAS": "Terminaciones activas",
         "RGA_TOTAL": "RGA (pc/bl)",
         "WC_TOTAL": "% Agua",
         "NP_TOTAL": "Np (mbl)",
@@ -10432,7 +10947,7 @@ def analisis_rma():
     # =========================
     m1, m2 = st.columns(2)
 
-    m1.metric("RMA analizadas", f"{rma_f[COL_POZO].nunique():,.0f}")
+    m1.metric("Intervenciones RMA analizadas", f"{len(rma_f):,.0f}")
     m2.metric("Qoi promedio", f"{rma_f[col_qoi].mean():,.1f} bpd")
 
     rma_f = rma_f.sort_values([col_anio, COL_POZO])
@@ -11104,6 +11619,7 @@ def analisis_rma():
             col_np_rma,
             col_meses_activos,
             rma_solo_ubicacion=rma_solo_ubicacion_f,
+            rma_todas=rma,
             yac_mapa_default=yac_mapa_default_rma
         )
 
@@ -11313,6 +11829,25 @@ def mapa_presion():
             "196 Localizaciones",
             value=False,
             key="mostrar_loc_196_mapa_presion"
+        )
+
+        localizaciones_anios_presion = load_localizaciones()
+        if not localizaciones_anios_presion.empty:
+            localizaciones_anios_presion = localizaciones_anios_presion[
+                localizaciones_anios_presion["YACIMIENTO"].astype(str).str.upper().str.strip()
+                == str(yac_sel).upper().strip()
+            ].copy()
+        anios_localizaciones_presion_disponibles = sorted(
+            pd.to_numeric(
+                localizaciones_anios_presion.get("ANO", pd.Series(dtype=float)),
+                errors="coerce"
+            ).dropna().astype(int).unique().tolist()
+        )
+        anios_localizaciones_presion_sel = st.multiselect(
+            "Campañas de localizaciones",
+            options=anios_localizaciones_presion_disponibles,
+            default=[],
+            key=f"anios_localizaciones_mapa_presion_{yac_sel}"
         )
 
         mostrar_inyectores_operando_presion = st.checkbox(
@@ -11604,10 +12139,29 @@ def mapa_presion():
             loc_196_presion["TIPO_LOCALIZACION"] = "196"
             localizaciones_presion.append(loc_196_presion)
 
+    if anios_localizaciones_presion_sel:
+        loc_anios_presion = preparar_localizaciones_presion("315")
+        if not loc_anios_presion.empty:
+            loc_anios_presion = loc_anios_presion[
+                pd.to_numeric(loc_anios_presion["ANO"], errors="coerce")
+                .isin(anios_localizaciones_presion_sel)
+            ].copy()
+            for anio_loc_presion in sorted(anios_localizaciones_presion_sel):
+                loc_anio_presion = loc_anios_presion[
+                    pd.to_numeric(loc_anios_presion["ANO"], errors="coerce") == anio_loc_presion
+                ].copy()
+                if not loc_anio_presion.empty:
+                    loc_anio_presion["TIPO_LOCALIZACION"] = f"Campaña {anio_loc_presion}"
+                    localizaciones_presion.append(loc_anio_presion)
+
     localizaciones_presion = (
         pd.concat(localizaciones_presion, ignore_index=True)
         if localizaciones_presion else pd.DataFrame()
     )
+    if not localizaciones_presion.empty and anios_localizaciones_presion_sel:
+        localizaciones_presion = localizaciones_presion.drop_duplicates(
+            subset=["POZO", "TERMINACION", "ANO"], keep="last"
+        )
 
     inyectores_operando_presion = (
         preparar_inyectores_operando_presion()
@@ -12072,12 +12626,13 @@ def mapa_presion():
                         line=dict(color="black", width=1)
                     ),
                     name=f"{tipo_loc} Localizaciones {categoria}",
-                    customdata=tmp_loc[["POZO", "TERMINACION", "YACIMIENTO", "CATEGORIA"]],
+                    customdata=tmp_loc[["POZO", "TERMINACION", "YACIMIENTO", "CATEGORIA", "ANO"]],
                     hovertemplate=
                         "<b>Localización:</b> %{customdata[0]}<br>" +
                         "<b>Terminación:</b> %{customdata[1]}<br>" +
                         "<b>Yacimiento:</b> %{customdata[2]}<br>" +
                         "<b>Categoría:</b> %{customdata[3]}<br>" +
+                        "<b>Año de entrada:</b> %{customdata[4]}<br>" +
                         "<extra></extra>",
                     showlegend=True
                 ))
@@ -13308,10 +13863,12 @@ def pronostico_pozos():
 
 
 @st.cache_data(show_spinner="Preparando datos DCA...")
-def load_prod_dca():
-    prod = load_data().copy()
+def load_prod_dca(db_version=None):
+    # db_version corresponde a la fecha de modificación del SQLite. Aunque no
+    # interviene en los cálculos, invalida ambas cachés cuando se actualiza la BD.
+    prod = load_data(cache_version=db_version).copy()
     if prod.empty:
-        return prod
+        return prod, prod
 
     prod[COL_FECHA] = pd.to_datetime(prod[COL_FECHA], errors="coerce")
     prod = prod.dropna(subset=[COL_FECHA, COL_POZO]).copy()
@@ -13328,27 +13885,48 @@ def load_prod_dca():
     else:
         prod["POZO_DCA"] = prod[COL_POZO]
 
+    prod["TERMINACION_DCA"] = prod[COL_POZO].astype(str).str.strip()
     prod[COL_YAC] = prod[COL_YAC].astype(str).str.strip()
     for c in [COL_DIAS, COL_ACEITE]:
         prod[c] = pd.to_numeric(prod[c], errors="coerce").fillna(0)
 
     prod[COL_ACEITE_BBL] = prod[COL_ACEITE] * M3_A_BBL
     prod["MES"] = prod[COL_FECHA].dt.to_period("M").dt.to_timestamp()
-    prod = (
-        prod.groupby(["POZO_DCA", "MES"], as_index=False)
+    prod_terminaciones = (
+        prod.groupby(["POZO_DCA", "TERMINACION_DCA", COL_YAC, "MES"], as_index=False)
         .agg({
             COL_ACEITE_BBL: "sum",
             COL_DIAS: "max",
-            COL_YAC: "first",
         })
         .rename(columns={"POZO_DCA": COL_POZO, "MES": COL_FECHA})
         .sort_values([COL_POZO, COL_FECHA])
         .reset_index(drop=True)
     )
-    prod["MES"] = prod[COL_FECHA].dt.to_period("M").dt.to_timestamp()
-    dias_validos = prod[COL_DIAS].replace(0, np.nan)
-    prod[COL_QO] = (prod[COL_ACEITE_BBL] / dias_validos).replace([np.inf, -np.inf], np.nan).fillna(0)
-    return prod
+    prod_terminaciones["MES"] = prod_terminaciones[COL_FECHA].dt.to_period("M").dt.to_timestamp()
+    dias_validos = prod_terminaciones[COL_DIAS].replace(0, np.nan)
+    prod_terminaciones[COL_QO] = (
+        prod_terminaciones[COL_ACEITE_BBL] / dias_validos
+    ).replace([np.inf, -np.inf], np.nan).fillna(0)
+
+    # Esta consolidación física se reutiliza en cada interacción del módulo.
+    # Al quedar dentro de la función cacheada no se recalcula al cambiar pozo,
+    # terminación, Di o Qoi.
+    prod_pozos = (
+        prod_terminaciones.groupby([COL_POZO, COL_FECHA], as_index=False)
+        .agg({
+            COL_ACEITE_BBL: "sum",
+            COL_DIAS: "max",
+            COL_YAC: "first",
+        })
+        .sort_values([COL_POZO, COL_FECHA])
+        .reset_index(drop=True)
+    )
+    prod_pozos["MES"] = prod_pozos[COL_FECHA].dt.to_period("M").dt.to_timestamp()
+    dias_validos_pozos = prod_pozos[COL_DIAS].replace(0, np.nan)
+    prod_pozos[COL_QO] = (
+        prod_pozos[COL_ACEITE_BBL] / dias_validos_pozos
+    ).replace([np.inf, -np.inf], np.nan).fillna(0)
+    return prod_terminaciones, prod_pozos
 
 
 def pronostico_pozos_dca():
@@ -13371,16 +13949,17 @@ def pronostico_pozos_dca():
         unsafe_allow_html=True
     )
 
-    prod = load_prod_dca().copy()
+    db_version_dca = Path(ruta_db).stat().st_mtime_ns
+    prod_terminaciones_cache, prod = load_prod_dca(db_version_dca)
+    prod_terminaciones_cache = prod_terminaciones_cache.copy()
+    prod = prod.copy()
     meses_disponibles = sorted(prod["MES"].dropna().unique())
     if not meses_disponibles:
         st.warning("No hay fechas válidas de producción para analizar.")
         return
 
     mes_max = pd.Timestamp(max(meses_disponibles))
-    mes_default = pd.Timestamp("2026-05-01")
-    if mes_default not in set(pd.to_datetime(meses_disponibles)):
-        mes_default = mes_max
+    mes_default = mes_max
 
     st.markdown(
         """
@@ -13497,9 +14076,17 @@ def pronostico_pozos_dca():
         mes_ref = st.date_input(
             "Mes de operacion referencia",
             value=mes_default.date(),
-            key="dca_mes_operando"
+            min_value=pd.Timestamp(min(meses_disponibles)).date(),
+            max_value=mes_max.date(),
+            key="dca_mes_operando_v2"
         )
         mes_ref = pd.Timestamp(mes_ref).to_period("M").to_timestamp()
+        universo_pozos_dca = st.radio(
+            "Universo de pozos",
+            ["Operando en el mes", "Todos con historia de producción"],
+            index=0,
+            key="dca_universo_pozos"
+        )
         meses_ajuste = st.number_input(
             "Meses para ajuste",
             min_value=3,
@@ -13511,7 +14098,7 @@ def pronostico_pozos_dca():
         meses_pronostico = st.number_input(
             "Meses de extension",
             min_value=0,
-            max_value=120,
+            max_value=1200,
             value=24,
             step=1,
             key="dca_meses_pronostico"
@@ -13529,16 +14116,68 @@ def pronostico_pozos_dca():
         st.caption("Comingled consolidado por POZO fisico.")
 
     with cuerpo_dca:
-        prod_f = prod.copy()
+        prod_terminaciones = prod_terminaciones_cache
+
+        def _consolidar_historia_dca(datos: pd.DataFrame) -> pd.DataFrame:
+            """Consolida las terminaciones elegidas a una serie mensual."""
+            if datos.empty:
+                return datos.copy()
+            consolidado = (
+                datos.groupby([COL_POZO, COL_FECHA], as_index=False)
+                .agg({
+                    COL_ACEITE_BBL: "sum",
+                    COL_DIAS: "max",
+                    COL_YAC: lambda s: " / ".join(sorted(set(s.dropna().astype(str)))),
+                })
+                .sort_values([COL_POZO, COL_FECHA])
+                .reset_index(drop=True)
+            )
+            consolidado["MES"] = consolidado[COL_FECHA].dt.to_period("M").dt.to_timestamp()
+            dias_validos_dca = consolidado[COL_DIAS].replace(0, np.nan)
+            consolidado[COL_QO] = (
+                consolidado[COL_ACEITE_BBL] / dias_validos_dca
+            ).replace([np.inf, -np.inf], np.nan).fillna(0)
+            return consolidado
+
+        # Serie por pozo físico ya consolidada dentro de la caché de carga.
+        prod_f = prod
         operando_mes = prod_f[
             (prod_f["MES"] == mes_ref) &
             (prod_f[COL_ACEITE_BBL] > 0) &
             (prod_f[COL_QO] > 0)
         ].copy()
         pozos_operando = sorted(operando_mes[COL_POZO].dropna().astype(str).unique())
+        terminaciones_operando_mes = prod_terminaciones[
+            (prod_terminaciones["MES"] == mes_ref)
+            & (prod_terminaciones[COL_ACEITE_BBL] > 0)
+            & (prod_terminaciones[COL_QO] > 0)
+        ].copy()
 
-        if not pozos_operando:
-            st.warning(f"No encontré pozos operando con aceite positivo en {mes_ref.strftime('%m/%Y')}.")
+        fin_mes_ref = mes_ref + pd.offsets.MonthEnd(1)
+        historia_hasta_mes = prod_f[
+            (prod_f[COL_FECHA] <= fin_mes_ref)
+            & (prod_f[COL_ACEITE_BBL] > 0)
+            & (prod_f[COL_QO] > 0)
+        ].copy()
+        pozos_con_historia = sorted(
+            historia_hasta_mes[COL_POZO].dropna().astype(str).unique()
+        )
+
+        if universo_pozos_dca == "Todos con historia de producción":
+            pozos_disponibles_dca = pozos_con_historia
+            etiqueta_universo_dca = "Pozos con historia"
+            etiqueta_selector_dca = "Pozo"
+            key_universo_dca = "todos"
+        else:
+            pozos_disponibles_dca = pozos_operando
+            etiqueta_universo_dca = "Pozos operando"
+            etiqueta_selector_dca = "Pozo operando"
+            key_universo_dca = "operando"
+
+        if not pozos_disponibles_dca:
+            st.warning(
+                f"No encontré pozos disponibles para el universo seleccionado en {mes_ref.strftime('%m/%Y')}."
+            )
             return
 
         def _ajustar_exponencial_pozo(df_pozo: pd.DataFrame, meses_fit: int, puntos_min: int, fechas_fit_manual=None):
@@ -13608,35 +14247,71 @@ def pronostico_pozos_dca():
             }
             return info, fit, curva
 
-        col_sel_pozo, col_metricas = st.columns([1.4, 2.2])
+        col_sel_pozo, col_metricas = st.columns([1.5, 2.5])
         with col_sel_pozo:
             pozo_sel = st.selectbox(
-                "Pozo operando",
-                pozos_operando,
-                key="dca_pozo_sel"
+                etiqueta_selector_dca,
+                pozos_disponibles_dca,
+                key=f"dca_pozo_sel_{key_universo_dca}"
             )
+
+            terminaciones_pozo_dca = prod_terminaciones[
+                (prod_terminaciones[COL_POZO].astype(str) == str(pozo_sel))
+                & (prod_terminaciones[COL_FECHA] <= fin_mes_ref)
+            ][["TERMINACION_DCA", COL_YAC]].drop_duplicates().sort_values(
+                [COL_YAC, "TERMINACION_DCA"]
+            )
+            opciones_terminacion_dca = ["Todas las terminaciones"] + [
+                f"{row['TERMINACION_DCA']} · {row[COL_YAC]}"
+                for _, row in terminaciones_pozo_dca.iterrows()
+            ]
+            terminacion_sel_dca = st.selectbox(
+                "Terminación / yacimiento",
+                opciones_terminacion_dca,
+                key=f"dca_terminacion_sel_{key_universo_dca}_{pozo_sel}"
+            )
+
+        if universo_pozos_dca == "Operando en el mes":
+            total_terminaciones_universo = terminaciones_operando_mes["TERMINACION_DCA"].nunique()
+        else:
+            total_terminaciones_universo = prod_terminaciones[
+                (prod_terminaciones[COL_FECHA] <= fin_mes_ref)
+                & (prod_terminaciones[COL_ACEITE_BBL] > 0)
+            ]["TERMINACION_DCA"].nunique()
+
         with col_metricas:
             st.markdown(
                 f"""
                 <div class="dca-kpi-grid" style="grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 0;">
                     <div class="dca-kpi-card">
-                        <div class="dca-kpi-label">Pozos operando</div>
-                        <div class="dca-kpi-value">{len(pozos_operando):,.0f}</div>
+                        <div class="dca-kpi-label">{etiqueta_universo_dca}</div>
+                        <div class="dca-kpi-value">{len(pozos_disponibles_dca):,.0f}</div>
+                    </div>
+                    <div class="dca-kpi-card">
+                        <div class="dca-kpi-label">Terminaciones</div>
+                        <div class="dca-kpi-value">{total_terminaciones_universo:,.0f}</div>
                     </div>
                     <div class="dca-kpi-card">
                         <div class="dca-kpi-label">Mes referencia</div>
                         <div class="dca-kpi-value">{mes_ref.strftime("%m/%Y")}</div>
-                    </div>
-                    <div class="dca-kpi-card">
-                        <div class="dca-kpi-label">Ventana ajuste</div>
-                        <div class="dca-kpi-value">{int(meses_ajuste)} meses</div>
                     </div>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
 
-        df_pozo = prod_f[prod_f[COL_POZO].astype(str) == str(pozo_sel)].copy()
+        df_pozo_detalle = prod_terminaciones[
+            (prod_terminaciones[COL_POZO].astype(str) == str(pozo_sel))
+            & (prod_terminaciones[COL_FECHA] <= fin_mes_ref)
+        ].copy()
+        if terminacion_sel_dca != "Todas las terminaciones":
+            term_sel_real = terminacion_sel_dca.split(" · ", 1)[0]
+            yac_sel_real = terminacion_sel_dca.split(" · ", 1)[1]
+            df_pozo_detalle = df_pozo_detalle[
+                (df_pozo_detalle["TERMINACION_DCA"].astype(str) == term_sel_real)
+                & (df_pozo_detalle[COL_YAC].astype(str) == yac_sel_real)
+            ].copy()
+        df_pozo = _consolidar_historia_dca(df_pozo_detalle)
         hist = df_pozo[(df_pozo[COL_QO] > 0) & (df_pozo[COL_ACEITE_BBL] > 0)].sort_values(COL_FECHA).copy()
 
         info_sel, fit_sel, curva_sel = _ajustar_exponencial_pozo(
@@ -13656,7 +14331,7 @@ def pronostico_pozos_dca():
                     max_value=float(di_slider_max),
                     value=float(min(max(di_auto_pct, 0.0), di_slider_max)),
                     step=0.01,
-                    key=f"dca_di_manual_pct_{pozo_sel}"
+                    key=f"dca_di_manual_pct_{key_universo_dca}_{pozo_sel}_{terminacion_sel_dca}"
                 )
                 qi_auto = float(info_sel["Qi ajuste (bpd)"])
                 qoi_manual = st.number_input(
@@ -13665,7 +14340,7 @@ def pronostico_pozos_dca():
                     value=max(qi_auto, 0.01),
                     step=1.0,
                     format="%.2f",
-                    key=f"dca_qoi_manual_{pozo_sel}",
+                    key=f"dca_qoi_manual_{key_universo_dca}_{pozo_sel}_{terminacion_sel_dca}",
                     help="Gasto inicial desde el cual se acomoda verticalmente la curva de ajuste."
                 )
 
@@ -13699,13 +14374,89 @@ def pronostico_pozos_dca():
             with ajuste_di_panel.container():
                 st.caption("Sin ajuste disponible para activar los controles manuales de Di y Qoi.")
 
+        qo_limite_dca = 1.0
+        hist = hist.copy()
+        hist["Np real (mb)"] = hist[COL_ACEITE_BBL].fillna(0).cumsum() / 1000.0
+        np_real_mb = float(hist["Np real (mb)"].iloc[-1]) if not hist.empty else 0.0
+        curva_np_pronostico = pd.DataFrame()
+        curva_np_grafica = pd.DataFrame()
+        curva_np_regresion = pd.DataFrame()
+        curva_pronostico_grafica = pd.DataFrame()
+        np_total_pronostico_mb = np_real_mb
+        reserva_pronostico_mb = 0.0
+        if info_sel is not None and not curva_sel.empty and not hist.empty:
+            ultima_fecha_real = pd.Timestamp(hist[COL_FECHA].iloc[-1]).to_period("M").to_timestamp()
+            ultimo_qo_real = float(hist[COL_QO].iloc[-1])
+            di_pronostico = float(info_sel["Di mensual nominal"])
+
+            meses_futuros = np.arange(1, int(meses_pronostico) + 1, dtype=int)
+            curva_np_pronostico = pd.DataFrame({
+                COL_FECHA: [
+                    ultima_fecha_real + pd.DateOffset(months=int(m))
+                    for m in meses_futuros
+                ],
+                "T_PRONOSTICO": meses_futuros,
+            })
+            curva_np_pronostico["Qo pronóstico (bpd)"] = (
+                ultimo_qo_real * np.exp(-di_pronostico * curva_np_pronostico["T_PRONOSTICO"])
+            )
+            curva_np_pronostico = curva_np_pronostico[
+                curva_np_pronostico["Qo pronóstico (bpd)"] >= qo_limite_dca
+            ].copy()
+
+            ancla_pronostico = pd.DataFrame({
+                COL_FECHA: [ultima_fecha_real],
+                "T_PRONOSTICO": [0],
+                "Qo pronóstico (bpd)": [ultimo_qo_real],
+            })
+            curva_pronostico_grafica = pd.concat(
+                [ancla_pronostico, curva_np_pronostico], ignore_index=True
+            )
+
+            if not curva_np_pronostico.empty:
+                curva_np_pronostico["DIAS_MES"] = curva_np_pronostico[COL_FECHA].dt.days_in_month
+                curva_np_pronostico["Np pronóstico (mb)"] = np_real_mb + (
+                    curva_np_pronostico["Qo pronóstico (bpd)"]
+                    * curva_np_pronostico["DIAS_MES"]
+                    / 1000.0
+                ).cumsum()
+                np_total_pronostico_mb = float(
+                    curva_np_pronostico["Np pronóstico (mb)"].iloc[-1]
+                )
+                reserva_pronostico_mb = max(
+                    np_total_pronostico_mb - np_real_mb,
+                    0.0
+                )
+                ancla_np = pd.DataFrame({
+                    "Np pronóstico (mb)": [np_real_mb],
+                    "Qo pronóstico (bpd)": [ultimo_qo_real],
+                })
+                curva_np_grafica = pd.concat(
+                    [ancla_np, curva_np_pronostico], ignore_index=True
+                )
+                puntos_reg_np = curva_np_grafica[
+                    (curva_np_grafica["Np pronóstico (mb)"].notna())
+                    & (curva_np_grafica["Qo pronóstico (bpd)"] > 0)
+                ].copy()
+                if len(puntos_reg_np) >= 2:
+                    x_reg_np = puntos_reg_np["Np pronóstico (mb)"].to_numpy(dtype=float)
+                    log_y_reg_np = np.log(
+                        puntos_reg_np["Qo pronóstico (bpd)"].to_numpy(dtype=float)
+                    )
+                    pendiente_np, intercepto_np = np.polyfit(x_reg_np, log_y_reg_np, 1)
+                    x_linea_np = np.linspace(x_reg_np.min(), x_reg_np.max(), 200)
+                    curva_np_regresion = pd.DataFrame({
+                        "Np pronóstico (mb)": x_linea_np,
+                        "Qo regresión (bpd)": np.exp(intercepto_np + pendiente_np * x_linea_np),
+                    })
+
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=hist[COL_FECHA],
             y=hist[COL_QO],
             mode="markers",
             name="Producción histórica Qo",
-            marker=dict(size=8, color="#16A34A", opacity=0.88, line=dict(color="white", width=1.2)),
+            marker=dict(size=8, color="#16A34A", opacity=0.88, line=dict(color="black", width=1.2)),
             hovertemplate="<b>Histórico</b><br>Fecha: %{x|%d/%m/%Y}<br>Qo: %{y:,.2f} bpd<extra></extra>"
         ))
 
@@ -13719,23 +14470,22 @@ def pronostico_pozos_dca():
                 hovertemplate="<b>Punto ajuste</b><br>Fecha: %{x|%d/%m/%Y}<br>Qo: %{y:,.2f} bpd<extra></extra>"
             ))
             curva_hist = curva_sel[curva_sel["TIPO_CURVA"] == "Ajuste histórico"]
-            curva_ext = curva_sel[curva_sel["TIPO_CURVA"] == "Extensión"]
             fig.add_trace(go.Scatter(
                 x=curva_hist[COL_FECHA],
                 y=curva_hist["Qo ajuste (bpd)"],
                 mode="lines",
                 name="Ajuste exponencial",
-                line=dict(color="#111827", width=3.5),
+                line=dict(color="#DC2626", width=3.5, dash="dot"),
                 hovertemplate="<b>Ajuste</b><br>Fecha: %{x|%d/%m/%Y}<br>Qo ajuste: %{y:,.2f} bpd<extra></extra>"
             ))
-            if not curva_ext.empty:
+            if len(curva_pronostico_grafica) > 1:
                 fig.add_trace(go.Scatter(
-                    x=curva_ext[COL_FECHA],
-                    y=curva_ext["Qo ajuste (bpd)"],
+                    x=curva_pronostico_grafica[COL_FECHA],
+                    y=curva_pronostico_grafica["Qo pronóstico (bpd)"],
                     mode="lines",
-                    name="Extensión ajuste",
-                    line=dict(color="#111827", width=2.5, dash="dash"),
-                    hovertemplate="<b>Extensión</b><br>Fecha: %{x|%d/%m/%Y}<br>Qo ajuste: %{y:,.2f} bpd<extra></extra>"
+                    name="Pronóstico desde último Qo",
+                    line=dict(color="#111827", width=3, dash="solid"),
+                    hovertemplate="<b>Pronóstico</b><br>Fecha: %{x|%d/%m/%Y}<br>Qo: %{y:,.2f} bpd<extra></extra>"
                 ))
         else:
             st.warning(
@@ -13788,24 +14538,98 @@ def pronostico_pozos_dca():
             title_font=dict(size=17, family="Arial Black, Segoe UI", color="#111827"),
             tickfont=dict(size=13, family="Segoe UI", color="#111827")
         )
-        st.plotly_chart(fig, use_container_width=True)
+        fig_np = go.Figure()
+        fig_np.add_trace(go.Scatter(
+            x=hist["Np real (mb)"],
+            y=hist[COL_QO],
+            mode="markers",
+            name="Producción histórica Qo",
+            marker=dict(
+                size=8,
+                color="#16A34A",
+                opacity=0.88,
+                line=dict(color="black", width=1.2)
+            ),
+            hovertemplate=(
+                "<b>Histórico</b><br>Np: %{x:,.2f} mb<br>"
+                "Qo: %{y:,.2f} bpd<extra></extra>"
+            )
+        ))
+        if not curva_np_regresion.empty:
+            fig_np.add_trace(go.Scatter(
+                x=curva_np_regresion["Np pronóstico (mb)"],
+                y=curva_np_regresion["Qo regresión (bpd)"],
+                mode="lines",
+                name="Regresión lineal Qo-Np",
+                line=dict(color="#0057FF", width=3, dash="solid"),
+                hovertemplate=(
+                    "<b>Regresión semilog</b><br>Np: %{x:,.2f} mb<br>"
+                    "Qo: %{y:,.2f} bpd<extra></extra>"
+                )
+            ))
+        fig_np.update_layout(
+            title=f"<b>Qo vs Np - {pozo_sel}</b>",
+            template="plotly_white",
+            height=620,
+            hovermode="closest",
+            margin=dict(l=70, r=35, t=80, b=70),
+            plot_bgcolor="#F8F8FF",
+            paper_bgcolor="white",
+            font=dict(family="Segoe UI, Arial", size=13, color="#111827"),
+            title_font=dict(size=22, family="Arial Black, Segoe UI", color="#111827"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
+        )
+        fig_np.update_xaxes(
+            title_text="<b>Np acumulada (mb)</b>",
+            type="linear",
+            showgrid=True,
+            gridcolor="#E5E7EB",
+            showline=True,
+            linewidth=1.3,
+            linecolor="#111827",
+            mirror=True
+        )
+        fig_np.update_yaxes(
+            title_text="<b>Qo aceite (bpd)</b>",
+            type="log",
+            showgrid=True,
+            gridcolor="#E5E7EB",
+            minor=dict(showgrid=True, gridcolor="#EEF2F7"),
+            showline=True,
+            linewidth=1.3,
+            linecolor="#111827",
+            mirror=True
+        )
+
+        col_graf_tiempo, col_graf_np = st.columns(2, gap="large")
+        with col_graf_tiempo:
+            st.plotly_chart(fig, use_container_width=True)
+        with col_graf_np:
+            st.plotly_chart(fig_np, use_container_width=True)
 
         if info_sel is not None:
-            r2_txt = f"{info_sel['R2 log']:.3f}" if pd.notna(info_sel["R2 log"]) else "N/D"
             st.markdown(
                 f"""
-                <div class="dca-kpi-grid">
+                <div class="dca-kpi-grid" style="grid-template-columns: repeat(6, minmax(0, 1fr));">
                     <div class="dca-kpi-card">
                         <div class="dca-kpi-label">Di mensual nominal</div>
                         <div class="dca-kpi-value">{info_sel['Di mensual nominal (%)']:.3f} %</div>
                     </div>
                     <div class="dca-kpi-card">
-                        <div class="dca-kpi-label">Qoi ajuste manual</div>
-                        <div class="dca-kpi-value">{info_sel['Qi ajuste (bpd)']:,.2f} bpd</div>
+                        <div class="dca-kpi-label">Np real</div>
+                        <div class="dca-kpi-value">{np_real_mb:,.2f} mb</div>
                     </div>
                     <div class="dca-kpi-card">
-                        <div class="dca-kpi-label">R2 log</div>
-                        <div class="dca-kpi-value">{r2_txt}</div>
+                        <div class="dca-kpi-label">Np + pronóstico</div>
+                        <div class="dca-kpi-value">{np_total_pronostico_mb:,.2f} mb</div>
+                    </div>
+                    <div class="dca-kpi-card">
+                        <div class="dca-kpi-label">Reserva a recuperar</div>
+                        <div class="dca-kpi-value">{reserva_pronostico_mb:,.2f} mb</div>
+                    </div>
+                    <div class="dca-kpi-card">
+                        <div class="dca-kpi-label">Qo final límite</div>
+                        <div class="dca-kpi-value">{qo_limite_dca:,.1f} bpd</div>
                     </div>
                     <div class="dca-kpi-card">
                         <div class="dca-kpi-label">Puntos ajuste</div>
@@ -13832,25 +14656,28 @@ def pronostico_pozos_dca():
             st.dataframe(resumen_sel, use_container_width=True, hide_index=True, height=120)
 
         st.markdown(
-            """
+            f"""
             <div class="dca-section-card">
-                <div class="dca-section-title">Resultados exportables para pozos operando</div>
+                <div class="dca-section-title">Resultados exportables: {etiqueta_universo_dca.lower()}</div>
                 <div class="dca-section-subtitle">Para que el modulo abra rapido, el calculo masivo se ejecuta solo cuando presionas el boton.</div>
             </div>
             """,
             unsafe_allow_html=True
         )
         calcular_exportable = st.button(
-            "Calcular ajustes para todos los pozos operando",
-            key="dca_calcular_exportable",
+            f"Calcular ajustes para {etiqueta_universo_dca.lower()}",
+            key=f"dca_calcular_exportable_{key_universo_dca}",
             use_container_width=True
         )
 
         if calcular_exportable:
-            with st.spinner("Calculando ajustes DCA para pozos operando..."):
+            with st.spinner(f"Calculando ajustes DCA para {etiqueta_universo_dca.lower()}..."):
                 resultados = []
-                for pozo in pozos_operando:
-                    df_i = prod_f[prod_f[COL_POZO].astype(str) == str(pozo)].copy()
+                for pozo in pozos_disponibles_dca:
+                    df_i = prod_f[
+                        (prod_f[COL_POZO].astype(str) == str(pozo))
+                        & (prod_f[COL_FECHA] <= fin_mes_ref)
+                    ].copy()
                     info_i, _, _ = _ajustar_exponencial_pozo(df_i, int(meses_ajuste), int(min_puntos))
                     if info_i is None:
                         ult = df_i[df_i[COL_QO] > 0].sort_values(COL_FECHA).tail(1)
@@ -13891,7 +14718,7 @@ def pronostico_pozos_dca():
                     st.download_button(
                         "Descargar ajustes DCA CSV",
                         data=export_df.to_csv(index=False).encode("utf-8-sig"),
-                        file_name="ajustes_dca_pozos_operando.csv",
+                        file_name=f"ajustes_dca_pozos_{key_universo_dca}.csv",
                         mime="text/csv"
                     )
 
@@ -14258,6 +15085,31 @@ if vista == "Producción por pozo":
         ].copy()
 
     df_muestreos_pozo = df_muestreos_pozo.sort_values("FECHA MUESTREO").reset_index(drop=True)
+
+    # Rango temporal común para todos los gráficos del pozo. Los muestreos de
+    # agua pueden ser posteriores al último periodo productivo; al incluirlos
+    # aquí todas las figuras conservan exactamente la misma escala horizontal.
+    fechas_rango_pozo = [
+        pd.to_datetime(dfp[COL_FECHA], errors="coerce").dropna()
+    ]
+    if not df_muestreos_pozo.empty:
+        fechas_rango_pozo.append(
+            pd.to_datetime(
+                df_muestreos_pozo["FECHA MUESTREO"], errors="coerce"
+            ).dropna()
+        )
+
+    fechas_rango_pozo = pd.concat(fechas_rango_pozo, ignore_index=True).dropna()
+    rango_fechas_graficos_pozo = None
+    if not fechas_rango_pozo.empty:
+        fecha_min_graficos_pozo = fechas_rango_pozo.min()
+        fecha_max_graficos_pozo = fechas_rango_pozo.max()
+        if fecha_min_graficos_pozo == fecha_max_graficos_pozo:
+            fecha_max_graficos_pozo = fecha_max_graficos_pozo + pd.DateOffset(months=1)
+        rango_fechas_graficos_pozo = [
+            fecha_min_graficos_pozo,
+            fecha_max_graficos_pozo
+        ]
 
     if mostrar_seguimiento_pozo:
         seguimiento_actividades = load_seguimiento_actividades()
@@ -14906,6 +15758,7 @@ if vista == "Producción por pozo":
         family="Arial Black"
         ),showline=True,
         linewidth=1,
+        range=rango_fechas_graficos_pozo,
         linecolor='black')
 
     fig1.update_yaxes(title_text="<b>Qo (bpd) / Qb (bpd) / % Agua</b>",title_font=dict(size=22),
@@ -15026,6 +15879,7 @@ if vista == "Producción por pozo":
         family="Arial Black"
         ),showline=True,
         linewidth=1,
+        range=rango_fechas_graficos_pozo,
         linecolor='black')
 
     fig2.update_yaxes(title_text="Qw (bpd) / % Agua", title_font=dict(size=22),
@@ -15153,6 +16007,7 @@ if vista == "Producción por pozo":
         family="Arial Black"
         ),showline=True,
         linewidth=1,
+        range=rango_fechas_graficos_pozo,
         linecolor='black')
 
     fig_iny.update_yaxes(title_text="Qiny (bpd)", title_font=dict(size=22),
@@ -15237,6 +16092,7 @@ if vista == "Producción por pozo":
         family="Arial Black"
         ),showline=True,
         linewidth=1,
+        range=rango_fechas_graficos_pozo,
         linecolor='black')
 
     fig3.update_yaxes(title_text="RGA (pc/bl)", title_font=dict(size=22),
