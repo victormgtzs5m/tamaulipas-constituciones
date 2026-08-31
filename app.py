@@ -3285,7 +3285,7 @@ def crear_heatmap_kriging_burbujas(
 
             datos = datos[datos[variable] > 0].copy()
 
-            if variable in ["NP_BLS", "WP_BLS", "WINJ_BLS"]:
+            if variable in ["NP_BLS", "NP_60M_BLS", "WP_BLS", "WINJ_BLS"]:
                 datos["VALOR_KRIGING"] = datos[variable] / 1000
                 unidad = "mbl"
 
@@ -3318,7 +3318,12 @@ def crear_heatmap_kriging_burbujas(
 
             x = datos_interp[x_col].values.astype(float)
             y = datos_interp[y_col].values.astype(float)
-            z = datos_interp["VALOR_KRIGING"].values.astype(float)
+            z_real = datos_interp["VALOR_KRIGING"].values.astype(float)
+            usar_escala_log_np = variable in ["NP_BLS", "NP_60M_BLS"]
+            # Np suele tener una distribución muy sesgada. Interpolar su
+            # logaritmo evita que unos pocos pozos de gran acumulada oculten
+            # la variación espacial del resto del yacimiento.
+            z = np.log1p(z_real) if usar_escala_log_np else z_real
 
             xi = np.linspace(contorno["X"].min(), contorno["X"].max(), grid_n)
             yi = np.linspace(contorno["Y"].min(), contorno["Y"].max(), grid_n)
@@ -3331,10 +3336,10 @@ def crear_heatmap_kriging_burbujas(
                     x,
                     y,
                     z,
-                    variogram_model="spherical",
+                    variogram_model="spherical" if usar_escala_log_np else "exponential",
                     verbose=False,
                     enable_plotting=False,
-                    nlags=2,
+                    nlags=2 if usar_escala_log_np else 6,
                     weight=True
                 )
                 zi, _ = OK.execute("grid", xi, yi)
@@ -3349,6 +3354,12 @@ def crear_heatmap_kriging_burbujas(
                     zi_nearest = griddata(puntos, z, (XI, YI), method="nearest")
                     zi = np.where(np.isnan(zi), zi_nearest, zi)
 
+            if usar_escala_log_np:
+                # Regresar la superficie a mb para conservar unidades reales
+                # en la barra de color y en la información emergente.
+                zi = np.expm1(zi)
+                zi = np.maximum(zi, 0)
+
             poly = MplPath(contorno[["X", "Y"]].values)
             puntos_grid = np.vstack((XI.ravel(), YI.ravel())).T
             mask = poly.contains_points(puntos_grid).reshape(XI.shape)
@@ -3356,8 +3367,12 @@ def crear_heatmap_kriging_burbujas(
             zi_masked = np.where(mask, zi, np.nan)
 
             
-            zmin = np.nanpercentile(z, 5)
-            zmax = np.nanpercentile(z, 95)
+            if usar_escala_log_np:
+                zmin = np.nanpercentile(z_real, 30)
+                zmax = np.nanpercentile(z_real, 70)
+            else:
+                zmin = np.nanpercentile(z_real, 10)
+                zmax = np.nanpercentile(z_real, 90)
 
             #zmin = np.nanmin(z)
             #zmax = np.nanmax(z)
@@ -3633,14 +3648,16 @@ def mapa_burbujas(
         [0.1601, "#1F77B4"], [1.000, "#1F77B4"],
     ]
     escala_np_5_rangos = [
-        [0.0000, "#D62728"], [0.1100, "#D62728"],
-        [0.1133, "#F28E2B"], [0.2000, "#F28E2B"],
-        [0.2033, "#2CA02C"], [1.0000, "#2CA02C"],
+        [0.0000, "#D62728"], [0.1000, "#D62728"],
+        [0.1001, "#F28E2B"], [0.3333, "#F28E2B"],
+        [0.3334, "#2CA02C"], [0.6667, "#2CA02C"],
+        [0.6668, "#1F77B4"], [1.0000, "#1F77B4"],
     ]
     escala_np_5_ktia = [
         [0.0000, "#D62728"], [0.1000, "#D62728"],
-        [0.1033, "#F28E2B"], [0.3333, "#F28E2B"],
-        [0.3367, "#2CA02C"], [1.0000, "#2CA02C"],
+        [0.1001, "#F28E2B"], [0.3333, "#F28E2B"],
+        [0.3334, "#2CA02C"], [0.6667, "#2CA02C"],
+        [0.6668, "#1F77B4"], [1.0000, "#1F77B4"],
     ]
 
     # =====================================================
@@ -4294,18 +4311,25 @@ def mapa_burbujas(
             if usar_panel_filtros_mapa:
                 st.markdown("<div class='map-panel-section'>Variable de burbuja</div>", unsafe_allow_html=True)
 
+            variables_burbuja_mapa = [
+                "NP_BLS", "WP_BLS", "WINJ_BLS", "GP_PC", "ULTIMO_WC", "NP_NORM_MB"
+            ]
+            if tipo_mapa == "Mapa Grid":
+                variables_burbuja_mapa.append("NP_60M_BLS")
+
             variable = st.selectbox(
                 "Variable de burbuja",
-                ["NP_BLS", "WP_BLS", "WINJ_BLS", "GP_PC", "ULTIMO_WC", "NP_NORM_MB"],
+                variables_burbuja_mapa,
                 format_func=lambda x: {
                     "NP_BLS": "Aceite acumulado, Np [mb]",
                     "WP_BLS": "Agua acumulada, Wp [mb]",
                     "WINJ_BLS": "Agua inyectada acumulada, Winj [mb]",
                     "GP_PC": "Gas acumulado, Gp [mpc]",
                     "ULTIMO_WC": "Último % Agua [%]",
-                    "NP_NORM_MB": "Producción Acumulada Normalizada [mb/mes]"
+                    "NP_NORM_MB": "Producción Acumulada Normalizada [mb/mes]",
+                    "NP_60M_BLS": "Aceite acumulado primeros 60 meses [mb]"
                 }[x],
-                key=f"variable_mapa_burbujas_{modo_mapa}"
+                key=f"variable_mapa_burbujas_{modo_mapa}_{'grid' if tipo_mapa == 'Mapa Grid' else 'base'}"
             )
 
     control_zoom_mapa = c3 if ver_todos_campo else c2
@@ -6027,13 +6051,8 @@ def mapa_burbujas(
                         showscale=True,
                         colorbar=dict(
                             title=dict(text=f"{etiqueta_np} [mb]"), thickness=14,
-                            tickvals=(
-                                [15, 65.5, 200] if usar_rangos_np_5_ktia else [16.5, 47, 180]
-                            ) if col_np == "NP_60M_BLS" else None,
-                            ticktext=(
-                                ["0-30", "31-100", ">101"]
-                                if usar_rangos_np_5_ktia else ["0-33", "34-60", "61-300"]
-                            ) if col_np == "NP_60M_BLS" else None
+                            tickvals=[15, 65, 150, 250] if col_np == "NP_60M_BLS" else None,
+                            ticktext=["0-30", ">30-100", ">100-200", ">200"] if col_np == "NP_60M_BLS" else None
                         )
                     ),
                     name=etiqueta_np, legendgroup=f"{col_np}_campana", showlegend=True,
@@ -6489,7 +6508,8 @@ def mapa_burbujas(
             "WINJ_BLS": "Agua inyectada acumulada Winj",
             "GP_PC": "Gas acumulado Gp",
             "ULTIMO_WC": "% Agua",
-            "NP_NORM_MB": "Np normalizada"
+            "NP_NORM_MB": "Np normalizada",
+            "NP_60M_BLS": "Aceite acumulado primeros 60 meses"
         }.get(variable, variable)
 
         fig_heat = go.Figure()
@@ -7372,13 +7392,8 @@ def mapa_burbujas(
                     showscale=True,
                     colorbar=dict(
                         title=dict(text=f"{etiqueta_np} [mb]"), thickness=14,
-                        tickvals=(
-                            [15, 65.5, 200] if usar_rangos_np_5_ktia else [16.5, 47, 180]
-                        ) if col_np == "NP_60M_BLS" else None,
-                        ticktext=(
-                            ["0-30", "31-100", ">101"]
-                            if usar_rangos_np_5_ktia else ["0-33", "34-60", "61-300"]
-                        ) if col_np == "NP_60M_BLS" else None
+                        tickvals=[15, 65, 150, 250] if col_np == "NP_60M_BLS" else None,
+                        ticktext=["0-30", ">30-100", ">100-200", ">200"] if col_np == "NP_60M_BLS" else None
                     ),
                     line=dict(color=borde_np, width=2.5)
                 ),
@@ -11769,6 +11784,12 @@ def mapa_presion():
 
         st.markdown("<div class='presion-panel-section'>Filtros</div>", unsafe_allow_html=True)
 
+        mostrar_nombres_pozos_presion = st.checkbox(
+            "Mostrar nombres de pozos",
+            value=True,
+            key="mostrar_nombres_pozos_mapa_presion"
+        )
+
         mostrar_pozos_all_presion = st.checkbox(
             "Mostrar Pozos (All)",
             value=False,
@@ -11848,6 +11869,59 @@ def mapa_presion():
             options=anios_localizaciones_presion_disponibles,
             default=[],
             key=f"anios_localizaciones_mapa_presion_{yac_sel}"
+        )
+
+        # El zoom consulta los pozos con cima del yacimiento y todas las
+        # localizaciones 196, independientemente del yacimiento asignado.
+        opciones_zoom_presion = {"Todos": None}
+        coord_zoom_presion = coord[
+            coord["YACIMIENTO"].astype(str).str.upper().str.strip()
+            == str(yac_sel).upper().strip()
+        ].copy()
+        coord_zoom_presion["CIMA X UTM"] = pd.to_numeric(
+            coord_zoom_presion["CIMA X UTM"], errors="coerce"
+        )
+        coord_zoom_presion["CIMA Y UTM"] = pd.to_numeric(
+            coord_zoom_presion["CIMA Y UTM"], errors="coerce"
+        )
+        coord_zoom_presion = coord_zoom_presion.dropna(
+            subset=["CIMA X UTM", "CIMA Y UTM"]
+        )
+        for _, fila_zoom in coord_zoom_presion.iterrows():
+            etiqueta_zoom = (
+                f"Pozo · {fila_zoom['POZO']} · {fila_zoom.get('TERMINACION', '')}"
+            )
+            opciones_zoom_presion[etiqueta_zoom] = (
+                float(fila_zoom["CIMA X UTM"]),
+                float(fila_zoom["CIMA Y UTM"]),
+                str(fila_zoom["POZO"]),
+                "Pozo"
+            )
+
+        loc_zoom_196 = load_localizaciones().copy()
+        if not loc_zoom_196.empty:
+            mascara_196_zoom = (
+                loc_zoom_196["COLUMNA 1"].astype(str).str.strip().str.upper()
+                .notna()
+                & ~loc_zoom_196["COLUMNA 1"].astype(str).str.strip().str.upper()
+                .isin(["", "NAN", "NONE"])
+            )
+            loc_zoom_196 = loc_zoom_196[mascara_196_zoom].copy()
+            for _, fila_zoom in loc_zoom_196.iterrows():
+                etiqueta_zoom = (
+                    f"Localización 196 · {fila_zoom['POZO']} · {fila_zoom['YACIMIENTO']}"
+                )
+                opciones_zoom_presion[etiqueta_zoom] = (
+                    float(fila_zoom["FONDO X"]),
+                    float(fila_zoom["FONDO Y"]),
+                    str(fila_zoom["POZO"]),
+                    "Localización 196"
+                )
+
+        zoom_objetivo_presion = st.selectbox(
+            "Zoom a pozo o localización",
+            options=list(opciones_zoom_presion.keys()),
+            key=f"zoom_objetivo_mapa_presion_{yac_sel}"
         )
 
         mostrar_inyectores_operando_presion = st.checkbox(
@@ -12003,15 +12077,16 @@ def mapa_presion():
                 ~mapa_pozos_all_presion[COL_POZO].astype(str).str.strip().isin(terminaciones_coord)
             ].dropna(subset=["CIMA X UTM", "CIMA Y UTM"]).copy()
 
-    def preparar_localizaciones_presion(tipo_localizaciones):
+    def preparar_localizaciones_presion(tipo_localizaciones, filtrar_yacimiento=True):
         loc = load_localizaciones()
 
         if loc.empty:
             return pd.DataFrame()
 
-        loc = loc[
-            loc["YACIMIENTO"].astype(str).str.upper() == str(yac_sel).upper()
-        ].copy()
+        if filtrar_yacimiento:
+            loc = loc[
+                loc["YACIMIENTO"].astype(str).str.upper() == str(yac_sel).upper()
+            ].copy()
 
         if loc.empty:
             return pd.DataFrame()
@@ -12134,7 +12209,9 @@ def mapa_presion():
             localizaciones_presion.append(loc_315_presion)
 
     if mostrar_loc_196_presion:
-        loc_196_presion = preparar_localizaciones_presion("196")
+        loc_196_presion = preparar_localizaciones_presion(
+            "196", filtrar_yacimiento=False
+        )
         if not loc_196_presion.empty:
             loc_196_presion["TIPO_LOCALIZACION"] = "196"
             localizaciones_presion.append(loc_196_presion)
@@ -12342,8 +12419,8 @@ def mapa_presion():
     fig.add_trace(go.Scatter(
         x=mapa_todos["CIMA X UTM"],
         y=mapa_todos["CIMA Y UTM"],
-        mode="markers+text",
-        text=mapa_todos["POZO"],
+        mode="markers+text" if mostrar_nombres_pozos_presion else "markers",
+        text=mapa_todos["POZO"] if mostrar_nombres_pozos_presion else None,
         textposition="top center",
         textfont=dict(
             size=13,
@@ -12376,8 +12453,8 @@ def mapa_presion():
         fig.add_trace(go.Scatter(
             x=mapa_pozos_all_presion["CIMA X UTM"],
             y=mapa_pozos_all_presion["CIMA Y UTM"],
-            mode="markers+text",
-            text=mapa_pozos_all_presion["POZO"],
+            mode="markers+text" if mostrar_nombres_pozos_presion else "markers",
+            text=mapa_pozos_all_presion["POZO"] if mostrar_nombres_pozos_presion else None,
             textposition="top center",
             textfont=dict(size=13, color=color_etiqueta_pozo_presion, family="Arial"),
             marker=dict(
@@ -12611,8 +12688,8 @@ def mapa_presion():
                 fig.add_trace(go.Scatter(
                     x=tmp_loc["X_MAPA_PRESION"],
                     y=tmp_loc["Y_MAPA_PRESION"],
-                    mode="markers+text",
-                    text=tmp_loc["POZO"],
+                    mode="markers+text" if mostrar_nombres_pozos_presion else "markers",
+                    text=tmp_loc["POZO"] if mostrar_nombres_pozos_presion else None,
                     textposition="bottom center",
                     textfont=dict(
                         size=13,
@@ -12694,8 +12771,8 @@ def mapa_presion():
     fig.add_trace(go.Scatter(
         x=pres_mapa["CIMA X UTM"],
         y=pres_mapa["CIMA Y UTM"],
-        mode="markers+text",
-        text=pres_mapa["POZO"],
+        mode="markers+text" if mostrar_nombres_pozos_presion else "markers",
+        text=pres_mapa["POZO"] if mostrar_nombres_pozos_presion else None,
         textposition="bottom center",
         textfont=dict(
             size=11,
@@ -12807,6 +12884,32 @@ def mapa_presion():
             showlegend=True
         ))
 
+    # La estrella se agrega al final para mantenerla por encima de todas las
+    # burbujas y capas del mapa.
+    datos_zoom_presion = opciones_zoom_presion.get(zoom_objetivo_presion)
+    if datos_zoom_presion is not None:
+        x_zoom_presion, y_zoom_presion, nombre_zoom_presion, tipo_zoom_presion = datos_zoom_presion
+        fig.add_trace(go.Scatter(
+            x=[x_zoom_presion],
+            y=[y_zoom_presion],
+            mode="markers+text",
+            text=[nombre_zoom_presion],
+            textposition="top center",
+            textfont=dict(size=16, color="#D35400", family="Arial Black"),
+            marker=dict(
+                size=22,
+                symbol="star",
+                color="#FFD700",
+                line=dict(color="black", width=2)
+            ),
+            name=f"Zoom: {nombre_zoom_presion}",
+            hovertemplate=(
+                f"<b>{tipo_zoom_presion}:</b> %{{text}}<br>"
+                "<extra></extra>"
+            ),
+            showlegend=True
+        ))
+
     fig.update_layout(
         title=f"<b>Mapa de presión - {yac_sel}</b>",
         template="plotly_white",
@@ -12843,6 +12946,15 @@ def mapa_presion():
         linewidth=1,
         linecolor="black"
     )
+
+    if datos_zoom_presion is not None:
+        radio_zoom_presion = 1000
+        fig.update_xaxes(
+            range=[x_zoom_presion - radio_zoom_presion, x_zoom_presion + radio_zoom_presion]
+        )
+        fig.update_yaxes(
+            range=[y_zoom_presion - radio_zoom_presion, y_zoom_presion + radio_zoom_presion]
+        )
 
     with col_mapa_presion:
         st.plotly_chart(
