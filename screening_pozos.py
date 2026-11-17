@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-VERSION_SCREENING = 10
+VERSION_SCREENING = 11
 M3_A_BBL = 6.289810770
 M3_A_PC = 35.3147
 
@@ -78,11 +78,8 @@ def preparar_base_screening(produccion, acumuladas, estados, coordenadas):
     r["MOTIVO"]=r.MOTIVO.str.rstrip("; ")
     r["DIAGNOSTICO"]=np.select([r.RWA.lt(1),r.RWA.between(1,10),r.RWA.gt(10)],
         ["Wp/Np < 1","1 <= Wp/Np <= 10","Wp/Np > 10"],default="Sin relacion calculable")
-    es=estados.copy()
-    es["POZO"]=_clave(es.POZO)
-    es["ESTADO"]=es.ESTADO.fillna("Sin estado")
-    estado=es.groupby("POZO").ESTADO.agg(lambda x:" / ".join(sorted(set(x))))
-    r["ESTADO"]=r.POZO_FISICO.map(estado).fillna("Sin estado")
+    from estados_pozos import adjuntar_estados
+    r = adjuntar_estados(r.rename(columns={"POZO_FISICO": "POZO"}), estados).rename(columns={"POZO": "POZO_FISICO"})
     r["TERMINACIONES"]=term_acum.groupby(keys).TERMINACION.agg(tuple).reindex(pd.MultiIndex.from_frame(r[keys])).to_numpy()
     co=coordenadas.copy()
     co.columns=co.columns.str.upper().str.strip()

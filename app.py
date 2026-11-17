@@ -167,8 +167,9 @@ st.markdown("""
 <style>
     .main { background-color: #f7f9fb; }
 
+    /* Reserva espacio bajo la cabecera fija de Streamlit para el menu. */
     .block-container {
-        padding-top: 1.2rem;
+        padding-top: 4.5rem;
         padding-left: 1.5rem;
         padding-right: 1.5rem;
         max-width: 100%;
@@ -1643,7 +1644,7 @@ def preparar_acumuladas_mapa(fecha_corte=None):
     return acum
 
 @st.cache_data(ttl=300, show_spinner="Preparando últimos datos para Screening...")
-def preparar_base_screening_cache(db_version, modelo_version=4):
+def preparar_base_screening_cache(db_version, modelo_version=5):
     from screening_pozos import preparar_base_screening
     prod = load_prod_calc()
     co = load_coord()
@@ -1652,7 +1653,7 @@ def preparar_base_screening_cache(db_version, modelo_version=4):
     if COL_POZO_FISICO in prod:
         columnas.append(COL_POZO_FISICO)
     prod = agregar_pozo_fisico(prod[columnas], co)
-    return preparar_base_screening(prod, preparar_acumuladas_mapa(), load_estado_pozos(), co)
+    return preparar_base_screening(prod, preparar_acumuladas_mapa(), load_estado_pozos(por_yacimiento=True), co)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -2032,9 +2033,18 @@ def load_rma_intervenidos() -> pd.DataFrame:
 
     return rma
 
-@st.cache_data(show_spinner="Cargando presiones...")
 def load_presiones() -> pd.DataFrame:
-    pres = load_table(TABLA_PRESIONES)
+    # La version cambia al recargar o editar la base, sin reiniciar Streamlit.
+    version = Path(ruta_db).stat()
+    return _load_presiones_versionada(str(Path(ruta_db).resolve()),
+                                     version.st_mtime_ns, version.st_size)
+
+
+@st.cache_data(show_spinner="Cargando presiones...")
+def _load_presiones_versionada(archivo_db, db_version, db_size) -> pd.DataFrame:
+    # Lectura directa: load_table conserva una cache independiente de la version.
+    with sqlite3.connect(archivo_db) as conn:
+        pres = pd.read_sql_query(f'SELECT * FROM "{TABLA_PRESIONES}"', conn)
     pres = pres.loc[:, ~pres.columns.astype(str).str.startswith("Unnamed")]
     pres = normalizar_columnas(pres)
 
@@ -2401,25 +2411,34 @@ def load_salinidad(cache_version=20261013) -> pd.DataFrame:
     resultado.attrs["ORIGEN"] = origen_salinidad
     return resultado
 
-@st.cache_data(show_spinner="Cargando estado de pozos...")
-def load_estado_pozos(cache_version=3) -> pd.DataFrame:
-    estado = load_table(TABLA_ESTADO_POZOS)
-    estado = estado.loc[:, ~estado.columns.astype(str).str.startswith("Unnamed")]
-    estado = normalizar_columnas(estado)
+def load_estado_pozos(cache_version=4, por_yacimiento=False) -> pd.DataFrame:
+    archivo = Path(ruta_db).resolve()
+    revision = archivo.stat()
+    catalogo = _load_estado_pozos_versionado(str(archivo), revision.st_mtime_ns, revision.st_size, cache_version)
+    if por_yacimiento:
+        return catalogo
+    return catalogo.loc[catalogo["YACIMIENTO"].eq(""), ["POZO", "ESTADO", "SAP", "FECHA_ESTADO"]].copy()
 
-    cols_req = ["POZO", "ESTADO", "SAP"]
 
-    for c in cols_req:
-        if c not in estado.columns:
-            st.error(f"No existe la columna '{c}' en la tabla de estado de pozos.")
-            st.write(estado.columns.tolist())
-            return pd.DataFrame()
+@st.cache_data(show_spinner="Actualizando estados con la ultima produccion...")
+def _load_estado_pozos_versionado(archivo, db_version, db_size, cache_version):
+    from estados_pozos import construir_estados
+    with sqlite3.connect(archivo) as conn:
+        estado = pd.read_sql_query('SELECT * FROM "Estado"', conn)
+        prod = pd.read_sql_query('SELECT TERMINACION, FECHA, Yacimiento, Pozo, ACEITE, AGUA, GAS FROM "Produccion"', conn)
+        coord = pd.read_sql_query('SELECT TERMINACION, Pozo, Yacimiento FROM "Coord"', conn)
+    return construir_estados(estado, prod, coord)
 
-    estado["POZO"] = estado["POZO"].astype(str).str.strip()
-    estado["ESTADO"] = estado["ESTADO"].astype(str).str.strip()
-    estado["SAP"] = estado["SAP"].astype(str).str.strip()
 
-    return estado[["POZO", "ESTADO", "SAP"]].drop_duplicates()
+def aplicar_estados_pozos(datos, campo_completo=False):
+    from estados_pozos import adjuntar_estados
+    catalogo = load_estado_pozos(por_yacimiento=True)
+    if campo_completo and "YACIMIENTO" in datos:
+        resultado = adjuntar_estados(datos.drop(columns="YACIMIENTO"), catalogo)
+        resultado["YACIMIENTO"] = datos["YACIMIENTO"]
+        return resultado
+    return adjuntar_estados(datos, catalogo)
+
 
 # Ultimo Porcetaje de Agua por pozo
 @st.cache_data(show_spinner=False)
@@ -2442,20 +2461,14 @@ def calcular_ultimo_wc_mapa():
 
 
 @st.cache_data(show_spinner=False)
-def preparar_base_mapa_cache(df_coord_base, modo_mapa="TERM", pozos_destacados=(), version_acumuladas=2):
+def preparar_base_mapa_cache(df_coord_base, modo_mapa="TERM", pozos_destacados=(), version_acumuladas=2, revision_estados=None):
     """Ensambla una sola vez las capas tabulares que no dependen de los filtros."""
-    mapa_base = df_coord_base.copy()
+    from mapas_resumen import preparar_identidad_mapa
+    mapa_base = preparar_identidad_mapa(df_coord_base)
     acum = preparar_acumuladas_mapa()
     mapa_base = mapa_base.merge(acum, on=COL_POZO, how="left")
 
-    estado_pozos = load_estado_pozos()
-    if not estado_pozos.empty and "POZO" in mapa_base.columns:
-        mapa_base = mapa_base.merge(estado_pozos, on="POZO", how="left")
-        mapa_base["ESTADO"] = mapa_base["ESTADO"].fillna("Sin estado")
-        mapa_base["SAP"] = mapa_base["SAP"].fillna("Sin SAP")
-    else:
-        mapa_base["ESTADO"] = "Sin estado"
-        mapa_base["SAP"] = "Sin SAP"
+    mapa_base = aplicar_estados_pozos(mapa_base)
 
     mapa_base = mapa_base.merge(
         calcular_ultimo_wc_mapa(),
@@ -2479,386 +2492,214 @@ def preparar_base_mapa_cache(df_coord_base, modo_mapa="TERM", pozos_destacados=(
     mapa_base["ULTIMO_WC"] = mapa_base["ULTIMO_WC"].fillna(0)
     return mapa_base
 
-def estadistica():
-
-    st.markdown(
-        "<div class='section-title'>Estadística de producción acumulada por yacimiento</div>",
-        unsafe_allow_html=True
-    )
-
-    prod = load_prod_calc().copy()
-    #prod = calcular_columnas_produccion(df.copy())
-    prod = prod.sort_values([COL_YAC, COL_POZO, COL_FECHA]).copy()
-
-    prod["MES_CON_PROD"] = np.where(
-        (prod[COL_QO] > 0) | (prod[COL_QW] > 0) | (prod[COL_QG] > 0),
-        1,
-        0
-    )
-
-    prod_prod = prod[prod["MES_CON_PROD"] == 1].copy()
-
-    prod_prod["MES_PROD"] = (
-        prod_prod
-        .groupby(COL_POZO)
-        .cumcount() + 1
-    )
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        yacs = sorted(prod_prod[COL_YAC].dropna().astype(str).unique())
-
-        yacs_sel = st.multiselect(
-            "Yacimientos",
-            yacs,
-            default=yacs,
-            key="estadistica_yacs"
-        )
-
-    with c2:
-        meses_np = st.selectbox(
-            "Acumulada normalizada a:",
-            ["Total", "12 meses", "36 meses", "60 meses"],
-            index=0,
-            key="estadistica_meses_np"
-        )
-
-    if yacs_sel:
-        prod_prod = prod_prod[
-            prod_prod[COL_YAC].astype(str).isin(yacs_sel)
-        ].copy()
-
-    if prod_prod.empty:
-        st.warning("No hay datos para los filtros seleccionados.")
-        return
-
-    if meses_np == "12 meses":
-        max_meses = 12
-        nombre_np = "Np a 12 meses"
-
-    elif meses_np == "36 meses":
-        max_meses = 36
-        nombre_np = "Np a 36 meses"
-
-    elif meses_np == "60 meses":
-        max_meses = 60
-        nombre_np = "Np a 60 meses"
-
-    else:
-        max_meses = int(prod_prod["MES_PROD"].max())
-        nombre_np = "Np total"
-
-    # =====================================================
-    # COMPLETAR CURVAS HASTA max_meses
-    # Si un pozo no llega al mes filtrado, mantiene última Np
-    # =====================================================
-    curvas_completas = []
-
-    for pozo, g in prod_prod.groupby(COL_POZO):
-
-        g = g.sort_values("MES_PROD").copy()
-
-        if g.empty:
+def preparar_qoi_estadistica(prod, yacimiento, pozos):
+    """Reutiliza la serie de Producción por pozo, incluidos sus meses completados."""
+    filas = []
+    base = prod.loc[prod[COL_YAC].astype(str).eq(str(yacimiento))]
+    for pozo in pozos:
+        historia = base.loc[base[COL_POZO].astype(str).eq(str(pozo))].copy()
+        if historia.empty:
             continue
-
-        yac_pozo = g[COL_YAC].iloc[0]
-
-        meses_base = pd.DataFrame({
-            "MES_PROD": range(1, max_meses + 1)
+        serie = calcular_columnas_produccion(completar_fechas_pozo(historia))
+        serie = serie.sort_values(COL_FECHA, kind="stable").reset_index(drop=True)
+        valores = pd.to_numeric(serie[COL_QO], errors="coerce").to_numpy(dtype=float)
+        indice = 1 if len(valores) > 1 and valores[1] > valores[0] else 0
+        filas.append({
+            "Yacimiento": yacimiento, "Pozo / Terminación": pozo,
+            "Primer gasto (bpd)": valores[0],
+            "Segundo gasto (bpd)": valores[1] if len(valores) > 1 else np.nan,
+            "Registro utilizado": indice + 1,
+            "Fecha utilizada": serie.iloc[indice][COL_FECHA],
+            "Qoi": valores[indice],
+            "Np acumulada (mb)": float(serie[COL_ACEITE_BBL].sum() / 1000.0),
         })
+    return pd.DataFrame(filas)
 
-        g_full = meses_base.merge(
-            g[[COL_POZO, COL_YAC, "MES_PROD", COL_NP, COL_WP, COL_GP]],
-            on="MES_PROD",
-            how="left"
-        )
 
-        g_full[COL_POZO] = pozo
-        g_full[COL_YAC] = yac_pozo
+def estadistica():
+    from scipy import stats
 
-        g_full[COL_NP] = g_full[COL_NP].ffill()
-        g_full[COL_WP] = g_full[COL_WP].ffill()
-        g_full[COL_GP] = g_full[COL_GP].ffill()
-
-        g_full[[COL_NP, COL_WP, COL_GP]] = (
-            g_full[[COL_NP, COL_WP, COL_GP]]
-            .fillna(0)
-        )
-
-        curvas_completas.append(g_full)
-
-    if not curvas_completas:
-        st.warning("No hay curvas para graficar.")
+    st.markdown("<div class='section-title'>Análisis univariado del gasto inicial de aceite</div>",
+                unsafe_allow_html=True)
+    prod = load_data().copy()
+    yacimientos = sorted(prod[COL_YAC].dropna().astype(str).unique())
+    if not yacimientos:
+        st.info("No hay yacimientos con datos de producción.")
+        return
+    st.markdown("<div class='filter-box'>", unsafe_allow_html=True)
+    filtro_yac, filtro_pozos = st.columns([1.2, 2.8])
+    with filtro_yac:
+        yacimiento = st.selectbox("Yacimiento", yacimientos, key="estadistica_qoi_yacimiento")
+    base = prod.loc[prod[COL_YAC].astype(str).eq(yacimiento)]
+    disponibles = sorted(base[COL_POZO].dropna().astype(str).unique())
+    with filtro_pozos:
+        pozos = st.multiselect("Pozos / Terminaciones", disponibles, default=disponibles,
+                               key=f"estadistica_qoi_pozos_{yacimiento}")
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.caption("Qoi = primer gasto diario de aceite; si el segundo registro es mayor, se usa el segundo. "
+               "Se utiliza la misma serie de Producción por pozo, con meses completados; "
+               "no se omiten ceros ni se busca el máximo de toda la historia.")
+    if not pozos:
+        st.info("Selecciona al menos un pozo para realizar el análisis.")
+        return
+    datos = preparar_qoi_estadistica(prod, yacimiento, pozos)
+    original = datos["Qoi"]
+    numerica = pd.to_numeric(original, errors="coerce")
+    validos = numerica.notna() & np.isfinite(numerica)
+    x = numerica.loc[validos]
+    st.caption(f"Pozos seleccionados: {len(pozos)} · Válidos: {len(x)} · "
+               f"Faltantes: {original.isna().sum()} · "
+               f"No numéricos: {(original.notna() & numerica.isna()).sum()} · "
+               f"Infinitos: {np.isinf(numerica).sum()}")
+    with st.expander("Ver gastos iniciales por pozo"):
+        st.dataframe(datos, use_container_width=True, hide_index=True)
+        st.download_button("Descargar Qoi por pozo CSV", datos.to_csv(index=False).encode("utf-8-sig"),
+                           "Qoi_por_pozo.csv", "text/csv", key="estadistica_qoi_datos")
+    if len(x) < 3 or x.nunique() < 2:
+        st.warning("Se requieren al menos tres gastos válidos y variabilidad para realizar el análisis estadístico.")
         return
 
-    prod_plot = pd.concat(curvas_completas, ignore_index=True)
+    q1, q3 = x.quantile([0.25, 0.75])
+    ric = q3 - q1
+    li, ls = q1 - 1.5 * ric, q3 + 1.5 * ric
+    atipicos = datos.loc[x.index[(x < li) | (x > ls)]].copy()
+    w, valor_p = stats.shapiro(x)
+    media, mediana = x.mean(), x.median()
+    resumen = pd.Series({
+        "Muestras": len(x), "Mínimo": x.min(), "Primer cuartil": q1,
+        "Mediana": mediana, "Media": media, "Tercer cuartil": q3,
+        "Máximo": x.max(), "Rango": x.max() - x.min(), "Rango intercuartil": ric,
+        "Varianza muestral": x.var(ddof=1), "Desviación estándar muestral": x.std(ddof=1),
+        "Coeficiente de variación (%)": 100 * x.std(ddof=1) / media if media != 0 else np.nan,
+        "Asimetría": x.skew(), "Exceso de curtosis": x.kurt(),
+        "Límite inferior RIC": li, "Límite superior RIC": ls,
+        "Atípicos RIC": len(atipicos), "Shapiro-Wilk W": w, "Shapiro-Wilk p": valor_p,
+    }, name="Qoi")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Pozos analizados", len(x))
+    c2.metric("Media Qoi (bpd)", f"{media:,.2f}")
+    c3.metric("Mediana Qoi (bpd)", f"{mediana:,.2f}")
 
-    prod_plot = prod_plot[
-        prod_plot[COL_YAC].astype(str).isin(yacs_sel)
-    ].copy()
+    conteos, bordes = np.histogram(x.to_numpy(dtype=float), bins="sturges")
+    centros = (bordes[:-1] + bordes[1:]) / 2
+    fig_hist = go.Figure(go.Bar(
+        x=centros, y=conteos, width=np.diff(bordes),
+        marker=dict(color="#00A65A", line=dict(color="black", width=1.5)),
+        opacity=0.8, text=conteos, textposition="outside",
+        textfont=dict(size=12, color="black", family="Tahoma"),
+        customdata=np.column_stack([bordes[:-1], bordes[1:]]),
+        hovertemplate="Qoi: %{customdata[0]:,.2f} a %{customdata[1]:,.2f} bpd"
+                      "<br>Pozos: %{y}<extra></extra>",
+        name="Pozos", showlegend=False))
+    fig_hist.update_layout(title=f"<b>Distribuci\u00f3n de Qoi | {yacimiento}</b>",
+                           xaxis_title="Gasto inicial de aceite, Qoi (bpd)",
+                           yaxis_title="N\u00famero de pozos", bargap=0)
+    interiores = x.loc[x.between(li, ls)]
+    fig_box = go.Figure(go.Box(
+        q1=[q1], median=[mediana], q3=[q3],
+        lowerfence=[interiores.min()], upperfence=[interiores.max()],
+        y=["Qoi"], orientation="h", boxpoints=False,
+        fillcolor="rgba(242,165,65,0.55)", line=dict(color="#B86E12", width=2),
+        name="Qoi", showlegend=False))
+    detalle = datos.loc[x.index]
+    es_atipico = (x < li) | (x > ls)
+    fig_box.add_trace(go.Scatter(
+        x=x, y=["Qoi"] * len(x), mode="markers",
+        marker=dict(size=9, color=np.where(es_atipico, "#C00000", "#1F4E79"),
+                    line=dict(color="white", width=1)),
+        customdata=detalle[["Pozo / Terminaci\u00f3n", "Registro utilizado", "Np acumulada (mb)"]].to_numpy(),
+        hovertemplate="<b>%{customdata[0]}</b><br>Qoi: %{x:,.2f} bpd"
+                      "<br>Np acumulada: %{customdata[2]:,.2f} mb"
+                      "<br>Registro utilizado: %{customdata[1]}<extra></extra>",
+        name="Pozos", showlegend=False))
+    # Cada punto conserva su Qoi real y se apila dentro de su clase de Sturges.
+    clases = np.clip(np.searchsorted(bordes, x.to_numpy(), side="right") - 1,
+                     0, len(conteos) - 1)
+    niveles = pd.Series(clases).groupby(pd.Series(clases), sort=False).cumcount().to_numpy() + 0.5
+    fig_hist.add_trace(go.Scatter(
+        x=x, y=niveles, mode="markers",
+        marker=dict(size=9, color=np.where(es_atipico, "#C00000", "#1F4E79"),
+                    line=dict(color="white", width=1)),
+        customdata=detalle[["Pozo / Terminaci\u00f3n", "Registro utilizado", "Np acumulada (mb)"]].to_numpy(),
+        hovertemplate="<b>%{customdata[0]}</b><br>Qoi: %{x:,.2f} bpd"
+                      "<br>Np acumulada: %{customdata[2]:,.2f} mb"
+                      "<br>Registro utilizado: %{customdata[1]}<extra></extra>",
+        name="Pozos", showlegend=False))
+    etiquetas_histograma = st.checkbox("Mostrar pozo, Qoi y acumulada en el histograma",
+                                       value=True, key="estadistica_qoi_etiquetas_histograma")
+    if etiquetas_histograma:
+        for i, (_, fila) in enumerate(detalle.iterrows()):
+            fig_hist.add_annotation(
+                x=float(fila["Qoi"]), y=float(niveles[i]),
+                text=(f"<b>{fila['Pozo / Terminaci\u00f3n']}</b>"
+                      f"<br>Qoi: {fila['Qoi']:,.2f} bpd"
+                      f"<br>Np: {fila['Np acumulada (mb)']:,.2f} mb"),
+                showarrow=True, arrowhead=0, arrowwidth=1, arrowcolor="#7F8C8D",
+                ax=[-45, 45, -70, 70][i % 4], ay=[-45, -75, 45, 75][i % 4],
+                bgcolor="rgba(255,255,255,0.9)", borderpad=3,
+                font=dict(size=10, color="black", family="Tahoma"))
+    mostrar_etiquetas = st.checkbox("Mostrar pozo, Qoi y acumulada en el boxplot",
+                                    value=True, key="estadistica_qoi_etiquetas")
+    if mostrar_etiquetas:
+        # Alterna las etiquetas a ambos lados de la caja, como en el notebook.
+        orden = detalle.sort_values("Qoi", kind="stable")
+        desplazamientos = [-60, 65, -125, 130]
+        for i, (_, fila) in enumerate(orden.iterrows()):
+            fig_box.add_annotation(
+                x=float(fila["Qoi"]), y="Qoi",
+                text=(f"<b>{fila['Pozo / Terminaci\u00f3n']}</b>"
+                      f"<br>Qoi: {fila['Qoi']:,.2f} bpd"
+                      f"<br>Np: {fila['Np acumulada (mb)']:,.2f} mb"),
+                showarrow=True, arrowhead=0, arrowwidth=1, arrowcolor="#7F8C8D",
+                ax=0, ay=desplazamientos[i % len(desplazamientos)],
+                bgcolor="rgba(255,255,255,0.9)", borderpad=3,
+                font=dict(size=10, color="black", family="Tahoma"))
+    fig_box.update_layout(title=f"<b>Boxplot de Qoi | {yacimiento}</b>",
+                          xaxis_title="Gasto inicial de aceite, Qoi (bpd)",
+                          yaxis_title="", yaxis=dict(showticklabels=False))
+    for figura in (fig_hist, fig_box):
+        figura.add_vline(x=media, line_color="#C00000", line_dash="dash", line_width=2,
+                         annotation_text=f"Media: {media:,.2f}", annotation_position="top left")
+        figura.add_vline(x=mediana, line_color="#1F4E79", line_dash="dot", line_width=2,
+                         annotation_text=f"Mediana: {mediana:,.2f}", annotation_position="bottom right")
+        figura.update_layout(height=560, template="plotly_white",
+            font=dict(size=14, color="black", family="Arial Black"),
+            plot_bgcolor="white", paper_bgcolor="white", margin=dict(t=90, b=70))
+        figura.update_xaxes(showline=True, linewidth=1, linecolor="black",
+            tickfont=dict(size=11, color="black", family="Tahoma"), tickformat=",.0f",
+            gridcolor="#EAECEE")
+        figura.update_yaxes(showline=True, linewidth=1, linecolor="black",
+            tickfont=dict(size=11, color="black", family="Tahoma"), gridcolor="#EAECEE")
+    fig_hist.update_yaxes(dtick=1, range=[0, max(conteos) * 1.25])
+    grafico_hist, grafico_box = st.columns(2)
+    config = {"displaylogo": False, "toImageButtonOptions": {"format": "png", "scale": 3}}
+    with grafico_hist:
+        st.plotly_chart(fig_hist, use_container_width=True, config=config,
+                        key="estadistica_qoi_histograma")
+    with grafico_box:
+        st.plotly_chart(fig_box, use_container_width=True, config=config,
+                        key="estadistica_qoi_boxplot")
+    st.caption("Histograma: clases de Sturges. Boxplot: bigotes de 1.5 RIC; puntos rojos: pozos at\u00edpicos. "
+               "Np es la acumulada total de aceite de la historia del pozo en el yacimiento seleccionado (mb). "
+               "Consulta cada pozo al pasar el cursor. Descarga los gr\u00e1ficos desde su barra de herramientas.")
+    st.dataframe(resumen.rename_axis("Estadístico").reset_index(),
+                 use_container_width=True, hide_index=True)
+    if len(x) > 5000:
+        st.warning("Para más de 5,000 observaciones, el valor p de Shapiro-Wilk puede ser impreciso.")
+    st.caption("Shapiro-Wilk (α = 0.05): " +
+               ("se rechaza la hipótesis de normalidad." if valor_p < 0.05
+                else "no se rechaza la hipótesis de normalidad."))
+    if media == 0:
+        st.caption("El coeficiente de variación no está definido porque la media es cero.")
+    st.markdown("### Pozos atípicos por la regla de 1.5 RIC")
+    st.dataframe(atipicos, use_container_width=True, hide_index=True)
+    st.caption("Los atípicos se señalan y se conservan en todos los cálculos.")
+    c1, c2 = st.columns(2)
+    c1.download_button("Descargar estadísticas CSV", resumen.to_csv().encode("utf-8-sig"),
+                       "01_estadisticas_Qoi.csv", "text/csv")
+    c2.download_button("Descargar atípicos CSV", atipicos.to_csv(index=False).encode("utf-8-sig"),
+                       "04_atipicos_Qoi.csv", "text/csv")
 
-    # Meses reales de producción por pozo
-    meses_reales = (
-        prod_prod
-        .groupby([COL_YAC, COL_POZO], as_index=False)
-        .agg(
-            MESES_PROD_REAL=("MES_PROD", "max")
-        )
-    )
-
-    # =====================================================
-    # RESUMEN POR POZO / YACIMIENTO
-    # Este resumen impacta KPI y boxplots
-    # =====================================================
-    resumen = (
-        prod_plot
-        .sort_values([COL_POZO, "MES_PROD"])
-        .groupby([COL_YAC, COL_POZO], as_index=False)
-        .agg(
-            NP_FINAL=(COL_NP, "last"),
-            WP_FINAL=(COL_WP, "last"),
-            GP_FINAL=(COL_GP, "last"),
-            MESES_CONSIDERADOS=("MES_PROD", "max")
-        )
-    )
-
-    resumen = resumen.merge(
-        meses_reales,
-        on=[COL_YAC, COL_POZO],
-        how="left"
-    )
-
-    resumen = resumen[resumen["NP_FINAL"] > 0].copy()
-
-    if resumen.empty:
-        st.warning("No hay pozos con Np positiva para el filtro seleccionado.")
-        return
-
-    # =====================================================
-    # KPI CARDS POR YACIMIENTO
-    # =====================================================
-    kpis = (
-        resumen.groupby(COL_YAC, as_index=False)
-        .agg(
-            POZOS_PRODUCTORES=(COL_POZO, "nunique"),
-            NP_PROM=("NP_FINAL", "mean"),
-            NP_P50=("NP_FINAL", "median"),
-            MESES_PROM=("MESES_PROD_REAL", "mean")
-        )
-    )
-
-    cols = st.columns(len(kpis))
-
-    for i, row in kpis.iterrows():
-        with cols[i]:
-            kpi_card(
-                f"{row[COL_YAC]}",
-                f"{row['POZOS_PRODUCTORES']:,.0f}",
-                "pozos",
-                #"#1F2937"
-                "#1F77B4"
-            )
-
-    # =====================================================
-    # CURVA PROMEDIO POR YACIMIENTO
-    # =====================================================
-    fig_curvas = go.Figure()
-
-    for yac in yacs_sel:
-
-        data_yac = prod_plot[
-            prod_plot[COL_YAC].astype(str) == str(yac)
-        ].copy()
-
-        if data_yac.empty:
-            continue
-
-        prom_yac = (
-            data_yac
-            .groupby("MES_PROD", as_index=False)
-            .agg(
-                NP_PROM=(COL_NP, "mean"),
-                NP_P50=(COL_NP, "median"),
-                POZOS=(COL_POZO, "nunique")
-            )
-        )
-
-        fig_curvas.add_trace(
-            go.Scatter(
-                x=prom_yac["MES_PROD"],
-                y=prom_yac["NP_PROM"],
-                mode="lines+markers",
-                name=f"Promedio {yac}",
-                line=dict(width=4),
-                marker=dict(size=5),
-                customdata=prom_yac[["POZOS", "NP_P50"]],
-                hovertemplate=
-                    f"<b>Yacimiento:</b> {yac}<br>" +
-                    "<b>Mes producción:</b> %{x}<br>" +
-                    "<b>Np promedio:</b> %{y:,.1f} mbl<br>" +
-                    "<b>Np P50:</b> %{customdata[1]:,.1f} mbl<br>" +
-                    "<b>Pozos considerados:</b> %{customdata[0]:,.0f}" +
-                    "<extra></extra>"
-            )
-        )
-
-    fig_curvas.update_layout(
-        title=f"<b>Curva promedio de producción acumulada normalizada - {nombre_np}</b>",
-        template="plotly_white",
-        height=650,
-        xaxis_title="Tiempo de producción, meses",
-        yaxis_title="Np acumulada promedio (mbl)",
-        hovermode="x unified",
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.05,
-            xanchor="center",
-            x=0.5
-        ),
-        font=dict(size=14, color="black", family="Arial Black"),
-        plot_bgcolor="white",
-        paper_bgcolor="white"
-    )
-
-    fig_curvas.update_xaxes(
-        dtick=6,
-        showline=True,
-        linewidth=1,
-        linecolor="black",
-        showgrid=True,
-        gridcolor="#EAECEE"
-    )
-
-    fig_curvas.update_yaxes(
-        showline=True,
-        linewidth=1,
-        linecolor="black",
-        showgrid=True,
-        gridcolor="#EAECEE"
-    )
-
-    st.plotly_chart(fig_curvas, use_container_width=True)
-
-    # =====================================================
-    # BOXPLOT NP
-    # =====================================================
-    fig_box_np = px.box(
-        resumen,
-        x=COL_YAC,
-        y="NP_FINAL",
-        points="all",
-        hover_name=COL_POZO,
-        title=f"<b>Boxplot {nombre_np} por yacimiento</b>",
-        template="plotly_white"
-    )
-
-    promedios_np = (
-        resumen.groupby(COL_YAC, as_index=False)["NP_FINAL"]
-        .mean()
-    )
-
-    fig_box_np.add_trace(
-        go.Scatter(
-            x=promedios_np[COL_YAC],
-            y=promedios_np["NP_FINAL"],
-            mode="markers+text",
-            text=promedios_np["NP_FINAL"].round(1),
-            textposition="top center",
-            marker=dict(
-                symbol="square",
-                size=9,
-                color="blue",
-                line=dict(color="black", width=1)
-            ),
-            name="Promedio"
-        )
-    )
-
-    fig_box_np.update_traces(
-        marker=dict(
-            size=7,
-            opacity=0.70,
-            line=dict(color="black", width=1)
-        )
-    )
-
-    fig_box_np.update_layout(
-        height=620,
-        xaxis_title="Yacimiento",
-        yaxis_title=f"{nombre_np} (mbl)",
-        font=dict(size=14, color="black", family="Arial Black"),
-        plot_bgcolor="white",
-        paper_bgcolor="white"
-    )
-
-    # =====================================================
-    # BOXPLOT MESES REALES PRODUCIENDO
-    # =====================================================
-    fig_box_meses = px.box(
-        resumen,
-        x=COL_YAC,
-        y="MESES_PROD_REAL",
-        points="all",
-        hover_name=COL_POZO,
-        title="<b>Meses reales con producción por yacimiento</b>",
-        template="plotly_white"
-    )
-
-    promedios_meses = (
-        resumen.groupby(COL_YAC, as_index=False)["MESES_PROD_REAL"]
-        .mean()
-    )
-
-    fig_box_meses.add_trace(
-        go.Scatter(
-            x=promedios_meses[COL_YAC],
-            y=promedios_meses["MESES_PROD_REAL"],
-            mode="markers+text",
-            text=promedios_meses["MESES_PROD_REAL"].round(1),
-            textposition="top center",
-            marker=dict(
-                symbol="square",
-                size=9,
-                color="blue",
-                line=dict(color="black", width=1)
-            ),
-            name="Promedio"
-        )
-    )
-
-    fig_box_meses.update_traces(
-        marker=dict(
-            size=7,
-            opacity=0.70,
-            line=dict(color="black", width=1)
-        )
-    )
-
-    fig_box_meses.update_layout(
-        height=560,
-        xaxis_title="Yacimiento",
-        yaxis_title="Meses reales con producción",
-        font=dict(size=14, color="black", family="Arial Black"),
-        plot_bgcolor="white",
-        paper_bgcolor="white"
-    )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.plotly_chart(fig_box_np, use_container_width=True)
-
-    with col2:
-        st.plotly_chart(fig_box_meses, use_container_width=True)
-
-    with st.expander("Ver tabla estadística por pozo"):
-        st.dataframe(
-            resumen.sort_values([COL_YAC, "NP_FINAL"], ascending=[True, False]),
-            use_container_width=True,
-            height=400
-        )
 
 def seleccionar_presiones_mapa(
     pres: pd.DataFrame,
@@ -3379,9 +3220,18 @@ def load_operativas():
 
     return op
 
-@st.cache_data(ttl=300, show_spinner=False)
 def preparar_presiones_mapa_compartidas(yacimiento, fecha_referencia=None):
-    pres = load_presiones()
+    version = Path(ruta_db).stat()
+    return _preparar_presiones_mapa_versionada(
+        yacimiento, fecha_referencia, str(Path(ruta_db).resolve()),
+        version.st_mtime_ns, version.st_size
+    )
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _preparar_presiones_mapa_versionada(yacimiento, fecha_referencia,
+                                       archivo_db, db_version, db_size):
+    pres = _load_presiones_versionada(archivo_db, db_version, db_size)
     pres = pres[
         normalizar_clave_texto(pres["YACIMIENTO"]) == str(yacimiento).strip().upper()
     ].copy()
@@ -3398,7 +3248,11 @@ def preparar_presiones_mapa_compartidas(yacimiento, fecha_referencia=None):
     )
     if seleccion.empty:
         return pd.DataFrame(columns=columnas)
-    return unir_presiones_coordenadas(seleccion, load_coord())
+    # Las coordenadas deben corresponder a la misma base recargada.
+    with sqlite3.connect(archivo_db) as conn:
+        coord = pd.read_sql_query(f'SELECT * FROM "{TABLA_COORD}"', conn)
+    coord = normalizar_columnas(coord)
+    return unir_presiones_coordenadas(seleccion, coord)
 
 
 def preparar_vectores_produccion_idpi(produccion):
@@ -3613,11 +3467,11 @@ def mapa_burbujas(
     mapa = preparar_base_mapa_cache(
         df_coord,
         modo_mapa=modo_mapa,
-        pozos_destacados=destacados_cache
+        pozos_destacados=destacados_cache,
+        revision_estados=(Path(ruta_db).stat().st_mtime_ns, Path(ruta_db).stat().st_size)
     ).copy()
     if es_modulo_mapas:
         mapa["NP_60M_BLS"] = mapa[COL_POZO].map(acum.set_index(COL_POZO)["NP_60M_BLS"])
-    estado_pozos = load_estado_pozos()
     ultimo_wc = calcular_ultimo_wc_mapa()
 
     cols_acum = [
@@ -4047,18 +3901,10 @@ def mapa_burbujas(
                     ].copy()
 
                 mapa = listado.merge(acum, on=COL_POZO, how="left")
+                from mapas_resumen import preparar_identidad_mapa
+                mapa = preparar_identidad_mapa(mapa)
 
-                if not estado_pozos.empty and "POZO" in mapa.columns:
-                    mapa = mapa.merge(
-                        estado_pozos,
-                        on="POZO",
-                        how="left"
-                    )
-                    mapa["ESTADO"] = mapa["ESTADO"].fillna("Sin estado")
-                    mapa["SAP"] = mapa["SAP"].fillna("Sin SAP")
-                else:
-                    mapa["ESTADO"] = "Sin estado"
-                    mapa["SAP"] = "Sin SAP"
+                mapa = aplicar_estados_pozos(mapa)
 
                 mapa = mapa.merge(
                     ultimo_wc,
@@ -4141,6 +3987,11 @@ def mapa_burbujas(
             mapa[COL_YAC] = mapa["YACIMIENTO_FUENTE"].where(yac_fuente_valido, mapa[COL_YAC])
         else:
             mapa = mapa[mapa[COL_YAC].astype(str) == str(yac_mapa)].copy()
+
+    from mapas_resumen import preparar_identidad_mapa
+    mapa = preparar_identidad_mapa(mapa)
+    mapa = aplicar_estados_pozos(mapa, campo_completo=ver_todos_campo)
+    mapa["ESTADO_MAPA"] = mapa["ESTADO"].apply(normalizar_estado)
 
     leyenda_estados = generar_leyenda_estados(mapa["ESTADO_MAPA"])
     colores_yacimiento_campanas = {
@@ -5349,6 +5200,9 @@ def mapa_burbujas(
         ("Productores Históricos", pozos_np_mapa, "green"),
         ("Inyectores Históricos", pozos_iny_mapa, "blue"),
     ]
+    if es_modulo_mapas:
+        from mapas_resumen import contadores_estados
+        contadores_mapa.extend(contadores_estados(mapa, colores_estado_base, estados_activos_mapa))
     if mostrar_salinidad_kriging:
         contadores_mapa.append(
             ("Pozos Kriging Salinidad", conteos_muestras_kriging.get("Salinidad", 0), "#DC2626")
@@ -6470,9 +6324,13 @@ def mapa_burbujas(
                 })
             )
 
-            for sap, color in leyenda_sap.items():
+            for sap, color, posicion_nombre in (
+                (sap, color, posicion)
+                for sap, color in leyenda_sap.items()
+                for posicion in mapa_gis["POSICION_NOMBRE"].unique()
+            ):
 
-                tmp = mapa_gis[mapa_gis["SAP_MAPA"] == sap].copy()
+                tmp = mapa_gis[(mapa_gis["SAP_MAPA"] == sap) & mapa_gis["POSICION_NOMBRE"].eq(posicion_nombre)].copy()
 
                 if tmp.empty:
                     continue
@@ -6483,7 +6341,7 @@ def mapa_burbujas(
                         lon=tmp["LON"],
                         mode="markers+text" if mostrar_nombres else "markers",
                         text=tmp["POZO"] if mostrar_nombres else None,
-                        textposition="top center",
+                        textposition=posicion_nombre,
                         marker=dict(
                             size=9,
                             color=color
@@ -6497,18 +6355,22 @@ def mapa_burbujas(
                             "<b>SAP:</b> %{customdata[3]}<br>" +
                             "<extra></extra>",
                         legendgroup=sap,
-                        showlegend=True
+                        showlegend=not any(traza.legendgroup == sap for traza in fig_gis.data)
                     )
                 )
 
         elif not ver_campanas_global:
 
-            for estado, color in leyenda_estados.items():
+            for estado, color, posicion_nombre in (
+                (estado, color, posicion)
+                for estado, color in sorted(leyenda_estados.items(), key=lambda item: item[0] == "OP")
+                for posicion in mapa_gis["POSICION_NOMBRE"].unique()
+            ):
 
                 if estado not in estados_activos_mapa:
                     continue
 
-                tmp = mapa_gis[mapa_gis["ESTADO_MAPA"] == estado].copy()
+                tmp = mapa_gis[(mapa_gis["ESTADO_MAPA"] == estado) & mapa_gis["POSICION_NOMBRE"].eq(posicion_nombre)].copy()
 
                 if tmp.empty:
                     continue
@@ -6519,7 +6381,7 @@ def mapa_burbujas(
                         lon=tmp["LON"],
                         mode="markers+text" if mostrar_nombres else "markers",
                         text=tmp["POZO"] if mostrar_nombres else None,
-                        textposition="top center",
+                        textposition=posicion_nombre,
                         marker=dict(
                             size=9 if ver_todos_campo else 7,
                             color=color
@@ -6533,7 +6395,7 @@ def mapa_burbujas(
                             "<b>SAP:</b> %{customdata[3]}<br>" +
                             "<extra></extra>",
                         legendgroup=estado,
-                        showlegend=True
+                        showlegend=not any(traza.legendgroup == estado for traza in fig_gis.data)
                     )
                 )
 
@@ -7967,7 +7829,7 @@ def mapa_burbujas(
             if mostrar_nombres:
                 fig.add_trace(go.Scatter(
                     x=tmp[x_col], y=tmp[y_col], mode="text", text=tmp["POZO"],
-                    textposition="top center",
+                    textposition=tmp["POSICION_NOMBRE"],
                     textfont=dict(color="#000000" if not ver_rma_global else color, size=12),
                     legendgroup=f"historico_{grupo_historico}", showlegend=False, hoverinfo="skip"
                 ))
@@ -8096,7 +7958,7 @@ def mapa_burbujas(
                     y=tmp[y_col],
                     mode="text",
                     text=tmp["POZO"],
-                    textposition="top center",
+                    textposition=tmp["POSICION_NOMBRE"],
                     textfont=dict(
                         color="black",
                         size=10,
@@ -8110,7 +7972,7 @@ def mapa_burbujas(
 
     elif not ver_campanas_global and not (mostrar_salinidad_kriging or mostrar_api_kriging):
 
-        for estado, color in leyenda_estados.items():
+        for estado, color in sorted(leyenda_estados.items(), key=lambda item: item[0] == "OP"):
 
             if estado not in estados_activos_mapa:
                 continue
@@ -8148,7 +8010,7 @@ def mapa_burbujas(
                     y=tmp[y_col],
                     mode="text",
                     text=tmp["POZO"],
-                    textposition="top center",
+                    textposition=tmp["POSICION_NOMBRE"],
                     textfont=dict(
                         color="black",
                         size=10 if ver_todos_campo else 12,
@@ -12968,17 +12830,7 @@ def mapa_presion():
     # ESTADO DE POZOS
     # =========================
     try:
-        estado = load_estado_pozos()
-
-        if not estado.empty:
-            pres_mapa = pres_mapa.merge(
-                estado,
-                on="POZO",
-                how="left"
-            )
-        else:
-            pres_mapa["ESTADO"] = "Sin estado"
-            pres_mapa["SAP"] = "Sin SAP"
+        pres_mapa = aplicar_estados_pozos(pres_mapa)
 
     except Exception:
         pres_mapa["ESTADO"] = "Sin estado"
@@ -14754,9 +14606,22 @@ def load_prod_dca(db_version=None):
 
 
 def pronostico_pozos_dca():
+    import dca_estilo as _dca_estilo
+    revision_estilo_dca = Path(_dca_estilo.__file__).stat().st_mtime_ns
+    if getattr(_dca_estilo, "_REVISION_ARCHIVO_CARGADO", None) != revision_estilo_dca:
+        importlib.invalidate_caches()
+        _dca_estilo = importlib.reload(_dca_estilo)
+        _dca_estilo._REVISION_ARCHIVO_CARGADO = revision_estilo_dca
+    st.markdown(_dca_estilo.CSS, unsafe_allow_html=True)
+    with st.container(key="dca_root"):
+        _contenido_pronostico_pozos_dca()
+
+
+def _contenido_pronostico_pozos_dca():
+    from dca_estilo import aplicar_estilo_grafico_dca, estilizar_tabla_dca, agregar_resultados_ajuste_dca, mostrar_tabla_resultado_dca
     st.markdown(
         """
-        <div style="
+        <div class="dca-hero" style="
             background: linear-gradient(90deg, #2F363D 0%, #252B31 100%);
             color: white;
             padding: 16px 20px;
@@ -14949,6 +14814,7 @@ def pronostico_pozos_dca():
         st.caption("Comingled consolidado por POZO fisico.")
 
     with cuerpo_dca:
+        st.markdown('<div class="dca-content-panel-marker"></div>', unsafe_allow_html=True)
         prod_terminaciones = prod_terminaciones_cache
 
         def _consolidar_historia_dca(datos: pd.DataFrame) -> pd.DataFrame:
@@ -15437,11 +15303,24 @@ def pronostico_pozos_dca():
             mirror=True
         )
 
+        if info_sel is not None:
+            fecha_fin_resultados_dca = (
+                curva_np_pronostico[COL_FECHA].max() if not curva_np_pronostico.empty else None
+            )
+            agregar_resultados_ajuste_dca(fig, info_sel, np_real_mb,
+                np_total_pronostico_mb, reserva_pronostico_mb, qo_limite_dca, fecha_fin_resultados_dca)
+            agregar_resultados_ajuste_dca(fig_np, info_sel, np_real_mb,
+                np_total_pronostico_mb, reserva_pronostico_mb, qo_limite_dca, fecha_fin_resultados_dca)
+
         col_graf_tiempo, col_graf_np = st.columns(2, gap="large")
         with col_graf_tiempo:
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(aplicar_estilo_grafico_dca(fig), use_container_width=True,
+                key="dca_grafico_tiempo", theme=None,
+                config={"editable": False, "edits": {"annotationPosition": True}, "displaylogo": False})
         with col_graf_np:
-            st.plotly_chart(fig_np, use_container_width=True)
+            st.plotly_chart(aplicar_estilo_grafico_dca(fig_np), use_container_width=True,
+                key="dca_grafico_np", theme=None,
+                config={"editable": False, "edits": {"annotationPosition": True}, "displaylogo": False})
 
         if len(curva_pronostico_grafica) > 1:
             st.markdown("#### Datos de Pronóstico desde último Qo")
@@ -15450,7 +15329,7 @@ def pronostico_pozos_dca():
             ].copy().rename(columns={COL_FECHA: "Fecha"})
             tabla_curva["Fecha"] = tabla_curva["Fecha"].dt.strftime("%Y-%m-%d")
             st.caption("Incluye el último Qo histórico como punto inicial y los puntos mensuales de la curva. Selecciona las celdas y copia con Ctrl+C para pegarlas en Excel.")
-            st.dataframe(tabla_curva, use_container_width=True, hide_index=True)
+            st.dataframe(estilizar_tabla_dca(tabla_curva), use_container_width=True, hide_index=True)
             with st.expander("Copiar todos los datos para Excel"):
                 st.text_area(
                     "Selecciona el contenido con Ctrl+A y copia con Ctrl+C",
@@ -15469,38 +15348,6 @@ def pronostico_pozos_dca():
             )
 
         if info_sel is not None:
-            st.markdown(
-                f"""
-                <div class="dca-kpi-grid" style="grid-template-columns: repeat(6, minmax(0, 1fr));">
-                    <div class="dca-kpi-card">
-                        <div class="dca-kpi-label">Di mensual nominal</div>
-                        <div class="dca-kpi-value">{info_sel['Di mensual nominal (%)']:.3f} %</div>
-                    </div>
-                    <div class="dca-kpi-card">
-                        <div class="dca-kpi-label">Np real</div>
-                        <div class="dca-kpi-value">{np_real_mb:,.2f} mb</div>
-                    </div>
-                    <div class="dca-kpi-card">
-                        <div class="dca-kpi-label">Np + pronóstico</div>
-                        <div class="dca-kpi-value">{np_total_pronostico_mb:,.2f} mb</div>
-                    </div>
-                    <div class="dca-kpi-card">
-                        <div class="dca-kpi-label">Reserva a recuperar</div>
-                        <div class="dca-kpi-value">{reserva_pronostico_mb:,.2f} mb</div>
-                    </div>
-                    <div class="dca-kpi-card">
-                        <div class="dca-kpi-label">Qo final límite</div>
-                        <div class="dca-kpi-value">{qo_limite_dca:,.1f} bpd</div>
-                    </div>
-                    <div class="dca-kpi-card">
-                        <div class="dca-kpi-label">Puntos ajuste</div>
-                        <div class="dca-kpi-value">{info_sel['Puntos ajuste']:,.0f}</div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
             resumen_sel = pd.DataFrame([info_sel]).copy()
             for col_fecha in ["Fecha última producción", "Fecha inicio ajuste", "Fecha fin ajuste"]:
                 if col_fecha in resumen_sel.columns:
@@ -15514,7 +15361,7 @@ def pronostico_pozos_dca():
                 """,
                 unsafe_allow_html=True
             )
-            st.dataframe(resumen_sel, use_container_width=True, hide_index=True, height=120)
+            mostrar_tabla_resultado_dca(resumen_sel)
 
         st.markdown(
             f"""
@@ -15571,7 +15418,7 @@ def pronostico_pozos_dca():
                     resultados_show = resultados_df.copy()
                     for col_fecha in ["Fecha ultima produccion", "Fecha inicio ajuste", "Fecha fin ajuste"]:
                         resultados_show[col_fecha] = pd.to_datetime(resultados_show[col_fecha], errors="coerce").dt.strftime("%d/%m/%Y")
-                    st.dataframe(resultados_show, use_container_width=True, height=360, hide_index=True)
+                    st.dataframe(estilizar_tabla_dca(resultados_show), use_container_width=True, height=360, hide_index=True)
 
                     export_df = resultados_df.copy()
                     for col_fecha in ["Fecha ultima produccion", "Fecha inicio ajuste", "Fecha fin ajuste"]:
@@ -16182,248 +16029,49 @@ def analisis_rga_yacimiento():
         key=f"descarga_rga_{clave_yac}"
     )
 
-st.markdown(
-    """
-    <div class="main-module-nav-marker"></div>
-    <style>
-    div[data-testid="stElementContainer"]:has(.st-key-vista_principal) {
-        width: 100% !important;
-        max-width: 100% !important;
-    }
-    .st-key-vista_principal {
-        background: linear-gradient(90deg, #2F363D 0%, #252B31 100%);
-        border: 1px solid #1F252B;
-        border-radius: 12px;
-        padding: 12px 14px 10px 14px;
-        margin: 4px 0 18px 0;
-        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
-        width: 100% !important;
-        max-width: 100% !important;
-        box-sizing: border-box;
-    }
-    .st-key-vista_principal > label {
-        color: #AEB7C2 !important;
-        font-size: 11px;
-        font-weight: 800;
-        text-transform: uppercase;
-        letter-spacing: .7px;
-        margin-bottom: 8px;
-    }
-    .st-key-vista_principal label,
-    .st-key-vista_principal p,
-    .st-key-vista_principal span {
-        color: #E5E7EB !important;
-        font-family: "Segoe UI", Arial, sans-serif;
-        font-size: 13px;
-        font-weight: 650;
-    }
-    .st-key-vista_principal [role="radiogroup"] {
-        gap: 10px;
-        align-items: center;
-        flex-wrap: wrap;
-        width: 100% !important;
-        max-width: 100% !important;
-    }
-    .st-key-vista_principal [role="radio"] {
-        background: rgba(255,255,255,0.06);
-        border: 1px solid rgba(255,255,255,0.10);
-        border-radius: 999px;
-        padding: 6px 10px;
-        transition: all .15s ease-in-out;
-    }
-    .st-key-vista_principal [role="radio"][aria-checked="true"] {
-        background: rgba(255,255,255,0.14);
-        border-color: rgba(255,255,255,0.35);
-        box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12);
-    }
-    div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]),
-    div[data-testid="stRadio"]:has(input[aria-label="Mapas"]),
-    div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) {
-        background: linear-gradient(90deg, #2F363D 0%, #252B31 100%);
-        border: 1px solid #1F252B;
-        border-radius: 12px;
-        padding: 12px 14px 10px 14px;
-        margin: 4px 0 18px 0;
-        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
-    }
-    div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) > label,
-    div[data-testid="stRadio"]:has(input[aria-label="Mapas"]) > label,
-    div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) > label {
-        color: #AEB7C2 !important;
-        font-size: 11px;
-        font-weight: 800;
-        text-transform: uppercase;
-        letter-spacing: .7px;
-        margin-bottom: 8px;
-    }
-    div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) label,
-    div[data-testid="stRadio"]:has(input[aria-label="Mapas"]) label,
-    div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) label,
-    div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) p,
-    div[data-testid="stRadio"]:has(input[aria-label="Mapas"]) p,
-    div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) p,
-    div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) span,
-    div[data-testid="stRadio"]:has(input[aria-label="Mapas"]) span,
-    div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) span {
-        color: #E5E7EB !important;
-        font-family: "Segoe UI", Arial, sans-serif;
-        font-size: 13px;
-        font-weight: 650;
-    }
-    div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) [role="radiogroup"],
-    div[data-testid="stRadio"]:has(input[aria-label="Mapas"]) [role="radiogroup"],
-    div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) [role="radiogroup"] {
-        gap: 10px;
-        align-items: center;
-        flex-wrap: wrap;
-    }
-    div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) [role="radio"],
-    div[data-testid="stRadio"]:has(input[aria-label="Mapas"]) [role="radio"],
-    div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) [role="radio"] {
-        background: rgba(255,255,255,0.06);
-        border: 1px solid rgba(255,255,255,0.10);
-        border-radius: 999px;
-        padding: 6px 10px;
-        transition: all .15s ease-in-out;
-    }
-    div[data-testid="stRadio"]:has(input[aria-label="Producción por pozo"]) [role="radio"][aria-checked="true"],
-    div[data-testid="stRadio"]:has(input[aria-label="Mapas"]) [role="radio"][aria-checked="true"],
-    div[data-testid="stRadio"]:has(input[aria-label="Presiones"]) [role="radio"][aria-checked="true"] {
-        background: rgba(255,255,255,0.14);
-        border-color: rgba(255,255,255,0.35);
-        box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12);
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+import navegacion as _navegacion
 
-st.sidebar.markdown(
-    """
-    <style>
-    section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #2F363D 0%, #252B31 100%);
-        border-right: 1px solid #1F252B;
-        box-shadow: 10px 0 24px rgba(15, 23, 42, 0.10);
-    }
-    section[data-testid="stSidebar"] > div {
-        padding-top: 1rem;
-    }
-    section[data-testid="stSidebar"] .nav-sidebar-title {
-        background: #20262D;
-        border: 1px solid #111827;
-        border-radius: 8px;
-        color: #E5E7EB;
-        font-size: 15px;
-        font-weight: 850;
-        letter-spacing: .2px;
-        padding: 10px 12px;
-        margin: 0 0 12px 0;
-        font-family: "Segoe UI", Arial, sans-serif;
-    }
-    section[data-testid="stSidebar"] .nav-sidebar-section {
-        color: #AEB7C2;
-        font-size: 10px;
-        font-weight: 850;
-        text-transform: uppercase;
-        letter-spacing: .7px;
-        margin: 10px 0 8px 2px;
-        font-family: "Segoe UI", Arial, sans-serif;
-    }
-    section[data-testid="stSidebar"] div[data-testid="stRadio"] > label {
-        display: none;
-    }
-    section[data-testid="stSidebar"] div[data-testid="stRadio"] label,
-    section[data-testid="stSidebar"] div[data-testid="stRadio"] p,
-    section[data-testid="stSidebar"] div[data-testid="stRadio"] span {
-        color: #E5E7EB !important;
-        font-family: "Segoe UI", Arial, sans-serif;
-        font-size: 13px;
-        font-weight: 700;
-    }
-    section[data-testid="stSidebar"] div[data-testid="stRadio"] [role="radiogroup"] {
-        gap: 4px;
-    }
-    section[data-testid="stSidebar"] div[data-testid="stRadio"] [role="radio"] {
-        width: 100%;
-        background: rgba(255,255,255,0.045);
-        border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 8px;
-        padding: 7px 10px;
-        margin: 2px 0;
-        transition: all .15s ease-in-out;
-        justify-content: flex-start;
-        align-items: center;
-        text-align: left;
-    }
-    section[data-testid="stSidebar"] div[data-testid="stRadio"] [role="radio"] > div {
-        margin-left: 0 !important;
-        padding-left: 0 !important;
-    }
-    section[data-testid="stSidebar"] div[data-testid="stRadio"] [role="radio"] p {
-        margin-left: 0 !important;
-        text-align: left !important;
-    }
-    section[data-testid="stSidebar"] div[data-testid="stRadio"] [role="radio"][aria-checked="true"] {
-        background: rgba(255,255,255,0.14);
-        border-color: rgba(255,255,255,0.35);
-        box-shadow: inset 3px 0 0 #FF4B4B;
-    }
-    </style>
-    <div class="nav-sidebar-title">Tamaulipas-Constituciones</div>
-    <div class="nav-sidebar-section">Panel de Navegación</div>
-    """,
-    unsafe_allow_html=True
-)
+# Actualiza tambien las sesiones abiertas que conservaron el menu anterior.
+if getattr(_navegacion, "VERSION_MENU", 0) != 2:
+    importlib.invalidate_caches()
+    _navegacion = importlib.reload(_navegacion)
 
-vista = st.radio(
-    "Seleccionar opción",
-    [
-        "Producción por pozo",
-        "Comparativa por pozo",
-        "Mapas",
-        "Modo Animado",
-        "Campañas 2011-2020",
-        "RMA 2011-2020",
-        "Operación Campo",
-        "Producción Campo",
-        "Presiones",
-        "Estadística",
-        "Inyección",
-        "Reservas",
-        "Pronóstico",
-        "RGA por yacimiento",
-        "Screening Pozos",
-        "Waterflood",
-    ],
-    horizontal=True,
-    key="vista_principal"
+vista = _navegacion.renderizar_menu()
+
+if vista in ["Pronóstico", "Type Curve"]:
+    def seleccionar_submodulo_pronostico():
+        st.session_state["vista_principal"] = st.session_state["pronostico_submodulo"]
+
+    st.session_state["pronostico_submodulo"] = vista
+    st.radio(
+        "Módulo de Pronóstico", ["Pronóstico", "Type Curve"],
+        format_func=lambda opcion: "Curvas de declinación (DCA)" if opcion == "Pronóstico" else opcion,
+        horizontal=True, key="pronostico_submodulo",
+        on_change=seleccionar_submodulo_pronostico,
     )
 
 # =========================================================
 # FILTROS SOLO PARA PRODUCCIÓN POR POZO Y COMPARATIVA
 # =========================================================
+if vista == "Producción por pozo":
+    import produccion_estilo as _estilo_prod
+    revision_estilo_prod = Path(_estilo_prod.__file__).stat().st_mtime_ns
+    if getattr(_estilo_prod, "_REVISION_ARCHIVO_CARGADO", None) != revision_estilo_prod:
+        importlib.invalidate_caches()
+        _estilo_prod = importlib.reload(_estilo_prod)
+        _estilo_prod._REVISION_ARCHIVO_CARGADO = revision_estilo_prod
+    st.markdown(_estilo_prod.CSS, unsafe_allow_html=True)
+    st.markdown('<div class="prod-style-marker"></div>', unsafe_allow_html=True)
+
 if vista in ["Producción por pozo", "Comparativa por pozo"]:
 
     if vista == "Producción por pozo":
         st.markdown("<div class='filter-box'>", unsafe_allow_html=True)
 
     if vista == "Producción por pozo":
-        f1, f_modo, f2 = st.columns([1.4, 1.5, 2.1])
+        f2, f_modo = st.columns([1.7, 1.5], gap="medium")
     else:
         f2 = st.container()
-
-    if vista == "Producción por pozo":
-        with f1:
-            yacs = sorted(df[COL_YAC].dropna().astype(str).unique())
-            yac_sel = st.multiselect(
-                "Filtro por Yacimiento",
-                yacs,
-                default=yacs,
-                key="prod_yac_sel"
-            )
-    else:
-        yac_sel = None
 
     if vista == "Producción por pozo":
         with f_modo:
@@ -16433,14 +16081,13 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
                 horizontal=False,
                 key="prod_modo_historia_pozo"
             )
+            mostrar_mapa_produccion = st.checkbox(
+                "Mostrar mapa del pozo", value=True, key="prod_mostrar_mapa")
     else:
         modo_vista_pozo = "Por terminación"
 
     df_prod_pozo_fisico = agregar_pozo_fisico(df, df_coord)
-    df_base_filtro = (
-        df_prod_pozo_fisico[df_prod_pozo_fisico[COL_YAC].astype(str).isin(yac_sel)].copy()
-        if vista == "Producción por pozo" and yac_sel else df_prod_pozo_fisico.copy()
-    )
+    df_base_filtro = df_prod_pozo_fisico.copy()
 
     if vista == "Producción por pozo":
         with f2:
@@ -16458,7 +16105,7 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
             pozos = sorted(df_base_filtro[col_selector_pozo].dropna().astype(str).unique())
 
             if not pozos:
-                st.warning("No hay pozos para el yacimiento seleccionado.")
+                st.warning("No hay pozos con datos de producci\u00f3n.")
                 st.stop()
 
             pozo_sel = st.selectbox(
@@ -16485,6 +16132,35 @@ if vista in ["Producción por pozo", "Comparativa por pozo"]:
         pass
 
     if vista == "Producción por pozo":
+        yacs_pozo = sorted(df_pozo_raw[COL_YAC].dropna().astype(str).str.strip().unique())
+        if not yacs_pozo:
+            st.warning("El pozo seleccionado no tiene yacimiento asignado.")
+            st.stop()
+        with f2:
+            if len(yacs_pozo) > 1:
+                etiqueta_yac = (
+                    "Yacimiento del mapa" if modo_vista_pozo == "Historia completa por pozo"
+                    else "Yacimiento del pozo")
+                yacimiento_mapa_produccion = st.selectbox(
+                    etiqueta_yac, yacs_pozo,
+                    key=f"prod_yacimiento_pozo_{modo_vista_pozo}_{pozo_sel}")
+            else:
+                yacimiento_mapa_produccion = yacs_pozo[0]
+            seleccion_estado_pozo = df_prod_pozo_fisico.loc[
+                df_prod_pozo_fisico[col_selector_pozo].astype(str).eq(str(pozo_sel))
+                & df_prod_pozo_fisico[COL_YAC].astype(str).str.strip().eq(yacimiento_mapa_produccion),
+                ["POZO_FISICO", COL_YAC]
+            ].drop_duplicates().rename(columns={"POZO_FISICO": "POZO"})
+            estado_pozo_seleccionado = aplicar_estados_pozos(seleccion_estado_pozo)
+            estado_pozo_txt = (
+                estado_pozo_seleccionado["ESTADO"].iloc[0]
+                if not estado_pozo_seleccionado.empty else "Sin estado"
+            )
+            _estilo_prod.mostrar_estado_pozo(yacimiento_mapa_produccion, estado_pozo_txt)
+        if modo_vista_pozo != "Historia completa por pozo":
+            df_pozo_raw = df_pozo_raw.loc[
+                df_pozo_raw[COL_YAC].astype(str).str.strip().eq(yacimiento_mapa_produccion)
+            ].copy()
         st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================================================
@@ -16640,7 +16316,7 @@ if vista == "Producción por pozo":
             df_muestreos_pozo["FECHA MUESTREO"] == fecha_ultimo_muestreo
         ].iloc[-1]
         agua_ultimo_muestreo_txt = (
-            f" | % Agua Lab: <b>{ultimo_muestreo['% AGUA LAB']:,.2f}%</b>"
+            f" | % Agua Lab: <b class='muestreo-agua-valor'>{ultimo_muestreo['% AGUA LAB']:,.2f}%</b>"
         )
     st.markdown(
         "<span class='small-note'>Última actualización de muestreos (% Agua Lab): "
@@ -16660,13 +16336,7 @@ if vista == "Producción por pozo":
     k1, k2, k3, k4, k5, k6, k7, k8, k9, k10, k11 = st.columns(11)
 
     with k1:
-        kpi_card(
-            "Inicio producción",
-            first_row[COL_FECHA].strftime("%d/%m/%Y"),
-            "",
-            #"#1F2937",
-            "#1F77B4",
-        )
+        _estilo_prod.kpi_card('Inicio producción', first_row[COL_FECHA].strftime('%d/%m/%Y'), '', '#1F77B4')
 
     qo_validos = dfp[dfp[COL_QO] > 0]
 
@@ -16685,22 +16355,10 @@ if vista == "Producción por pozo":
             else "-"
         )
 
-        kpi_card(
-            "Última producción",
-            fecha_txt,
-            "",
-            #"#374151",
-            "#1F77B4",
-        )
+        _estilo_prod.kpi_card('Última producción', fecha_txt, '', '#1F77B4')
 
     with k3:
-        kpi_card(
-            "Gasto inicial",
-            f"{first_row[COL_QO]:,.1f}",
-            "bpd",
-            #"#1F2937",
-            "#1F77B4",
-        )
+        _estilo_prod.kpi_card('Gasto inicial', f'{first_row[COL_QO]:,.1f}', 'bpd', '#1F77B4')
 
     # Último Qo mayor que cero
     qo_validos = dfp[dfp[COL_QO] > 0]
@@ -16740,76 +16398,28 @@ if vista == "Producción por pozo":
     )
 
     with k4:
-        kpi_card(
-            "Último Gasto Aceite",
-            f"{ultimo_qo:,.2f}",
-            "bpd",
-            #"#1F2937",
-            "#1F77B4",
-        )
+        _estilo_prod.kpi_card('Último Gasto Aceite', f'{ultimo_qo:,.2f}', 'bpd', '#1F77B4')
 
     with k5:
-        kpi_card(
-            "Último Gasto Agua",
-            f"{ultimo_qw:,.2f}",
-            "bpd",
-            #"#1F2937",
-            "#1F77B4",
-        )
+        _estilo_prod.kpi_card('Último Gasto Agua', f'{ultimo_qw:,.2f}', 'bpd', '#1F77B4')
 
     with k6:
-        kpi_card(
-            "% Agua",
-            f"{ultimo_wcp:,.2f}",
-            "%",
-            #"#1F2937",
-            "#1F77B4",
-        )
+        _estilo_prod.kpi_card('% Agua', f'{ultimo_wcp:,.2f}', '%', '#1F77B4')
 
     with k7:
-        kpi_card(
-            "Último Gasto Gas",
-            f"{ultimo_qg:,.2f}",
-            "mpcd",
-            #"#1F2937",
-            "#1F77B4",
-        )
+        _estilo_prod.kpi_card('Último Gasto Gas', f'{ultimo_qg:,.2f}', 'mpcd', '#1F77B4')
 
     with k8:
-        kpi_card(
-            "RGA",
-            f"{ultimo_rga:,.2f}",
-            "mpcd",
-           # "#1F2937",
-            "#1F77B4",
-        )
+        _estilo_prod.kpi_card('RGA', f'{ultimo_rga:,.2f}', 'mpcd', '#1F77B4')
 
     with k9:
-        kpi_card(
-            "Acumulada Aceite",
-            f"{dfp[COL_NP].iloc[-1]:,.2f}",
-            "mbl",
-           # "#1F2937",
-            "#1F77B4",
-        )
+        _estilo_prod.kpi_card('Acumulada Aceite', f'{dfp[COL_NP].iloc[-1]:,.2f}', 'mbl', '#1F77B4')
 
     with k10:
-        kpi_card(
-            "Acumulada Agua",
-            f"{dfp[COL_WP].iloc[-1]:,.2f}",
-            "mbl",
-            #"#1F2937",
-            "#1F77B4",
-        )
+        _estilo_prod.kpi_card('Acumulada Agua', f'{dfp[COL_WP].iloc[-1]:,.2f}', 'mbl', '#1F77B4')
 
     with k11:
-        kpi_card(
-            "Acumulada Gas",
-            f"{dfp[COL_GP].iloc[-1]:,.2f}",
-            "mmpc",
-            #"#1F2937",
-            "#1F77B4",
-        )
+        _estilo_prod.kpi_card('Acumulada Gas', f'{dfp[COL_GP].iloc[-1]:,.2f}', 'mmpc', '#1F77B4')
 
 # =========================================================
 # Comparativa FUNCIÓN PARA GRÁFICAS COMPARATIVAS
@@ -17270,7 +16880,7 @@ if vista == "Producción por pozo":
     marcar_inicios_yacimiento(fig1)
     marcar_eventos_seguimiento(fig1)
 
-    st.plotly_chart(fig1, use_container_width=True)
+    st.plotly_chart(_estilo_prod.aplicar_grafico(fig1), use_container_width=True, theme=None)
 
     fig2 = make_subplots(specs=[[{"secondary_y": True}]])
     df_iny_yac = preparar_inyeccion_por_yacimiento(df_pozo_raw)
@@ -17392,7 +17002,7 @@ if vista == "Producción por pozo":
 
     marcar_inicios_yacimiento(fig2)
 
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(_estilo_prod.aplicar_grafico(fig2), use_container_width=True, theme=None)
 
     fig_iny = make_subplots(specs=[[{"secondary_y": True}]])
 
@@ -17520,7 +17130,7 @@ if vista == "Producción por pozo":
 
     marcar_inicios_yacimiento(fig_iny)
 
-    st.plotly_chart(fig_iny, use_container_width=True)
+    st.plotly_chart(_estilo_prod.aplicar_grafico(fig_iny), use_container_width=True, theme=None)
 
     fig3 = make_subplots(specs=[[{"secondary_y": True}]])
 
@@ -17604,7 +17214,33 @@ if vista == "Producción por pozo":
 
     marcar_inicios_yacimiento(fig3)
 
-    st.plotly_chart(fig3, use_container_width=True)
+    st.plotly_chart(_estilo_prod.aplicar_grafico(fig3), use_container_width=True, theme=None)
+
+    if mostrar_mapa_produccion:
+        import produccion_mapa as _mapa_prod
+        revision_mapa_prod = Path(_mapa_prod.__file__).stat().st_mtime_ns
+        if getattr(_mapa_prod, "_REVISION_ARCHIVO_CARGADO", None) != revision_mapa_prod:
+            importlib.invalidate_caches()
+            _mapa_prod = importlib.reload(_mapa_prod)
+            _mapa_prod._REVISION_ARCHIVO_CARGADO = revision_mapa_prod
+        if getattr(_mapa_prod, "VERSION_VISTA", 0) != 3:
+            st.error("Actualiza produccion_mapa.py junto con app.py para mostrar el campo ensanchado.")
+            st.stop()
+        base_mapa_pozo = _mapa_prod.preparar_mapa_pozo(
+            df_coord, df, df_pozo_raw, yacimiento_mapa_produccion, M3_A_BBL)
+        contorno_pozo, asignacion_pozo = load_contorno_asignacion()
+        figura_mapa_pozo = _mapa_prod.crear_mapa_pozo(
+            base_mapa_pozo, contorno_pozo, asignacion_pozo,
+            yacimiento_mapa_produccion, pozo_sel)
+        if figura_mapa_pozo is None:
+            st.info(f"No hay coordenadas disponibles para {pozo_sel} "
+                    f"en {yacimiento_mapa_produccion}.")
+        else:
+            st.plotly_chart(_estilo_prod.aplicar_grafico(figura_mapa_pozo, mapa=True), use_container_width=True, key=f'prod_mapa_pozo_panoramica_v3_{revision_mapa_prod}', config={'scrollZoom': True, 'displayModeBar': True, 'doubleClick': 'reset+autosize', 'displaylogo': False}, theme=None)
+            st.caption("Naranja: pozo seleccionado. Burbujas: Np acumulada. "
+                       "Vista completa del campo y del yacimiento seleccionado. "
+                       "Proporciones originales: misma escala horizontal y vertical.")
+
 
     # =====================================================
 # TABLA PRODUCCIÓN DEL POZO
@@ -17612,7 +17248,7 @@ if vista == "Producción por pozo":
 
     st.markdown(
         """
-        <div style="
+        <div class="prod-table-heading" style="
             background-color:#F8F9F9;
             padding:10px;
             border-radius:8px;
@@ -17668,11 +17304,8 @@ if vista == "Producción por pozo":
         COL_GP: "{:,.1f}",
     })
 
-    st.dataframe(
-        tabla_pozo,
-        use_container_width=True,
-        height=350
-    )
+    with st.container(key="prod_tabla_historica_contenedor"):
+        st.dataframe(_estilo_prod.estilizar_tabla(tabla_pozo), use_container_width=True, height=350, key="prod_tabla_historica")
     
 # VISTA COMPARATIVO
 # =========================================================
@@ -18677,6 +18310,21 @@ elif vista == "Reservas":
     reservas()
 elif vista == "Pronóstico":
     pronostico_pozos_dca()
+elif vista == "Type Curve":
+    import type_curve as _type_curve
+    revision_type_curve = Path(_type_curve.__file__).stat().st_mtime_ns
+    if getattr(_type_curve, "_REVISION_ARCHIVO_CARGADO", None) != revision_type_curve:
+        importlib.invalidate_caches()
+        _type_curve = importlib.reload(_type_curve)
+        _type_curve._REVISION_ARCHIVO_CARGADO = revision_type_curve
+    if getattr(_type_curve, "VERSION_ESTILO", 0) != 3:
+        st.error("Actualiza tambien type_curve.py junto con app.py para mostrar los colores nuevos de Type Curve.")
+        st.stop()
+    version_type_curve = Path(ruta_db).stat()
+    historia_type_curve = _type_curve.cargar_historia_type_curve(
+        (str(Path(ruta_db).resolve()), version_type_curve.st_mtime_ns, version_type_curve.st_size),
+        load_prod_dca)
+    _type_curve.mostrar_type_curve(historia_type_curve)
 elif vista == "RGA por yacimiento":
     analisis_rga_yacimiento()
 
@@ -18685,7 +18333,7 @@ elif vista == "RGA por yacimiento":
 
 elif vista == "Screening Pozos":
     import screening_pozos as _screening
-    if getattr(_screening, "VERSION_SCREENING", 0) != 10:
+    if getattr(_screening, "VERSION_SCREENING", 0) != 11:
         _screening = importlib.reload(_screening)
     # Resumen compacto compartido entre todos los yacimientos.
     version_screen = Path(ruta_db).stat().st_mtime_ns
