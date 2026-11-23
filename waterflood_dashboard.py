@@ -71,27 +71,77 @@ def locations(coord,wells,yac):
     return c.dropna(subset=['X','Y']).drop_duplicates('TERMINACION')
 
 
-def map_figure(c,classification,labels=True):
-    data=c.merge(classification,on='TERMINACION',how='left');fig=go.Figure()
-    groups=[('Productores',data['Rol histórico'].eq('Productor'),'circle','#16A566',16),
-            ('Inyectores',data['Rol histórico'].eq('Inyector'),'triangle-up','#1769FF',20),
-            ('Producción e inyección',data.DOBLE.eq(True),'triangle-up','#1769FF',25),
-            ('Sin actividad positiva',data['Rol histórico'].eq('Sin actividad positiva'),'circle','#94A3B8',13)]
-    for name,mask,symbol,color,size in groups:
-        g=data[mask]
-        if g.empty:continue
-        fig.add_trace(go.Scatter(x=g.X,y=g.Y,name=name,mode='markers+text' if labels else 'markers',
-            text=g.TERMINACION,textposition='top center',customdata=g[['TERMINACION','Rol histórico']],
-            marker=dict(symbol=symbol,color=color,size=size,line=dict(color='#12334A',width=1)),
-            hovertemplate='<b>%{customdata[0]}</b><br>%{customdata[1]}<br>X %{x:,.0f} · Y %{y:,.0f}<extra></extra>'))
-        if name=='Producción e inyección':
-            fig.add_trace(go.Scatter(x=g.X,y=g.Y,mode='markers',showlegend=False,hoverinfo='skip',
-                marker=dict(symbol='circle',color='#16A566',size=10,line=dict(color='white',width=1))))
-    fig.update_layout(title=dict(text='<b>Arreglo de pozos seleccionado</b>',x=.02),template='plotly_white',
-        height=540,paper_bgcolor='white',plot_bgcolor='#F8F8FF',font=dict(family='Arial',color='#111827'),
-        legend=dict(orientation='h',y=1.02),margin=dict(l=65,r=25,t=90,b=55),hovermode='closest')
-    fig.update_xaxes(title='UTM X (m)',tickformat=',.0f',gridcolor='#E5E7EB')
-    fig.update_yaxes(title='UTM Y (m)',tickformat=',.0f',gridcolor='#E5E7EB',scaleanchor='x',scaleratio=1)
+def map_figure(c, classification, volumes, labels=True):
+    data = c.merge(classification, on='TERMINACION', how='left')
+    data = data.merge(volumes, on='TERMINACION', how='left')
+    for volume, symbol_size, fallback in [('Np', 'SIZE_NP', 16), ('Winj', 'SIZE_WINJ', 20)]:
+        positive = data[volume].where(data[volume].gt(0))
+        maximum = positive.max()
+        data[symbol_size] = (18 + positive.div(maximum) * 80).fillna(fallback)
+        data[volume + '_HOVER'] = data[volume].map(
+            lambda value: f'{value / 1000:,.1f} mbl' if pd.notna(value) else 'Sin dato'
+        )
+
+    fig = go.Figure()
+    groups = [
+        ('Productores', data['Rol hist\u00f3rico'].eq('Productor'), 'circle', '#16A566', 'SIZE_NP'),
+        ('Inyectores', data['Rol hist\u00f3rico'].eq('Inyector'), 'triangle-up', '#1769FF', 'SIZE_WINJ'),
+        ('Producci\u00f3n e inyecci\u00f3n', data.DOBLE.eq(True), 'triangle-up', '#1769FF', 'SIZE_WINJ'),
+        ('Sin actividad positiva', data['Rol hist\u00f3rico'].eq('Sin actividad positiva'), 'circle', '#94A3B8', None),
+    ]
+    for name, mask, symbol, color, size_column in groups:
+        group = data.loc[mask]
+        if group.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=group.X, y=group.Y, name=name, legendgroup=name,
+            mode='markers+text' if labels else 'markers',
+            text=group.TERMINACION, textposition='middle right', textfont=dict(size=10),
+            customdata=group[['TERMINACION', 'Rol hist\u00f3rico', 'Np_HOVER', 'Winj_HOVER']],
+            marker=dict(symbol=symbol, color=color,
+                        size=group[size_column] if size_column else 13,
+                        sizemode='diameter', line=dict(color='#12334A', width=1)),
+            hovertemplate='<b>%{customdata[0]}</b><br>%{customdata[1]}'
+                          '<br>Np: %{customdata[2]}<br>Winj: %{customdata[3]}'
+                          '<br>X %{x:,.0f} \u00b7 Y %{y:,.0f}<extra></extra>',
+        ))
+        if group.DOBLE.eq(True).all():
+            fig.add_trace(go.Scatter(
+                x=group.X, y=group.Y, mode='markers', legendgroup=name,
+                showlegend=False, hoverinfo='skip',
+                marker=dict(symbol='circle', color='#16A566',
+                            size=np.minimum(group.SIZE_NP, group.SIZE_WINJ * 0.5),
+                            line=dict(color='white', width=1)),
+            ))
+        if size_column:
+            for volume, font_color, position in [
+                ('Np', '#137547', 'top center'),
+                ('Winj', '#1754C1', 'bottom center'),
+            ]:
+                values = group.loc[group[volume].gt(0)]
+                if values.empty:
+                    continue
+                fig.add_trace(go.Scatter(
+                    x=values.X, y=values.Y, mode='markers+text', legendgroup=name,
+                    text='<b>' + volume + ' ' + values[volume + '_HOVER'] + '</b>',
+                    textposition=position,
+                    textfont=dict(color=font_color, size=10),
+                    marker=dict(size=values[size_column], color='rgba(0,0,0,0)'),
+                    showlegend=False, hoverinfo='skip', cliponaxis=False,
+                ))
+    fig.update_layout(
+        title=dict(text='<b>Arreglo de pozos seleccionado</b>', font=dict(size=15)),
+        dragmode='pan',
+        template='plotly_white',
+        height=550,
+        margin=dict(l=20, r=20, t=70, b=20),
+        showlegend=True,
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1,
+                    groupclick='togglegroup', font=dict(size=10)),
+    )
+    axes = dict(showgrid=True, gridcolor='#EAECEE', showline=True, linewidth=1, linecolor='black')
+    fig.update_xaxes(title_text='UTM X', **axes)
+    fig.update_yaxes(title_text='UTM Y', scaleanchor='x', scaleratio=1, **axes)
     return fig
 
 
@@ -143,8 +193,8 @@ def oil_injection_plot(fig,data,wells,semilog=False):
             line=dict(color=injection_colors[index%len(injection_colors)],width=2.2,
                       dash=['dash','dot','dashdot','longdash','longdashdot'][index%5]),
             hovertemplate='<b>'+well+'</b><br>Fecha: %{x|%d/%m/%Y}<br>Inyección: %{y:,.2f} bpd<extra></extra>'))
-    fig.update_layout(title=dict(text='<b>Aceite e inyección por pozo</b>'),height=470,
-        margin=dict(r=80,t=100),yaxis2=dict(title=dict(text='<b>Inyección (bpd)</b>',font=dict(color='#1769FF')),
+    fig.update_layout(title=dict(text='<b>Aceite e inyección por pozo</b>', y=0.98, yref='container', yanchor='top'), height=505,
+        margin=dict(r=80,t=135),yaxis2=dict(title=dict(text='<b>Inyección (bpd)</b>',font=dict(color='#1769FF')),
         overlaying='y',side='right',showgrid=False,zeroline=False,type='log' if semilog else 'linear',
         tickfont=dict(color='#1769FF'),showline=True,linecolor='#1769FF'))
     fig.update_yaxes(title_text='<b>Aceite (bpd)</b>',title_font_color='#137547',selector=dict(anchor='x'))
@@ -313,26 +363,59 @@ def samples_frame(raw,wells,yac,date_col):
 
 def show(raw,coord,calculate,plot,load_pressure,load_salinity,load_labs):
     st.markdown("<div class='section-title'>Waterflood · Historia de producción e inyección</div>",unsafe_allow_html=True)
-    st.caption('Selección de pozos · Variables observadas · Comparación histórica')
     if raw.empty:st.info('No hay historia disponible.');return
     raw=raw.copy();raw['TERMINACION']=raw.TERMINACION.astype(str).str.strip()
     raw['YACIMIENTO']=raw.YACIMIENTO.astype(str).str.strip();raw['FECHA']=pd.to_datetime(raw.FECHA,errors='coerce')
     raw=raw.dropna(subset=['FECHA'])
     with st.container(border=True):
-        a,b=st.columns([1,3])
-        yac=a.selectbox('Yacimiento',sorted(raw.YACIMIENTO.unique()),key='waterflood_yac')
-        field=raw[raw.YACIMIENTO.eq(yac)]
-        available=sorted(field.TERMINACION.unique())
-        wells=b.multiselect('Pozos a analizar',available,default=available[:1],key='waterflood_wells_'+yac)
-        chosen=st.multiselect('Variables del dashboard',list(VARIABLES),default=['Inyección','Aceite','Agua','Corte de agua','Presión','Agua laboratorio'],key='waterflood_vars')
-    if not wells:st.info('Selecciona uno o más pozos para ver su mapa e historia.');return
-    history=field[field.TERMINACION.isin(wells)].copy()
-    duplicate=history.assign(MES=history.FECHA.dt.to_period('M')).duplicated(['TERMINACION','MES'],keep=False)
+        a, b, c = st.columns([1, 3, 1])
+        yac = a.selectbox('Yacimiento', sorted(raw.YACIMIENTO.unique()), key='waterflood_yac')
+        field = raw[raw.YACIMIENTO.eq(yac)]
+        available = sorted(field.TERMINACION.unique())
+        wells = b.multiselect('Pozos a analizar', available, default=available[:1],
+                              key='waterflood_wells_' + yac)
+        labels = c.toggle('Nombres en el mapa', value=True, key='waterflood_labels')
+        if not wells:
+            st.info('Selecciona uno o más pozos para ver su mapa e historia.')
+            return
+
+        selected = field.loc[field.TERMINACION.isin(wells)]
+        classifications = roles(selected)
+        duplicate = selected.assign(MES=selected.FECHA.dt.to_period('M')).duplicated(
+            ['TERMINACION', 'MES'], keep=False
+        )
+        history = selected.loc[~duplicate]
+        data = prepare(history, calculate) if not history.empty else None
+        volumes = (
+            data.groupby('TERMINACION')[['Aceite (bl)', 'Agua inyectada (bl)']]
+            .sum(min_count=1)
+            .rename(columns={'Aceite (bl)': 'Np', 'Agua inyectada (bl)': 'Winj'})
+            .reset_index()
+            if data is not None else pd.DataFrame(columns=['TERMINACION', 'Np', 'Winj'])
+        )
+        coordinates = locations(coord, wells, yac)
+        st.plotly_chart(
+            map_figure(coordinates, classifications, volumes, labels),
+            width='stretch',
+            key='waterflood_map',
+            config=dict(scrollZoom=True, displaylogo=False,
+                        modeBarButtonsToRemove=['lasso2d', 'select2d']),
+        )
+        absent = sorted(set(wells) - set(coordinates.TERMINACION))
+        if absent:
+            st.warning('Sin coordenadas: ' + ', '.join(absent))
+        st.caption('Np y Winj acumuladas de la historia disponible. El símbolo representa la historia completa del pozo en el yacimiento. '
+                   'Se usan coordenadas de fondo y, si faltan, de cima.')
+
+    with st.container(border=True):
+        chosen = st.multiselect(
+            'Variables del dashboard', list(VARIABLES),
+            default=['Inyección', 'Aceite', 'Agua', 'Corte de agua', 'Presión', 'Agua laboratorio'],
+            key='waterflood_vars',
+        )
     if duplicate.any():
         st.warning(f'{int(duplicate.sum())} registros pertenecen a meses duplicados; se excluyen para evitar sumar o elegir datos ambiguos.')
-        history=history.loc[~duplicate]
-    if history.empty:st.info('No quedan registros mensuales únicos para esta selección.');return
-    data=prepare(history,calculate);classifications=roles(field[field.TERMINACION.isin(wells)])
+    if data is None:st.info('No quedan registros mensuales únicos para esta selección.');return
     extra={};warnings=[]
     loaders=[]
     if 'Presión' in chosen:loaders.append(('Presión',load_pressure,'FECHA'))
@@ -345,64 +428,26 @@ def show(raw,coord,calculate,plot,load_pressure,load_salinity,load_labs):
     all_dates=pd.concat([data.FECHA]+[d.FECHA for d in extra.values() if not d.empty],ignore_index=True)
     lo,hi=all_dates.min().date(),all_dates.max().date()
     with st.container(border=True):
-        a,b,c=st.columns([2,1,1])
+        a,b=st.columns([2,1])
         dates=a.date_input('Periodo de análisis',value=(lo,hi),min_value=lo,max_value=hi,key='waterflood_dates_'+yac+'_'+'_'.join(wells))
         semilog=b.toggle('Escala semilogarítmica',key='waterflood_log')
-        labels=c.toggle('Nombres en el mapa',value=True,key='waterflood_labels')
     overlay_oil=False
     if 'Aceite' in chosen:
         overlay_oil=st.toggle('Ver inyecci\u00f3n por pozo junto al aceite',value=True,key='waterflood_oil_injection')
     if len(dates)!=2:st.info('Elige la fecha inicial y final.');return
     start,end=map(pd.Timestamp,dates);end_exclusive=end+pd.Timedelta(days=1)
     filtered=data[data.FECHA.ge(start)&data.FECHA.lt(end_exclusive)]
-    best=None;producer=None;reference='Aceite'
-    producers=[p for p in wells if data.loc[data.TERMINACION.eq(p),'QL'].gt(0).any()]
-    injectors=[p for p in wells if data.loc[data.TERMINACION.eq(p),'Qiny (bpd)'].gt(0).any()]
-    with st.expander('Comparar inyección con respuesta del productor',expanded=True):
-        enabled=st.toggle('Resaltar asociaciones temporales',value=True,key='waterflood_association')
-        if enabled and producers and injectors:
-            a,b,c=st.columns([2,2,1])
-            producer=a.selectbox('Productor de referencia',producers,key='waterflood_reference_'+yac+'_'+'_'.join(wells))
-            reference=b.selectbox('Variable para priorizar',['Aceite','Presión','Líquidos','Agua','Corte de agua','WOR','Salinidad','Agua laboratorio'],key='waterflood_reference_variable')
-            lag=int(c.number_input('Rezago máximo (meses)',min_value=0,max_value=12,value=6,key='waterflood_maxlag'))
-            if reference in SAMPLES:
-                group='Presi\u00f3n' if reference=='Presi\u00f3n' else 'Agua laboratorio' if reference=='Agua laboratorio' else 'Qu\u00edmica'
-                if group not in extra:
-                    loader=load_pressure if group=='Presi\u00f3n' else load_labs if group=='Agua laboratorio' else load_salinity
-                    datecol='FECHA' if group=='Presi\u00f3n' else 'FECHA MUESTREO'
-                    try:
-                        with st.spinner('Cargando datos de referencia...'):extra[group]=samples_frame(loader(),wells,yac,datecol)
-                    except Exception as exc:st.warning(f'No se pudo cargar {group}: {exc}')
-            with st.spinner('Cotejando cambios mensuales observados...'):
-                table=temporal_associations(data,extra,producer,injectors,start,end,lag)
-                best,message=choose_association(table,reference,data,start,end)
-            if best is not None:
-                st.success(f"Asociación positiva más fuerte: {best.Inyector} con {producer} | {reference} | r={best['r cambios']:.2f} | rezago {int(best['Rezago meses'])} meses | {int(best['Meses comparados'])} cambios coincidentes.")
-                st.caption('Dorado: inyector resaltado. Bandas: meses con aumento de la variable de referencia después de un aumento de inyección. Asociación temporal exploratoria; no es un porcentaje de influencia ni demuestra causalidad.')
-            else:st.info(message)
-            if not table.empty:
-                st.dataframe(table.drop(columns='MESES_RESPUESTA'),hide_index=True,use_container_width=True)
-            st.caption('Se comparan cambios entre meses consecutivos, en etapas activas del productor, con 12 pares como mínimo. Sin rellenar meses faltantes. Se corrige la búsqueda entre rezagos, inyectores y variables; se exige consistencia en ambas mitades del periodo.')
-        elif enabled:st.info('Selecciona al menos un productor y un inyector con historia positiva para comparar.')
     kpis=st.columns(4)
     kpis[0].metric('Pozos seleccionados',len(wells))
     for area,label,col in [(kpis[1],'Aceite observado · mbl','Aceite (bl)'),(kpis[2],'Agua observada · mbl','Agua (bl)'),(kpis[3],'Inyección observada · mbl','Agua inyectada (bl)')]:
         value=filtered[col].sum(min_count=1)/1000
         area.metric(label,f'{value:,.1f}' if pd.notna(value) else 'Sin dato')
-    c=locations(coord,wells,yac)
-    mapcol,summary=st.columns([2,1])
-    mapcol.plotly_chart(map_figure(c,classifications,labels),use_container_width=True,key='waterflood_map')
-    with summary:
-        st.markdown('**Pozos del análisis**')
-        st.dataframe(classifications.drop(columns='DOBLE'),hide_index=True,use_container_width=True)
-        st.caption('El símbolo representa la historia completa del pozo en el yacimiento. Las curvas y volúmenes utilizan el periodo seleccionado. Coordenadas de fondo; cima como respaldo.')
-        absent=sorted(set(wells)-set(c.TERMINACION))
-        if absent:st.warning('Sin coordenadas: '+', '.join(absent))
+    with st.expander('Pozos del análisis'):
+        st.dataframe(classifications.drop(columns='DOBLE'), hide_index=True, width='stretch')
     for warning in warnings:st.warning(warning)
     colors={p:px.colors.qualitative.Plotly[i%len(px.colors.qualitative.Plotly)] for i,p in enumerate(wells)}
     st.caption('Gastos según días registrados, igual que Comparativa por pozo. Acumuladas desde el inicio de la historia disponible. Sin dato = hueco; cero observado se conserva en escala lineal. Muestreos: puntos en su fecha real.')
-    columns=st.columns(2)
-    for index,variable in enumerate(chosen):
+    for variable in chosen:
         col,unit=VARIABLES[variable];d=data;monthly=variable not in SAMPLES
         if not monthly:
             group='Presión' if variable=='Presión' else 'Agua laboratorio' if variable=='Agua laboratorio' else 'Química'
@@ -410,32 +455,24 @@ def show(raw,coord,calculate,plot,load_pressure,load_salinity,load_labs):
             if not d.empty and group=='Química':
                 if variable=='Densidad del agua':d=d[d.FUENTE.astype(str).str.upper().eq('STIFF')]
                 elif variable=='API del aceite':d=d[d.FUENTE.astype(str).str.upper().eq('ACEITE')]
-        with columns[index%2]:
-            with st.container(border=True):
-                if d.empty or col not in d:st.info(variable+': sin datos disponibles.');continue
-                d=d[d.FECHA.ge(start)&d.FECHA.lt(end_exclusive)].copy()
-                d[col]=pd.to_numeric(d[col],errors='coerce').replace([np.inf,-np.inf],np.nan)
-                if not monthly:d=d.dropna(subset=[col])
-                if d.empty or not d[col].notna().any():st.info(variable+': sin datos en este periodo.');continue
-                if variable=='Salinidad' and 'FUENTE' in d:
-                    fig=go.Figure()
-                    for source,g in d.groupby('FUENTE'):
-                        partial=history_plot(g,col,variable,unit,wells,plot,colors,semilog,False,(start,end))
-                        fig.update_layout(partial.layout)
-                        for trace in partial.data:
-                            trace.name=trace.name+' · '+str(source)
-                            trace.marker.symbol='diamond' if str(source).upper()=='STIFF' else 'circle'
-                            fig.add_trace(trace)
-                else:fig=history_plot(d,col,variable,unit,wells,plot,colors,semilog,monthly,(start,end))
-                if variable=='Aceite' and overlay_oil:
-                    fig=oil_injection_plot(fig,d,wells,semilog)
-                    st.caption('Aceite: verde continuo, eje izquierdo. Inyecci\u00f3n: azul discontinuo, eje derecho. Cada curva corresponde a un pozo; pulsa su nombre en la leyenda para ocultarla.')
-                fig=highlight_association(fig,best,producer,variable,reference,start,end)
-                st.plotly_chart(fig,use_container_width=True,key='waterflood_chart_'+variable)
-    with st.expander('Datos observados y exportación'):
-        st.dataframe(filtered,hide_index=True,use_container_width=True)
-        st.download_button('Descargar historia seleccionada · CSV',filtered.to_csv(index=False).encode('utf-8-sig'),'waterflood_historia.csv','text/csv')
-        for name,d in extra.items():
-            if not d.empty:
-                subset=d[d.FECHA.ge(start)&d.FECHA.lt(end_exclusive)]
-                st.download_button('Descargar '+name+' · CSV',subset.to_csv(index=False).encode('utf-8-sig'),'waterflood_'+name+'.csv','text/csv',key='waterflood_export_'+name)
+        with st.container(border=True):
+            if d.empty or col not in d:st.info(variable+': sin datos disponibles.');continue
+            d=d[d.FECHA.ge(start)&d.FECHA.lt(end_exclusive)].copy()
+            d[col]=pd.to_numeric(d[col],errors='coerce').replace([np.inf,-np.inf],np.nan)
+            if not monthly:d=d.dropna(subset=[col])
+            if d.empty or not d[col].notna().any():st.info(variable+': sin datos en este periodo.');continue
+            if variable=='Salinidad' and 'FUENTE' in d:
+                fig=go.Figure()
+                for source,g in d.groupby('FUENTE'):
+                    partial=history_plot(g,col,variable,unit,wells,plot,colors,semilog,False,(start,end))
+                    fig.update_layout(partial.layout)
+                    for trace in partial.data:
+                        trace.name=trace.name+' · '+str(source)
+                        trace.marker.symbol='diamond' if str(source).upper()=='STIFF' else 'circle'
+                        fig.add_trace(trace)
+            else:fig=history_plot(d,col,variable,unit,wells,plot,colors,semilog,monthly,(start,end))
+            if variable=='Aceite' and overlay_oil:
+                fig=oil_injection_plot(fig,d,wells,semilog)
+                st.caption('Aceite: verde continuo, eje izquierdo. Inyecci\u00f3n: azul discontinuo, eje derecho. Cada curva corresponde a un pozo; pulsa su nombre en la leyenda para ocultarla.')
+            fig.update_layout(title_font_size=15, legend_font_size=10)
+            st.plotly_chart(fig, width='stretch', key='waterflood_chart_' + variable)

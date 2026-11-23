@@ -241,14 +241,16 @@ def calcular_pozos_activos(historia, modo="tiempo"):
     return soporte[["NP_MB", "N_POZOS"]].rename(columns={"N_POZOS": "N_ACTIVOS"})
 
 
-def agregar_banda_percentiles(fig, percentiles, modo="tiempo", np_desde_cero=False):
+def agregar_banda_percentiles(fig, percentiles, modo="tiempo", np_desde_cero=False, *, semilog=True):
     if percentiles.empty or not {"P10", "P90"}.issubset(percentiles.columns):
         return fig
     eje = "MES_REL" if modo == "tiempo" else "NP_MB"
     curva = percentiles.sort_values(eje).copy()
     if modo == "tiempo":
         curva = curva.set_index(eje).reindex(range(int(curva[eje].min()), int(curva[eje].max()) + 1)).rename_axis(eje).reset_index()
-    valida = np.isfinite(curva.P10) & np.isfinite(curva.P90) & curva.P10.gt(0) & curva.P90.gt(0)
+    valida = np.isfinite(curva.P10) & np.isfinite(curva.P90)
+    valida &= (curva.P10.gt(0) & curva.P90.gt(0) if semilog
+               else curva.P10.ge(0) & curva.P90.ge(0))
     if modo != "tiempo" and not np_desde_cero:
         valida &= curva[eje].gt(0)
     indices = np.flatnonzero(valida.to_numpy())
@@ -268,7 +270,7 @@ def agregar_banda_percentiles(fig, percentiles, modo="tiempo", np_desde_cero=Fal
     return fig
 
 
-def crear_grafico(historia, p50, modo="tiempo", mostrar_media=True, destacado=None, np_desde_cero=False, mostrar_activos=True, activos=None):
+def crear_grafico(historia, p50, modo="tiempo", mostrar_media=True, destacado=None, np_desde_cero=False, mostrar_activos=True, activos=None, *, semilog=True):
     fig = go.Figure()
     xcol = "MES_REL" if modo == "tiempo" else "NP_MB"
     for pozo, h in historia.groupby("POZO_ID", sort=False):
@@ -276,7 +278,7 @@ def crear_grafico(historia, p50, modo="tiempo", mostrar_media=True, destacado=No
         # Reindexa solo para dibujar huecos; no agrega observaciones al P50.
         if modo == "tiempo":
             h = h.set_index("MES_REL").reindex(range(h["MES_REL"].min(), h["MES_REL"].max() + 1)).rename_axis("MES_REL").reset_index()
-        q = h["QO"].where(h["QO"].gt(0))
+        q = h["QO"].where(h["QO"].gt(0) if semilog else h["QO"].ge(0))
         valores_np = h["NP_NORMALIZADA_MB"] if "NP_NORMALIZADA_MB" in h else h["NP_MB"]
         eje_x = h[xcol] if modo == "tiempo" else valores_np.where(valores_np.ge(0) if np_desde_cero else valores_np.gt(0))
         resaltado = pozo == destacado
@@ -289,7 +291,7 @@ def crear_grafico(historia, p50, modo="tiempo", mostrar_media=True, destacado=No
             hovertemplate=(f"<b>{pozo}</b><br>Mes: %{{customdata[0]:.0f}}"
                            "<br>Qo: %{y:,.2f} bpd<br>Np original: %{customdata[1]:,.2f} mb"
                            "<br>Np normalizada: %{customdata[2]:,.2f} mb<extra></extra>")))
-    agregar_banda_percentiles(fig, p50, modo, np_desde_cero)
+    agregar_banda_percentiles(fig, p50, modo, np_desde_cero, semilog=semilog)
     conteo_activos = activos if activos is not None else calcular_pozos_activos(historia, modo)
     if mostrar_activos and not conteo_activos.empty:
         puntos_activos = conteo_activos[xcol]
@@ -322,13 +324,14 @@ def crear_grafico(historia, p50, modo="tiempo", mostrar_media=True, destacado=No
             puntos_x = curva[xcol]
             if modo != "tiempo" and not np_desde_cero:
                 puntos_x = puntos_x.where(puntos_x.gt(0))
+            gasto = curva[columna].where(curva[columna].gt(0) if semilog else curva[columna].ge(0))
             es_percentil = columna in ("P10", "P50", "P90")
             grupo_percentil = f"tc_{columna.lower()}" if es_percentil else ""
             if es_percentil:
-                _agregar_halo(fig, puntos_x, curva[columna].where(curva[columna].gt(0)),
+                _agregar_halo(fig, puntos_x, gasto,
                               color, grupo_percentil, f"Brillo del {columna}")
             # Mismo motor WebGL: la ultima traza P50 queda sobre los pozos.
-            fig.add_trace(go.Scattergl(x=puntos_x, y=curva[columna].where(curva[columna].gt(0)),
+            fig.add_trace(go.Scattergl(x=puntos_x, y=gasto,
                 name=nombre, mode="lines", legendgroup=grupo_percentil,
                 line=dict(color=color, width=ancho, dash=ESTILO_CURVAS if es_percentil else "solid"), marker=dict(size=7, color=color, line=dict(color="#FFE6AD", width=1)) if columna == "P50" else dict(size=4), connectgaps=False,
                 customdata=curva[["N_POZOS"]].to_numpy(),
@@ -338,7 +341,7 @@ def crear_grafico(historia, p50, modo="tiempo", mostrar_media=True, destacado=No
         font=dict(family="Arial", size=13, color="#111827"),
         margin=dict(l=65, r=75 if mostrar_activos else 22, t=35, b=75), hovermode="closest", dragmode="zoom",
         legend=dict(orientation="h", x=0, y=1.04, font=dict(size=11, color="#475569")),
-        uirevision=f"tc:v{VERSION_ESTILO}:{modo}:{np_desde_cero}:{','.join(sorted(historia.POZO_ID.unique()))}")
+        uirevision=f"tc:v{VERSION_ESTILO}:{modo}:{np_desde_cero}:{semilog}:{','.join(sorted(historia.POZO_ID.unique()))}")
     eje = dict(showline=True, linewidth=1.2, linecolor="#111827", mirror=True,
                showgrid=True, gridcolor="#E5E7EB", gridwidth=0.7, zeroline=False,
                ticks="outside", tickfont=dict(size=18, color="#111827", family="Arial"),
@@ -348,9 +351,10 @@ def crear_grafico(historia, p50, modo="tiempo", mostrar_media=True, destacado=No
         type="linear" if modo == "tiempo" or np_desde_cero else "log", **eje)
     if modo != "tiempo" and np_desde_cero:
         fig.update_xaxes(rangemode="tozero")
-    fig.update_yaxes(title="<b>Gasto de aceite, Qo (bpd)</b>", type="log",
-        tickvals=[0.1, 1, 10, 100, 1000, 10000, 100000],
-        ticktext=["0.1", "1", "10", "100", "1,000", "10,000", "100,000"], **eje)
+    escala_qo = dict(type="log", tickvals=[0.1, 1, 10, 100, 1000, 10000, 100000],
+                     ticktext=["0.1", "1", "10", "100", "1,000", "10,000", "100,000"]) if semilog else dict(
+                         type="linear", rangemode="tozero", tickformat=",.0f")
+    fig.update_yaxes(title="<b>Gasto de aceite, Qo (bpd)</b>", **escala_qo, **eje)
     if mostrar_activos:
         max_activos = int(conteo_activos.N_ACTIVOS.max()) if not conteo_activos.empty else 0
         fig.update_layout(yaxis2=dict(
@@ -403,6 +407,10 @@ def _cambio_pozo(clave, pozo, widget):
     st.session_state[clave] = sorted(elegidos)
 
 
+def _cambio_busqueda_pozos(clave, widget):
+    st.session_state[clave] = list(st.session_state[widget])
+
+
 def _marcar_pozos(clave, yacimiento, opciones, marcar):
     st.session_state[clave] = list(opciones) if marcar else []
     for pozo in opciones:
@@ -426,28 +434,23 @@ def mostrar_type_curve(historia):
             opciones = sorted(base.POZO_ID.unique())
             clave = f"tc_seleccion_{yacimiento}"
             st.session_state.setdefault(clave, list(opciones))
-            elegidos = set(st.session_state[clave]).intersection(opciones)
+            st.session_state[clave] = sorted(set(st.session_state[clave]).intersection(opciones))
             st.markdown("### Pozos de la curva tipo")
-            st.caption(f"{len(elegidos)} de {len(opciones)} pozos / terminaciones seleccionados")
             todos, ninguno = st.columns(2)
             todos.button("Todos", key="tc_todos", on_click=_marcar_pozos,
                 args=(clave, yacimiento, opciones, True), width="stretch")
             ninguno.button("Ninguno", key="tc_ninguno", on_click=_marcar_pozos,
                 args=(clave, yacimiento, opciones, False), width="stretch")
-            busqueda = st.text_input("Buscar pozo", placeholder="Nombre o terminaci\u00f3n...", key="tc_buscar")
             nombres = base.drop_duplicates("POZO_ID").set_index("POZO_ID")["POZO"].to_dict()
-            with st.container(height=350, border=False):
-                visibles = 0
-                for pozo in opciones:
-                    etiqueta = f"{nombres[pozo]} \u00b7 {pozo}" if nombres[pozo] != pozo else pozo
-                    if busqueda.casefold() not in etiqueta.casefold():
-                        continue
-                    visibles += 1
-                    widget = _widget_pozo(yacimiento, pozo)
-                    st.session_state[widget] = pozo in elegidos
-                    st.checkbox(etiqueta, key=widget, on_change=_cambio_pozo, args=(clave, pozo, widget))
-                if not visibles:
-                    st.caption("No hay pozos que coincidan con la b\u00fasqueda.")
+            widget_busqueda = f"tc_buscar_multiple_{yacimiento}"
+            st.session_state[widget_busqueda] = list(st.session_state[clave])
+            elegidos = set(st.multiselect(
+                "Buscar pozo", opciones, key=widget_busqueda,
+                on_change=_cambio_busqueda_pozos, args=(clave, widget_busqueda),
+                format_func=lambda pozo: f"{nombres[pozo]} \u00b7 {pozo}" if nombres[pozo] != pozo else pozo,
+                placeholder="Escribe y selecciona los pozos...",
+            ))
+            st.caption(f"{len(elegidos)} de {len(opciones)} pozos / terminaciones seleccionados")
             st.markdown("### Historia considerada")
             corte = st.date_input("Fecha de corte", value=base.FECHA.max().date(),
                 min_value=base.FECHA.min().date(), max_value=base.FECHA.max().date(),
@@ -493,6 +496,9 @@ def mostrar_type_curve(historia):
             st.markdown("### Curva tipo de producci\u00f3n de aceite")
             vista = st.radio("Relaci\u00f3n de an\u00e1lisis", ["Gasto vs. tiempo", "Gasto vs. acumulada"],
                 horizontal=True, key="tc_modo", label_visibility="collapsed")
+            escala_qo = st.radio("Escala del gasto de aceite (bpd)", ["Lineal", "Logar\u00edtmica"],
+                                 index=1, horizontal=True, key="tc_escala_qo")
+            semilog = escala_qo != "Lineal"
             media = st.checkbox("Mostrar media de la muestra", value=True, key="tc_media")
             mostrar_activos = st.checkbox("Mostrar pozos activos", value=True, key="tc_activos")
             if not elegidos:
@@ -505,7 +511,7 @@ def mostrar_type_curve(historia):
             np_desde_cero = False
             if modo == "acumulada":
                 escala_np = st.radio("Escala de Np normalizada",
-                    ["Desde Np = 0", "Log-log (Np > 0)"], horizontal=True, key="tc_escala_np")
+                    ["Desde Np = 0", "Logar\u00edtmica (Np > 0)"], horizontal=True, key="tc_escala_np")
                 np_desde_cero = escala_np == "Desde Np = 0"
             destacar = st.selectbox("Resaltar pozo", ["Ninguno"] + sorted(seleccion.POZO_ID.unique()),
                                     key=f"tc_destacar_{yacimiento}")
@@ -514,7 +520,7 @@ def mostrar_type_curve(historia):
                                                int(minimo), incluir_cero=True))
             activos = calcular_pozos_activos(seleccion, modo)
             fig = crear_grafico(seleccion, p50, modo, media, destacar, np_desde_cero,
-                                mostrar_activos, activos)
+                                mostrar_activos, activos, semilog=semilog)
             if perfil_exponencial is not None:
                 agregar_perfil_exponencial(fig, perfil_exponencial, modo, np_desde_cero)
                 agregar_resultados_perfil_propuesto(fig, perfil_exponencial, qi, di, tiempo_di, d2, limite)
@@ -524,9 +530,9 @@ def mostrar_type_curve(historia):
                         "toImageButtonOptions": {"format": "png", "filename": "type_curve", "scale": 2}})
             if p50.empty:
                 st.info("No hay valores comunes con el m\u00ednimo de pozos requerido para P50. Reduce el m\u00ednimo o ampl\u00eda la historia.")
-            elif not p50.P50.gt(0).any():
+            elif semilog and not p50.P50.gt(0).any():
                 st.info("P50 calculado: 0 bpd en el intervalo. El valor cero no se representa en el eje logar\u00edtmico de gasto.")
-            elif modo == "acumulada" and not np_desde_cero and not (p50.NP_MB.gt(0) & p50.P50.gt(0)).any():
+            elif modo == "acumulada" and not np_desde_cero and not (p50.NP_MB.gt(0) & (p50.P50.gt(0) if semilog else p50.P50.ge(0))).any():
                 st.info("P50 disponible en Np = 0. Selecciona 'Desde Np = 0' para verlo.")
             k1, k2, k3 = st.columns(3)
             k1.metric("Pozos con historia", seleccion.POZO_ID.nunique())

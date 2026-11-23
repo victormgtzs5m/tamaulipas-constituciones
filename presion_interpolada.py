@@ -3,6 +3,66 @@ import numpy as np
 import pandas as pd
 
 
+VERSION_AJUSTE_PRESION = 2
+
+
+def ajustar_tendencia_presion(eje_x, presion, normalizado=False):
+    """Ajusta dentro del intervalo y rango medidos, agrupando fechas repetidas."""
+    origen = None
+    if normalizado:
+        x = np.asarray(eje_x, dtype=float)
+    else:
+        fechas = pd.DatetimeIndex(eje_x)
+        origen = fechas.min()
+        x = (fechas - origen).total_seconds().to_numpy() / 86400
+
+    puntos = pd.DataFrame({"x": x, "p": np.asarray(presion, dtype=float)})
+    puntos = puntos.loc[np.isfinite(puntos.x) & np.isfinite(puntos.p)]
+    medidos = puntos.groupby("x").p.mean()
+    if len(medidos) < 2:
+        return None
+
+    x = medidos.index.to_numpy(dtype=float)
+    y = medidos.to_numpy()
+    escala = x[-1] - x[0]
+    z = (x - x[0]) / escala
+    malla = np.linspace(0, 1, 200)
+    inferior, superior = puntos.p.min(), puntos.p.max()
+
+    def ajustar(grado):
+        matriz = np.vander(z, grado + 1, increasing=True)
+        coef = np.linalg.lstsq(matriz, y, rcond=None)[0]
+        curva = np.polynomial.polynomial.polyval(malla, coef)
+        # Residuo de validacion al retirar cada fecha, calculado por leverage.
+        q, _ = np.linalg.qr(matriz)
+        denominador = 1 - np.square(q).sum(axis=1)
+        error = np.inf
+        if (denominador > 1e-9).all():
+            error = np.mean(np.square((y - matriz @ coef) / denominador))
+        return curva, error
+
+    if len(medidos) in (3, 4):
+        from scipy.interpolate import PchipInterpolator
+
+        # Incluir las mediciones en la malla, incluso si dos estan muy cerca.
+        malla = np.union1d(malla, z)
+        curva = PchipInterpolator(z, y, extrapolate=False)(malla)
+    else:
+        curva, error = ajustar(1)
+        if len(medidos) >= 6:
+            cuadratica, error_cuadratico = ajustar(2)
+            tolerancia = 1e-9 * max(1, abs(inferior), abs(superior))
+            if (error_cuadratico < 0.8 * error
+                    and cuadratica.min() >= inferior - tolerancia
+                    and cuadratica.max() <= superior + tolerancia):
+                curva = cuadratica
+
+    x_ajustado = x[0] + malla * escala
+    if origen is not None:
+        x_ajustado = origen + pd.to_timedelta(x_ajustado, unit="D")
+    return x_ajustado, np.clip(curva, inferior, superior)
+
+
 def _clave(s):
     return s.astype(str).str.strip().str.upper().str.replace(r"\s+", " ", regex=True)
 

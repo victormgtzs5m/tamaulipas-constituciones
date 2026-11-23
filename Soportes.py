@@ -1,5 +1,5 @@
-archivo_excel = r"C:\Users\VMGS\OneDrive - CONSORCIO PETROLERO 5M DEL GOLFO\Escritorio\Resplado C5M\Web\Base.xlsx"      # cambia por el nombre de tu archivo
-archivo_db = r"C:\Users\VMGS\OneDrive - CONSORCIO PETROLERO 5M DEL GOLFO\Escritorio\Resplado C5M\Web\prodcoord.db"
+archivo_excel = r"C:\Users\VMGS\OneDrive - CONSORCIO PETROLERO 5M DEL GOLFO\Documentos\GitHub\tamaulipas-constituciones\Base.xlsx"      # cambia por el nombre de tu archivo
+archivo_db = r"C:\Users\VMGS\OneDrive - CONSORCIO PETROLERO 5M DEL GOLFO\Documentos\GitHub\tamaulipas-constituciones\prodcoord.db"
 
 # Leer hojas
 prod = pd.read_excel(archivo_excel, sheet_name="TMPL-CONST")

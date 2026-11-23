@@ -32,7 +32,8 @@ if getattr(_idpi, "VERSION_MODELO", 0) != 7:
 calcular_idpi = _idpi.calcular_idpi
 interpolar_idpi = _idpi.interpolar_idpi
 import presion_interpolada as _presion
-if "solo_mapa" not in inspect.signature(_presion.estimar_presiones_para_pozos).parameters:
+if (getattr(_presion, "VERSION_AJUSTE_PRESION", 0) != 2
+        or "solo_mapa" not in inspect.signature(_presion.estimar_presiones_para_pozos).parameters):
     _presion = importlib.reload(_presion)
 unir_presiones_coordenadas = _presion.unir_presiones_coordenadas
 evaluar_kriging_presion = _presion.evaluar_kriging_presion
@@ -5505,7 +5506,8 @@ def mapa_burbujas(
         x_col_arg,
         y_col_arg,
         usar_gis=False,
-        ver_todos=False
+        ver_todos=False,
+        meses_visibles=None,
     ):
         if ver_todos or datos_mapa.empty:
             return pd.DataFrame(), []
@@ -5584,6 +5586,10 @@ def mapa_burbujas(
             14 + (anim["WINJ_BLS_ANIM"] / max_iny_anim) * 75,
             14
         )
+        if meses_visibles is not None:
+            fechas_anim = fechas_anim[-meses_visibles:]
+            anim = anim.loc[anim[COL_FECHA].ge(fechas_anim[0])].copy()
+
         anim["FECHA_TXT"] = anim[COL_FECHA].dt.strftime("%d/%m/%Y")
         anim["ETIQUETA_NP_ANIM"] = anim["NP_BLS_ANIM"].map(lambda v: f"{v/1000:,.1f}" if v > 0 else "")
         anim["ETIQUETA_INY_ANIM"] = anim["WINJ_BLS_ANIM"].map(lambda v: f"{v/1000:,.1f}" if v > 0 else "")
@@ -5993,6 +5999,15 @@ def mapa_burbujas(
                 "AREA_M2":"Área [m²]","RADIO_M":"Radio [m]","ESTADO_DATOS":"Estado del cálculo",
                 "EN_MAPA":"En mapa","MOTIVO":"Motivo"}), hide_index=True, width="stretch")
 
+    meses_visibles = None
+    if modulo_animado and animar_tiempo and not seleccion_animada and not ver_todos_campo and yac_mapa == "JSA":
+        periodos = {"\u00daltimos 10 a\u00f1os": 120, "\u00daltimos 20 a\u00f1os": 240, "Historia completa": None}
+        periodo = salida_mapa_burbujas.selectbox(
+            "Periodo de la animaci\u00f3n", list(periodos), key="periodo_animado_jsa",
+            help="Los acumulados incluyen la historia anterior al primer mes mostrado.",
+        )
+        meses_visibles = periodos[periodo]
+
     if tipo_mapa == "Mapa GIS":
 
         mapa_gis = convertir_utm_a_latlon(mapa, x_col, y_col)
@@ -6008,7 +6023,8 @@ def mapa_burbujas(
                 x_col,
                 y_col,
                 usar_gis=True,
-                ver_todos=ver_todos_campo
+                ver_todos=ver_todos_campo,
+                meses_visibles=meses_visibles
             )
 
             if anim_gis.empty or not fechas_anim:
@@ -6085,18 +6101,18 @@ def mapa_burbujas(
 
                 frames_gis = []
                 steps_gis = []
-                for indice_anim, fecha_anim in enumerate(fechas_anim):
-                    datos_frame = anim_gis[anim_gis[COL_FECHA] == fecha_anim].copy()
+                for indice_anim, (fecha_anim, datos_frame) in enumerate(anim_gis.groupby(COL_FECHA, sort=True)):
                     datos_np = datos_frame[datos_frame["NP_BLS_ANIM"] > 0].copy()
                     datos_iny = datos_frame[datos_frame["WINJ_BLS_ANIM"] > 0].copy()
                     nombre_frame = pd.to_datetime(fecha_anim).strftime("%d/%m/%Y")
 
-                    frames_gis.append(go.Frame(
+                    frames_gis.append(dict(
                         name=nombre_frame,
-                        layout=go.Layout(annotations=totales_animacion(datos_frame), sliders=[dict(active=indice_anim)]),
+                        layout=dict(annotations=totales_animacion(datos_frame), sliders=[dict(active=indice_anim)]),
                         traces=[0, 1],
                         data=[
-                            go.Scattermapbox(
+                            dict(
+                                type="scattermapbox",
                                 lat=datos_np["LAT"],
                                 lon=datos_np["LON"],
                                 mode="markers+text" if (mostrar_nombres or mostrar_etiquetas_burbujas) else "markers",
@@ -6105,7 +6121,8 @@ def mapa_burbujas(
                                 marker=dict(size=datos_np["SIZE_NP_ANIM"], color=datos_np["COLOR_NP_ANIM"], opacity=1),
                                 customdata=datos_np[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT"]]
                             ),
-                            go.Scattermapbox(
+                            dict(
+                                type="scattermapbox",
                                 lat=datos_iny["LAT"],
                                 lon=datos_iny["LON"],
                                 mode="markers+text" if mostrar_etiquetas_burbujas else "markers",
@@ -7314,7 +7331,8 @@ def mapa_burbujas(
             x_col,
             y_col,
             usar_gis=False,
-            ver_todos=ver_todos_campo
+            ver_todos=ver_todos_campo,
+            meses_visibles=meses_visibles
         )
 
         if anim_utm.empty or not fechas_anim:
@@ -7380,11 +7398,7 @@ def mapa_burbujas(
                     "<extra></extra>"
             ))
 
-            # El reproductor sincronizado recibe JSON; evitar validar cada frame
-            # como objetos Plotly y volver a validarlos al copiar la figura.
-            frame_anim = dict if seleccion_animada else go.Frame
-            layout_anim = dict if seleccion_animada else go.Layout
-            scatter_anim = dict if seleccion_animada else go.Scatter
+            # Plotly valida los cuadros al asignarlos a la figura.
             frames_utm = []
             steps_utm = []
             for indice_anim, (fecha_anim, datos_frame) in enumerate(anim_utm.groupby(COL_FECHA, sort=True)):
@@ -7392,12 +7406,12 @@ def mapa_burbujas(
                 datos_iny = datos_frame[datos_frame["WINJ_BLS_ANIM"] > 0].copy()
                 nombre_frame = pd.to_datetime(fecha_anim).strftime("%d/%m/%Y")
 
-                frames_utm.append(frame_anim(
+                frames_utm.append(dict(
                     name=nombre_frame,
-                    layout=layout_anim(annotations=totales_animacion(datos_frame), sliders=[dict(active=indice_anim)]),
+                    layout=dict(annotations=totales_animacion(datos_frame), sliders=[dict(active=indice_anim)]),
                     traces=[idx_np_anim, idx_iny_anim],
                     data=[
-                        scatter_anim(
+                        dict(
                             x=datos_np[x_col],
                             y=datos_np[y_col],
                             mode="markers+text" if (mostrar_nombres or mostrar_etiquetas_burbujas) else "markers",
@@ -7412,7 +7426,7 @@ def mapa_burbujas(
                             ),
                             customdata=datos_np[["POZO", COL_YAC, "NP_BLS_ANIM", "WINJ_BLS_ANIM", "FECHA_TXT", "NP_MES"]].to_numpy().tolist()
                         ),
-                        scatter_anim(
+                        dict(
                             x=datos_iny[x_col],
                             y=datos_iny[y_col],
                             mode="markers+text" if mostrar_etiquetas_burbujas else "markers",
@@ -17800,122 +17814,76 @@ elif vista == "Comparativa por pozo":
                 if not pres_comp.empty:
                     fig_pres = go.Figure()
                     puntos_regresion_global = []
+                    x_title = "Tiempo normalizado, mediciones" if normalizar_tiempo else "Fecha"
+                    hover_x = "Medici\u00f3n normalizada: %{x}" if normalizar_tiempo else "Fecha: %{x|%d/%m/%Y}"
+                    hover_x_ajuste = "Medici\u00f3n normalizada: %{x:.1f}" if normalizar_tiempo else hover_x
+
+                    def agregar_tendencia(x, y, nombre, color, dash):
+                        ajuste = _presion.ajustar_tendencia_presion(x, y, normalizar_tiempo)
+                        if ajuste is None:
+                            return
+                        x_ajuste, y_ajuste = ajuste
+                        fig_pres.add_trace(go.Scatter(
+                            x=x_ajuste, y=y_ajuste, mode="lines", name=nombre,
+                            line=dict(width=2, color=color, dash=dash),
+                            hovertemplate=(f"<b>{nombre}</b><br>" + hover_x_ajuste
+                                           + "<br>Presi\u00f3n estimada: %{y:,.2f}<extra></extra>"),
+                        ))
 
                     for pozo in pozos_sel_comp:
-                        dfi_pres = pres_comp[
+                        dfi_pres = pres_comp.loc[
                             pres_comp["TERMINACION"].astype(str).str.strip() == str(pozo).strip()
-                        ].copy()
-
+                        ]
+                        dfi_pres = dfi_pres.loc[np.isfinite(dfi_pres["PRESION"])]
                         if dfi_pres.empty:
                             continue
 
-                        if normalizar_tiempo:
-                            dfi_pres[COL_TIEMPO_NORM] = range(len(dfi_pres))
-                            x_values = dfi_pres[COL_TIEMPO_NORM]
-                            hover_x = "Medición normalizada: %{x}"
-                            x_title = "Tiempo normalizado, mediciones"
-                        else:
-                            x_values = dfi_pres["FECHA"]
-                            hover_x = "Fecha: %{x|%d/%m/%Y}"
-                            x_title = "Fecha"
+                        x_values = np.arange(len(dfi_pres)) if normalizar_tiempo else dfi_pres["FECHA"].to_numpy()
+                        y_values = dfi_pres["PRESION"].to_numpy(dtype=float)
+                        color = color_por_pozo_comp.get(str(pozo).strip())
+                        puntos_regresion_global.append(pd.DataFrame({"X": x_values, "PRESION": y_values}))
 
-                        puntos_pozo_global = pd.DataFrame({
-                            "X_GLOBAL": x_values.to_numpy(),
-                            "PRESION": dfi_pres["PRESION"].to_numpy(dtype=float)
-                        })
-                        puntos_regresion_global.append(puntos_pozo_global)
-
-                        fig_pres.add_trace(
-                            go.Scatter(
-                                x=x_values,
-                                y=dfi_pres["PRESION"],
-                                mode="markers",
-                                name=f"{pozo}",
-                                marker=dict(
-                                    size=7,
-                                    color=color_por_pozo_comp.get(str(pozo).strip())
-                                ),
-                                connectgaps=False,
-                                hovertemplate=
-                                    f"<b>Pozo: {pozo}</b><br>" +
-                                    hover_x + "<br>" +
-                                    "Presión: %{y:,.2f}<extra></extra>"
-                            )
+                        fig_pres.add_trace(go.Scatter(
+                            x=x_values, y=y_values, mode="markers", name=str(pozo),
+                            marker=dict(size=[12] + [7] * (len(dfi_pres) - 1), color=color,
+                                        opacity=[1.0] + [0.75] * (len(dfi_pres) - 1)),
+                            connectgaps=False,
+                            hovertemplate=(f"<b>Pozo: {pozo}</b><br>" + hover_x
+                                           + "<br>Presi\u00f3n: %{y:,.2f}<extra></extra>"),
+                        ))
+                        primera_fecha = dfi_pres["FECHA"].iloc[0].strftime("%d/%m/%Y")
+                        fig_pres.add_annotation(
+                            x=x_values[0], y=y_values[0],
+                            text=f"<b>{pozo}</b><br>{y_values[0]:,.2f} kg/cm\u00b2 \u00b7 {primera_fecha}",
+                            showarrow=True, arrowhead=0, arrowcolor=color, arrowwidth=1,
+                            ax=24, ay=-26 - 20 * ((len(puntos_regresion_global) - 1) % 3),
+                            xanchor="left", align="left", bgcolor="rgba(255,255,255,0.92)",
+                            bordercolor=color, borderpad=3, font=dict(size=11, color="#111827"),
                         )
+                        agregar_tendencia(x_values, y_values, f"Tendencia {pozo}", color, "solid")
 
-                    # Una sola tendencia global con todos los puntos de los
-                    # pozos seleccionados. El grado puede modificarse aquí.
-                    if puntos_regresion_global:
-                        pres_reg_global = pd.concat(
-                            puntos_regresion_global, ignore_index=True
-                        ).dropna(subset=["X_GLOBAL", "PRESION"])
-
-                        if normalizar_tiempo:
-                            x_reg_global = pd.to_numeric(
-                                pres_reg_global["X_GLOBAL"], errors="coerce"
-                            ).to_numpy(dtype=float)
-                            fecha_base_global = None
-                        else:
-                            fechas_reg_global = pd.to_datetime(
-                                pres_reg_global["X_GLOBAL"], errors="coerce"
-                            )
-                            fecha_base_global = fechas_reg_global.min()
-                            x_reg_global = (
-                                fechas_reg_global - fecha_base_global
-                            ).dt.total_seconds().to_numpy(dtype=float) / 86400.0
-
-                        y_reg_global = pres_reg_global["PRESION"].to_numpy(dtype=float)
-                        validos_global = np.isfinite(x_reg_global) & np.isfinite(y_reg_global)
-                        x_reg_global = x_reg_global[validos_global]
-                        y_reg_global = y_reg_global[validos_global]
-                        n_x_unicos_global = len(np.unique(x_reg_global))
-
-                        if n_x_unicos_global >= 2:
-                            grado_reg_global = 5 if n_x_unicos_global >= 6 else n_x_unicos_global - 1
-                            coef_reg_global = np.polyfit(
-                                x_reg_global, y_reg_global, grado_reg_global
-                            )
-                            x_suave_global = np.linspace(
-                                x_reg_global.min(), x_reg_global.max(), 200
-                            )
-                            y_suave_global = np.polyval(coef_reg_global, x_suave_global)
-
-                            if normalizar_tiempo:
-                                x_tendencia_global = x_suave_global
-                                hover_x_global = "Medición normalizada: %{x:.1f}"
-                            else:
-                                x_tendencia_global = fecha_base_global + pd.to_timedelta(
-                                    x_suave_global, unit="D"
-                                )
-                                hover_x_global = "Fecha: %{x|%d/%m/%Y}"
-
-                            fig_pres.add_trace(go.Scatter(
-                                x=x_tendencia_global,
-                                y=y_suave_global,
-                                mode="lines",
-                                name="Tendencia global",
-                                line=dict(width=2, color="#111827", dash="dash"),
-                                hovertemplate=(
-                                    "<b>Tendencia global</b><br>" +
-                                    hover_x_global + "<br>" +
-                                    "Presión estimada: %{y:,.2f}<extra></extra>"
-                                )
-                            ))
+                    if len(puntos_regresion_global) > 1:
+                        global_pres = pd.concat(puntos_regresion_global, ignore_index=True)
+                        agregar_tendencia(global_pres["X"], global_pres["PRESION"],
+                                          "Tendencia global", "#111827", "dash")
 
                     fig_pres.update_layout(
                         title=dict(
                             text="<b>Presión por pozo</b>",
                             x=0.02,
                             xanchor="left",
+                            y=0.98,
+                            yref="container",
+                            yanchor="top",
                             font=dict(size=20, family="Arial Black", color="#111827")
                         ),
                         template="plotly_white",
                         hovermode="x unified",
-                        height=450,
+                        height=505,
                         plot_bgcolor="#F8F8FF",
                         paper_bgcolor="white",
                         font=dict(family="Arial", size=13, color="#111827"),
-                        margin=dict(l=70, r=40, t=90, b=70),
+                        margin=dict(l=70, r=40, t=145, b=70),
                         legend=dict(
                             orientation="h",
                             yanchor="bottom",
